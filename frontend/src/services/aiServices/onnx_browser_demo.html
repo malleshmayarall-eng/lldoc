@@ -1,0 +1,317 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Paragraph Model ONNX Inference</title>
+  <script src="https://cdn.jsdelivr.net/npm/onnxruntime-web/dist/ort.min.js"></script>
+  <style>
+    :root {
+      color-scheme: light;
+      font-family: "Inter", system-ui, -apple-system, sans-serif;
+    }
+    body {
+      margin: 24px;
+      background: #f5f7fb;
+      color: #1f2937;
+    }
+    h2 {
+      margin-bottom: 16px;
+    }
+    .card {
+      background: #ffffff;
+      border-radius: 16px;
+      padding: 20px;
+      box-shadow: 0 10px 30px rgba(15, 23, 42, 0.08);
+      margin-bottom: 18px;
+    }
+    textarea {
+      width: 100%;
+      min-height: 120px;
+      padding: 12px 14px;
+      border: 1px solid #e2e8f0;
+      border-radius: 12px;
+      font-size: 14px;
+      background: #f8fafc;
+      resize: vertical;
+    }
+    button {
+      margin-top: 12px;
+      background: #2563eb;
+      color: #fff;
+      border: none;
+      padding: 10px 18px;
+      border-radius: 10px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: transform 0.1s ease, box-shadow 0.1s ease;
+    }
+    button:hover {
+      transform: translateY(-1px);
+      box-shadow: 0 8px 16px rgba(37, 99, 235, 0.2);
+    }
+    .scores-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+      gap: 16px;
+    }
+    .score-card {
+      background: #f8fafc;
+      border-radius: 14px;
+      padding: 14px;
+      text-align: center;
+      border: 1px solid #e2e8f0;
+    }
+    .score-title {
+      font-size: 13px;
+      font-weight: 600;
+      margin-bottom: 12px;
+    }
+    .knob {
+      position: relative;
+      width: 120px;
+      height: 120px;
+      margin: 0 auto 8px;
+      border-radius: 50%;
+      background: conic-gradient(#22c55e 0deg, #eab308 120deg, #ef4444 240deg, #e5e7eb 240deg 360deg);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    .knob::after {
+      content: "";
+      width: 86px;
+      height: 86px;
+      background: #ffffff;
+      border-radius: 50%;
+      position: absolute;
+      box-shadow: inset 0 0 10px rgba(15, 23, 42, 0.05);
+    }
+    .needle {
+      position: absolute;
+      width: 2px;
+      height: 46px;
+      background: #111827;
+      top: 14px;
+      transform-origin: bottom center;
+      border-radius: 2px;
+      z-index: 2;
+    }
+    .score-value {
+      position: relative;
+      z-index: 3;
+      font-weight: 700;
+      font-size: 18px;
+    }
+    .status-pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 6px 12px;
+      border-radius: 999px;
+      font-weight: 600;
+      font-size: 13px;
+      background: #e2e8f0;
+    }
+    .status-pill.ok {
+      background: #dcfce7;
+      color: #166534;
+    }
+    .status-pill.bad {
+      background: #fee2e2;
+      color: #991b1b;
+    }
+    .metadata {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px;
+      align-items: center;
+    }
+    .json-output {
+      background: #0f172a;
+      color: #e2e8f0;
+      padding: 12px;
+      border-radius: 12px;
+      font-size: 12px;
+      overflow: auto;
+      max-height: 220px;
+    }
+  </style>
+</head>
+<body>
+  <h2>Paragraph Model ONNX Inference</h2>
+  <div class="card">
+    <textarea id="inputText" rows="4" cols="80" placeholder="Enter paragraph text..."></textarea>
+    <button onclick="runInference()">Run Inference</button>
+  </div>
+  <div class="card">
+    <div class="metadata">
+      <div id="metadataStatus" class="status-pill">Metadata status: —</div>
+      <div id="metadataProb">Invalid probability: —</div>
+    </div>
+  </div>
+  <div class="card">
+    <div class="scores-grid" id="scoresGrid"></div>
+  </div>
+  <div class="card">
+    <details>
+      <summary>Raw output</summary>
+      <pre id="output" class="json-output"></pre>
+    </details>
+  </div>
+  <script type="module">
+  let session;
+  let tokenizer;
+  const LABELS = [
+    { key: 'grammar_score', label: 'Grammar' },
+    { key: 'clarity_score', label: 'Clarity' },
+    { key: 'ambiguity_score', label: 'Ambiguity' },
+    { key: 'legal_risk_score', label: 'Legal Risk' },
+    { key: 'metadata_presence_score', label: 'Metadata Presence' },
+    { key: 'reference_integrity_score', label: 'Reference Integrity' },
+    { key: 'enforceability_score', label: 'Enforceability' },
+    { key: 'structural_validity_score', label: 'Structural Validity' },
+    { key: 'overall_score', label: 'Overall' },
+  ];
+    const MODEL_PATHS = [
+      './minilm6.onnx',
+      './runs/model_minilm6/minilm6.onnx',
+      '../runs/model_minilm6/minilm6.onnx',
+    ];
+    const TOKENIZER_PATHS = [
+      './tokenizer',
+      './runs/model_minilm6/checkpoint-400',
+      '../runs/model_minilm6/checkpoint-400',
+    ];
+    let transformersModule;
+    async function ensureTransformersLoaded() {
+      if (transformersModule?.AutoTokenizer) return;
+      const sources = [
+        './transformers.min.js',
+        'https://cdn.jsdelivr.net/npm/@xenova/transformers@2.5.0/dist/transformers.min.js',
+        'https://unpkg.com/@xenova/transformers@2.5.0/dist/transformers.min.js',
+      ];
+      for (const url of sources) {
+        try {
+          transformersModule = await import(url);
+          if (transformersModule?.AutoTokenizer) return;
+        } catch (err) {
+          // try next source
+        }
+      }
+      throw new Error(
+        'Transformers.js failed to load. Download the ESM bundle as transformers.min.js or allow CDN access.'
+      );
+    }
+    async function tryCreateSession(paths) {
+      for (const path of paths) {
+        try {
+          return await ort.InferenceSession.create(path);
+        } catch (err) {
+          // try next path
+        }
+      }
+      throw new Error(
+        'Unable to load ONNX model. Place minilm6.onnx in scripts/ or start the server from repo root.'
+      );
+    }
+
+    async function tryLoadTokenizer(paths) {
+      for (const path of paths) {
+        try {
+          return await transformersModule.AutoTokenizer.from_pretrained(path);
+        } catch (err) {
+          // try next path
+        }
+      }
+      throw new Error(
+        'Unable to load tokenizer files. Copy tokenizer.json, tokenizer_config.json, vocab.txt to scripts/tokenizer or serve runs/model_minilm6/checkpoint-400.'
+      );
+    }
+
+    async function setup() {
+      // Load ONNX model (from scripts/ or runs/ depending on server root)
+      session = await tryCreateSession(MODEL_PATHS);
+      // Load a compatible tokenizer (using Transformers.js)
+      await ensureTransformersLoaded();
+      tokenizer = await tryLoadTokenizer(TOKENIZER_PATHS);
+    }
+    function tensorData(tensor) {
+      if (!tensor) return [];
+      if (tensor.data) return Array.from(tensor.data);
+      if (tensor.cpuData) return Object.values(tensor.cpuData).map((value) => Number(value));
+      return [];
+    }
+
+    function clamp01(value) {
+      if (Number.isNaN(value)) return 0;
+      return Math.min(1, Math.max(0, value));
+    }
+
+    function renderScores(logits) {
+      const grid = document.getElementById('scoresGrid');
+      grid.innerHTML = '';
+      LABELS.forEach((item, index) => {
+        const value = clamp01(logits[index] ?? 0);
+        const angle = value * 180 - 90;
+        const card = document.createElement('div');
+        card.className = 'score-card';
+        card.innerHTML = `
+          <div class="score-title">${item.label}</div>
+          <div class="knob">
+            <div class="needle" style="transform: rotate(${angle}deg);"></div>
+            <div class="score-value">${value.toFixed(3)}</div>
+          </div>
+        `;
+        grid.appendChild(card);
+      });
+    }
+
+    function renderMetadataStatus(logits) {
+      const statusEl = document.getElementById('metadataStatus');
+      const probEl = document.getElementById('metadataProb');
+      if (!logits.length) {
+        statusEl.textContent = 'Metadata status: —';
+        probEl.textContent = 'Invalid probability: —';
+        statusEl.className = 'status-pill';
+        return;
+      }
+      const [validLogit, invalidLogit] = logits;
+      const expValid = Math.exp(validLogit);
+      const expInvalid = Math.exp(invalidLogit);
+      const probInvalid = expInvalid / (expValid + expInvalid);
+      const isInvalid = probInvalid >= 0.5;
+      statusEl.textContent = isInvalid ? 'Metadata status: INVALID' : 'Metadata status: OK';
+      statusEl.className = `status-pill ${isInvalid ? 'bad' : 'ok'}`;
+      probEl.textContent = `Invalid probability: ${probInvalid.toFixed(3)}`;
+    }
+
+    async function runInference() {
+      if (!session || !tokenizer) await setup();
+      const text = document.getElementById('inputText').value;
+      const encoded = await tokenizer(text, {
+        padding: 'max_length',
+        truncation: true,
+        max_length: 256,
+      });
+      // Prepare ONNX input
+      const feeds = {};
+      for (const input of session.inputNames) {
+        const tensor = encoded[input];
+        if (!tensor) continue;
+        const dims = tensor.dims || tensor.shape || [1, tensor.data.length];
+        const data = tensor.data instanceof BigInt64Array
+          ? tensor.data
+          : BigInt64Array.from(tensor.data, (value) => BigInt(value));
+        feeds[input] = new ort.Tensor('int64', data, dims);
+      }
+      const results = await session.run(feeds);
+      const logits = tensorData(results.logits);
+      const metadataLogits = tensorData(results.metadata_status_logits);
+      renderScores(logits);
+      renderMetadataStatus(metadataLogits);
+      document.getElementById('output').textContent = JSON.stringify(results, null, 2);
+    }
+    window.runInference = runInference;
+  </script>
+</body>
+</html>

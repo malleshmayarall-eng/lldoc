@@ -1,0 +1,14 @@
+[image: Google]
+Recovery phone was changed
+
+
+mayaramallesh12@gmail.com
+The recovery phone for your account was changed. If you didn't change it,
+you should check what happened.
+Check activity
+<https://accounts.google.com/AccountChooser?Email=mayaramallesh12@gmail.com&continue=https://myaccount.google.com/alert/nt/1629711980815?rfn%3D4%26rfnc%3D1%26eid%3D-8118663676865349327%26et%3D0%26anexp%3Dnret-fa>
+You can also see security activity at
+https://myaccount.google.com/notifications
+You received this email to let you know about important changes to your
+Google Account and services.
+© 2021 Google LLC, 1600 Amphitheatre Parkway, Mountain View, CA 94043, USA

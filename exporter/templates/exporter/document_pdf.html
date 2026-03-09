@@ -1,0 +1,243 @@
+{% load static %}
+<!DOCTYPE html>
+<html lang="en" data-font="{{ font_family|default:"serif" }}">
+<head>
+    <meta charset="UTF-8">
+    <title>{{ document.title|default:"Document" }}</title>
+    <style>
+        :root {
+            --font-family-serif: 'Georgia', 'Times New Roman', serif;
+            --font-family-sans: 'Arial', 'Helvetica', sans-serif;
+            --font-family-mono: 'Courier New', monospace;
+            --font-family: var(--font-family-serif);
+            --font-size-base: {{ font_size|default:"12pt" }};
+            --line-height: {{ line_height|default:"1.5" }};
+            --page-width: {{ page_width|default:"210mm" }};
+            --page-height: {{ page_height|default:"297mm" }};
+            --page-margin: {{ page_margin|default:"25mm" }};
+            --image-max-width: {{ image_max_width|default:"75%" }};
+        }
+
+        :root[data-font="serif"] {
+            --font-family: var(--font-family-serif);
+        }
+
+        :root[data-font="sans"] {
+            --font-family: var(--font-family-sans);
+        }
+
+        :root[data-font="mono"] {
+            --font-family: var(--font-family-mono);
+        }
+
+        @page {
+            size: var(--page-width) var(--page-height);
+            margin: var(--page-margin);
+        }
+
+        /* Reset and Base Styles */
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: var(--font-family);
+            font-size: var(--font-size-base);
+            line-height: var(--line-height);
+            color: #000000;
+            background: white;
+            padding: var(--page-margin);
+        }
+
+        /* Document Header */
+        .document-header {
+            text-align: center;
+            margin-bottom: 2em;
+            border-bottom: 2px solid #000;
+            padding-bottom: 1em;
+        }
+
+        .document-title {
+            font-size: 24pt;
+            font-weight: bold;
+            margin-bottom: 0.5em;
+        }
+
+        .document-subtitle {
+            font-size: 18pt;
+            color: #333;
+            margin-bottom: 0.5em;
+        }
+
+        .document-meta {
+            font-size: 11pt;
+            color: #666;
+            margin-top: 0.5em;
+        }
+
+        /* Section Styles */
+        .section {
+            margin-bottom: 2em;
+        }
+
+        .paragraph,
+        .table-container,
+        .image-container,
+        .file-reference {
+            break-inside: avoid;
+            page-break-inside: avoid;
+        }
+
+        .section-title {
+            font-size: 18pt;
+            font-weight: bold;
+            margin-bottom: 0.8em;
+            margin-top: 1em;
+            border-bottom: 1px solid #ccc;
+            padding-bottom: 0.3em;
+        }
+
+        .subsection-title {
+            font-size: 16pt;
+            font-weight: bold;
+            margin-bottom: 0.6em;
+            margin-top: 0.8em;
+        }
+
+        .sub-subsection-title {
+            font-size: 14pt;
+            font-weight: bold;
+            margin-bottom: 0.5em;
+            margin-top: 0.6em;
+        }
+
+        .subsection {
+            margin-left: 1.5em;
+        }
+
+        /* Paragraph Styles */
+        .paragraph {
+            margin-bottom: 1em;
+            text-align: justify;
+        }
+
+        .paragraph p {
+            margin: 0;
+        }
+
+        /* Table Styles */
+        .table-container {
+            margin: 1.5em 0;
+        }
+
+        .table-title {
+            font-weight: bold;
+            margin-bottom: 0.5em;
+            text-align: center;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 0.5em 0;
+        }
+
+        table th,
+        table td {
+            border: 1px solid #333;
+            padding: 0.5em;
+            text-align: left;
+        }
+
+        table th {
+            background-color: #f0f0f0;
+            font-weight: bold;
+        }
+
+        /* Image Styles */
+        .image-container {
+            margin: 1.5em 0;
+            text-align: center;
+        }
+
+        .image-container img {
+            max-width: var(--image-max-width);
+            height: auto;
+            border: 1px solid #ccc;
+            padding: 4px;
+        }
+
+        .image-caption {
+            font-size: 10pt;
+            color: #666;
+            margin-top: 0.5em;
+            font-style: italic;
+        }
+
+        /* File Reference Styles */
+        .file-reference {
+            margin: 1em 0;
+            padding: 0.8em;
+            background-color: #f8f8f8;
+            border-left: 3px solid #666;
+        }
+
+        .file-reference-title {
+            font-weight: bold;
+            margin-bottom: 0.3em;
+        }
+
+        .file-reference-info {
+            font-size: 10pt;
+            color: #666;
+        }
+
+        /* List Styles */
+        ul, ol {
+            margin: 0.5em 0 0.5em 2em;
+        }
+
+        li {
+            margin-bottom: 0.3em;
+        }
+    </style>
+</head>
+<body>
+    <!-- Document Header -->
+    <div class="document-header">
+        <h1 class="document-title">{{ document.title|default:"Untitled Document" }}</h1>
+        {% if document.subtitle %}
+        <h2 class="document-subtitle">{{ document.subtitle }}</h2>
+        {% endif %}
+        {% if document.author %}
+        <div class="document-meta">
+            {{ document.author }}
+        </div>
+        {% endif %}
+    </div>
+
+    <!-- Main Content -->
+    <div class="document-content">
+        {% if document.sections.all %}
+            {% for section in document.sections.all %}
+                {% if section.parent_id is None %}
+                    {% include 'exporter/partials/section_pdf.html' with section=section level=1 %}
+                {% endif %}
+            {% endfor %}
+        {% else %}
+            <div class="section">
+                <p>This document has no content yet.</p>
+            </div>
+        {% endif %}
+    </div>
+
+    <script>
+        // Automatically open print dialog when page loads
+        window.onload = function() {
+            window.print();
+        };
+    </script>
+</body>
+</html>

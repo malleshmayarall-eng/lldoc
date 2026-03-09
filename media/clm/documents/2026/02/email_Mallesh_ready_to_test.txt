@@ -1,0 +1,6 @@
+Mallesh, let's create some amazing automated tests! 
+ Hi, it's Amit here, your TestProject onboarding champion. I noticed you didn't create your first test yet. 
+ I wanted to check-in and see if I can get your trust to give it a try. I made a step-by-step tutorial video for you to make it easier to start with. 
+ All you need to do is choose which type of test you would like to create first. For web tests click here, for mobile tests click here, otherwise for API tests click here. 
+ If you have already created tests and know how to use our platform, feel free to ignore this email. 
+ Happy Testing! Amit

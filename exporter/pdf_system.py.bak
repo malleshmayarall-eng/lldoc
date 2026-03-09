@@ -1,0 +1,272 @@
+"""PDF generation pipeline for document exports with accurate page sizing."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+import io
+from typing import Dict, Tuple, Optional, Any
+
+from django.template.loader import render_to_string
+
+try:
+    from pypdf import PdfReader, PdfWriter
+    from pypdf.annotations import AnnotationBuilder
+except ImportError:  # pragma: no cover - handled by caller
+    PdfReader = None
+    PdfWriter = None
+    AnnotationBuilder = None
+
+
+# Page dimensions in pixels at 96 DPI (CSS reference)
+PAGE_SIZE_MAP: Dict[str, Tuple[str, str]] = {
+    "a3": ("297mm", "420mm"),
+    "a4": ("210mm", "297mm"),
+    "a5": ("148mm", "210mm"),
+    "a6": ("105mm", "148mm"),
+    "letter": ("8.5in", "11in"),
+    "legal": ("8.5in", "14in"),
+    "tabloid": ("11in", "17in"),
+}
+
+# Page dimensions in points (1pt = 1/72 inch) for PDF
+PAGE_SIZE_POINTS: Dict[str, Tuple[float, float]] = {
+    "a3": (841.89, 1190.55),
+    "a4": (595.28, 841.89),
+    "a5": (419.53, 595.28),
+    "a6": (297.64, 419.53),
+    "letter": (612.0, 792.0),
+    "legal": (612.0, 1008.0),
+    "tabloid": (792.0, 1224.0),
+}
+
+MARGIN_MAP = {
+    "none": "0mm",
+    "narrow": "12.7mm",
+    "normal": "25mm",
+    "moderate": "19mm",
+    "wide": "50mm",
+}
+
+LINE_HEIGHT_MAP = {
+    "single": "1.0",
+    "1.15": "1.15",
+    "1.5": "1.5",
+    "double": "2.0",
+}
+
+IMAGE_SIZE_MAP = {
+    "small": "50%",
+    "medium": "75%",
+    "large": "100%",
+}
+
+# Unprintable area around page edges (typical printer margins)
+UNPRINTABLE_AREA_MAP = {
+    "none": "0mm",           # No unprintable area (ideal PDF viewer)
+    "minimal": "3mm",        # High-quality printers (~0.12in)
+    "standard": "6.35mm",    # Most printers (0.25in)
+    "legacy": "12.7mm",      # Older printers (0.5in)
+}
+
+
+@dataclass
+class PDFLayoutOptions:
+    """Configuration for PDF rendering."""
+
+    page_size: str = "a4"
+    font_family: str = "serif"
+    font_size: str = "12pt"
+    line_spacing: str = "1.5"
+    margin_size: str = "normal"
+    image_size: str = "medium"
+    show_unprintable_area: bool = True
+    unprintable_area: str = "standard"
+
+    @classmethod
+    def from_request(cls, request) -> "PDFLayoutOptions":
+        return cls(
+            page_size=request.GET.get("pageSize", "a4"),
+            font_family=request.GET.get("font", "serif"),
+            font_size=request.GET.get("fontSize", "12pt"),
+            line_spacing=request.GET.get("lineSpacing", "1.5"),
+            margin_size=request.GET.get("margin", "normal"),
+            image_size=request.GET.get("imageSize", "medium"),
+            show_unprintable_area=request.GET.get("showUnprintable", "1") != "0",
+            unprintable_area=request.GET.get("unprintableArea", "standard"),
+        )
+
+    def to_template_context(self) -> Dict[str, Any]:
+        page_width, page_height = PAGE_SIZE_MAP.get(self.page_size, PAGE_SIZE_MAP["a4"])
+        page_width_pt, page_height_pt = PAGE_SIZE_POINTS.get(self.page_size, PAGE_SIZE_POINTS["a4"])
+        
+        return {
+            "page_size": self.page_size,
+            "page_width": page_width,
+            "page_height": page_height,
+            "page_width_pt": f"{page_width_pt}pt",
+            "page_height_pt": f"{page_height_pt}pt",
+            "font_family": self.font_family,
+            "font_size": self.font_size,
+            "line_spacing": self.line_spacing,
+            "line_height": LINE_HEIGHT_MAP.get(self.line_spacing, "1.5"),
+            "margin_size": self.margin_size,
+            "page_margin": MARGIN_MAP.get(self.margin_size, "25mm"),
+            "image_size": self.image_size,
+            "image_max_width": IMAGE_SIZE_MAP.get(self.image_size, "75%"),
+            "show_unprintable_area": self.show_unprintable_area,
+            "unprintable_area": self.unprintable_area,
+            "unprintable_margin": UNPRINTABLE_AREA_MAP.get(self.unprintable_area, "6.35mm"),
+        }
+    
+    def get_unprintable_margin_mm(self) -> float:
+        """Get unprintable area in mm for visual indicators."""
+        area_map_mm = {
+            "none": 0.0,
+            "minimal": 3.0,
+            "standard": 6.35,
+            "legacy": 12.7,
+        }
+        return area_map_mm.get(self.unprintable_area, 6.35)
+
+
+def render_document_pdf(document, request, options: PDFLayoutOptions) -> bytes:
+    """Render the document to PDF bytes using reportlab."""
+    try:
+        from reportlab.lib.pagesizes import A3, A4, A5, A6, LETTER, LEGAL, TABLOID
+        from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, PageBreak
+        from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+        from reportlab.lib.units import mm
+        from reportlab.lib.enums import TA_LEFT, TA_CENTER, TA_RIGHT
+    except ImportError as exc:
+        raise RuntimeError("reportlab is required for PDF rendering. Run: pip install reportlab") from exc
+
+    print(f"DEBUG: render_document_pdf called")
+    print(f"  Options: {options}")
+    
+    # Map page sizes
+    page_size_map = {
+        "a3": A3,
+        "a4": A4,
+        "a5": A5,
+        "a6": A6,
+        "letter": LETTER,
+        "legal": LEGAL,
+        "tabloid": TABLOID,
+    }
+    
+    page_size = page_size_map.get(options.page_size, A4)
+    
+    # Convert margin to points
+    margin_map_pt = {
+        "none": 0,
+        "narrow": 12.7 * mm,
+        "moderate": 19 * mm,
+        "normal": 25 * mm,
+        "wide": 50 * mm,
+    }
+    margin = margin_map_pt.get(options.margin_size, 25 * mm)
+    
+    # Create PDF
+    output = io.BytesIO()
+    doc = SimpleDocTemplate(
+        output,
+        pagesize=page_size,
+        rightMargin=margin,
+        leftMargin=margin,
+        topMargin=margin,
+        bottomMargin=margin,
+    )
+    
+    # Build content
+    story = []
+    styles = getSampleStyleSheet()
+    
+    # Title
+    title_style = ParagraphStyle(
+        'CustomTitle',
+        parent=styles['Heading1'],
+        fontSize=18,
+        spaceAfter=12,
+    )
+    story.append(Paragraph(document.title or "Untitled Document", title_style))
+    story.append(Spacer(1, 12))
+    
+    # Add sections recursively
+    def add_section_content(section, level=0):
+        """Add section and its content to the story."""
+        # Section title
+        if section.title:
+            heading_style = styles[f'Heading{min(level + 2, 6)}']
+            story.append(Paragraph(section.title, heading_style))
+            story.append(Spacer(1, 6))
+        
+        # Paragraphs in this section
+        paragraphs = section.paragraphs.all().order_by('order')
+        for para in paragraphs:
+            if para.content:
+                story.append(Paragraph(para.content, styles['BodyText']))
+                story.append(Spacer(1, 6))
+        
+        # Subsections
+        subsections = section.children.all().order_by('order')
+        for subsection in subsections:
+            add_section_content(subsection, level + 1)
+    
+    # Add root sections
+    root_sections = document.sections.filter(parent__isnull=True).order_by('order')
+    for section in root_sections:
+        add_section_content(section)
+    
+    # Build PDF
+    doc.build(story)
+    
+    pdf_bytes = output.getvalue()
+    print(f"DEBUG: PDF generated, size: {len(pdf_bytes)} bytes")
+    
+    # Apply unprintable area annotations
+    return apply_pdf_layout(pdf_bytes, options)
+
+
+def apply_pdf_layout(pdf_bytes: bytes, options: PDFLayoutOptions) -> bytes:
+    """Apply layout enhancements (unprintable area indicators) using pypdf."""
+    if not pdf_bytes or PdfReader is None or PdfWriter is None:
+        print(f"DEBUG: Skipping PDF layout - pypdf not available or no bytes")
+        return pdf_bytes
+
+    print(f"DEBUG: apply_pdf_layout called")
+    print(f"  show_unprintable_area: {options.show_unprintable_area}")
+    print(f"  unprintable_area: {options.unprintable_area}")
+    print(f"  margin_mm: {options.get_unprintable_margin_mm()}")
+
+    reader = PdfReader(io.BytesIO(pdf_bytes))
+    writer = PdfWriter()
+
+    for page_num, page in enumerate(reader.pages):
+        if options.show_unprintable_area and AnnotationBuilder is not None:
+            width = float(page.mediabox.width)
+            height = float(page.mediabox.height)
+            
+            print(f"  Page {page_num}: {width}pt x {height}pt")
+            
+            # Convert mm to points (1mm = 2.834645669 points)
+            margin_mm = options.get_unprintable_margin_mm()
+            margin_pt = margin_mm * 2.834645669
+            
+            print(f"  Adding border at {margin_pt}pt from edges")
+            
+            # Draw rectangle showing printable area boundary
+            # This is INSIDE the unprintable margin
+            printable_rect = AnnotationBuilder.rectangle(
+                rect=(margin_pt, margin_pt, width - margin_pt, height - margin_pt),
+                border_color=(0.9, 0.1, 0.1),  # Red to be very visible
+                border_width=2.0,  # Thick border to be obvious
+            )
+            page.add_annotation(printable_rect)
+            print(f"  Annotation added!")
+        else:
+            print(f"  Skipping page {page_num}: show={options.show_unprintable_area}, builder={AnnotationBuilder is not None}")
+        writer.add_page(page)
+
+    output = io.BytesIO()
+    writer.write(output)
+    return output.getvalue()

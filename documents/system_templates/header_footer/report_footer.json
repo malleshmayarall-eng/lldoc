@@ -1,0 +1,26 @@
+{
+  "name": "Standard Report - Footer",
+  "description": "Standard footer with page numbering and document info.",
+  "template_type": "footer",
+  "category": "Report",
+  "tags": ["internal", "report", "policy", "white paper", "standard"],
+  "config": {
+    "icons": [],
+    "text": {
+      "left": "{document_type}",
+      "center": "Page {page} of {total}",
+      "right": "Updated {date}"
+    },
+    "style": {
+      "height": "40px",
+      "background_color": "#f5f5f5",
+      "border_top": "1px solid #dddddd",
+      "font_family": "Arial, sans-serif",
+      "font_size": "8pt",
+      "padding": "10px 20px",
+      "color": "#555555"
+    },
+    "show_on_first_page": false,
+    "show_on_all_pages": true
+  }
+}

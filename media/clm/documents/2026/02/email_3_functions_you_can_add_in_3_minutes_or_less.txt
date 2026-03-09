@@ -1,0 +1,92 @@
+Here's our September newsletter with helpful information to supercharge your app development efforts
+
+( https://bit.ly/3CxnpiR )
+
+( https://bit.ly/3CxnpiR )
+
+We're Back! ✌
+
+********************
+September Newsletter
+********************
+
+3 Functions You Can Add In 3 Minutes Or Less!
+
+Every day, thousands of app developers create their unique app idea using Thunkable. We are a platform for big ideas and we want to equip you with no-code superpowers. Below are 3 functions you can add to your app in 3 minutes or less which will help your app soar to new heights.
+
+Additionally, we have some new content, tutorials, and activities that will help you hone your skills. Join us at our upcoming workshop with NoCodeDevs ( https://lu.ma/35wrj9nz ) where we’ll go from idea to app in under an hour. And swing by our Community ( https://community.thunkable.com/ ) to learn more about our Weekend Design Challenge. Come to test your skills by building apps and earn fun prizes.
+
+Here’s to you and your app development superpowers! We can’t wait to see what you’ll build next. And make sure to share your efforts by tagging *#MadewithThunkable* your favorite social media channels.
+
+Keep Building ( https://bit.ly/3CxnpiR )
+
+***********
+What's New?
+***********
+
+*Activate Your Camera*
+
+Take photos in a snap with the “photo from Camera” block. Great for image sharing apps, or to let your users upload a photo of themselves to their profiles. Check out this doc to learn how you can activate the camera in your app!
+
+Check it out ( https://docs.thunkable.com/v/drag-and-drop/camera )
+
+*Add AI To Your App*
+
+Add Artificial Intelligence to your app with our “description of image” block. This block is powered by Microsoft’s Computer Vision API and allows you to describe the contents of an image with just a single block.
+
+Check it out ( https://www.youtube.com/watch?v=Zi17wTeUKXs )
+
+*Barcodes*
+*Scanner*
+
+Scanning barcodes has never been easier. Check out our sample barcode scanner app below for our Power Thunker Tatian ( https://community.thunkable.com/t/wdc-15-show-thunkable/1283467/11 ). And try your hand at our upcoming Weekend Design Challenge where you can make your own Inventory Management app.
+
+Check it out ( https://x.thunkable.com/copy/c157923b554af6eff91e710ce4343552 )
+
+****************
+Where To Find Us
+****************
+
+*Design, Develop, and Distribute an App Event*
+
+Thunkable + No Code Devs are hosting a series of webinars where you will learn how to create data-driven apps. Join us for the first of the series next Tuesday, 28th September at 10am PT/1pm ET
+
+Register Now ( https://lu.ma/35wrj9nz )
+
+*New Weekend Design Challenge*
+
+This weekend we’re challenging the Thunkable Community to build their very own inventory app. Check out the link below for more details and to join in!
+
+Join In ( https://community.thunkable.com/t/wdc-23-weekend-design-challenge-collectors-edition/1520181?u=domhnallohanlon )
+
+****************
+App of the Month
+****************
+
+*Try This Out!*
+
+( https://x.thunkable.com/copy/e6510e84b09fbcc24330d9158573c444 )
+
+*Ex Libris*
+
+*Description*
+
+Develop your own personal library with this simple Thunkable project. Scan barcodes and save them to your personal bookshelf. Remix the project, craft your own UI, and create your own virtual library of your favorite books!
+
+Take A Look ( https://x.thunkable.com/copy/e6510e84b09fbcc24330d9158573c444 )
+
+Thank you for reading!
+
+( https://www.facebook.com/thunkable/ ) ( https://twitter.com/thunkable ) ( https://www.instagram.com/thunkable/ ) ( https://www.linkedin.com/company/thunkable/mycompany/ )
+
+Copyright © 2021 Thunkable, All rights reserved.
+
+*Our mailing address is:*
+PO BOX 22162
+San Francisco, CA 94122
+
+Billy Beaver
+
+PO Box 22162 , San Francisco , CA 94122
+
+Unsubscribe ( http://url1383.thunkable.com/wf/unsubscribe?upn=-2FgtEawaxz-2FNWeR-2BDWogXN4-2B6Y-2BUm668Ez6dXvNccDMambInR4gFEQRhr5yzyG6862qGLqce1Cv-2BZKpm9EnzO0Kh7smvS53-2FeWYSOitBq38s5Sm6bMEcgPlLlyqMYHgnJEXfMwSueN-2Blc-2BbuvDnHkiJc-2FUQ-2FogLC1hwE5I81r08xL2UFRxWjiaSMzOeLI217wFFzdhWy3NdGgTSzoneP0MvvsWWPZv-2FJBa5iatw0tThn-2FYu-2F9MZuJjYyMCHSGUV93N1ySDqCNlMTCHsVR06FeV6abqiqWT1eu-2FGTQEDH9K6Xxi44PntA08Ruhi26MDDEd7ehGyDa9Zq2BhXD0EOb6v-2BS-2B9-2FQ7NQqCggynhvPygb-2BPe5Q-2ByU-2FW8In49lQzGAUqXZirVQ76fgMvZWNXXHIjWorQBQYvfBDVu4FvtUx-2F3597avqkpaI5KpwgAwlMYtJAiHKdg-2BT5FgJy-2BY0ocIxhgE4ua99XE1Nz7LzlvQBAMRjVPZBhEu6fnvJSyhge3oPANgB1ofsLymKtOEDTcjtJ5Eg3gExeTzeGmdMkgjkCVW5sBIp8SQwy-2BPQnEsWIPtxufEIccG-2BJl8kTLAvU9lCean6ZS8vIWIDFLWNQ5P3G-2BNaIbyKTmDO2uyGP8ubSJ20SRMwIXkMmiY3rR8smVaMONM289RuTGx-2FiS0fQWCIBvwtlPXehprwsVWJy8gEEvZpWs-2BlR5YOSQRi8sjJos9UtHH-2BGJR0pAFEomFU8FEQdGTKeFNLJrLk07IBCyEgBEnPQTit6VK4TXdwdyl9rV-2Fv-2BbS89xI3nyUZz-2B-2Badqe-2BXLB1FBuUhWaon-2BxSmKZl9C8p-2BRv2QAfHtbEmkWUdQnE68VBHSIfVOm8-2FPiezQWEe1UdpmnJe5HZzvjmuyJBSO6zv7 )

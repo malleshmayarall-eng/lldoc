@@ -1,0 +1,398 @@
+/**
+ * Citation Styles
+ * 
+ * Styling for inline references and citation lists
+ */
+
+/* ============================================================================
+   INLINE CITATION MARKERS
+   ============================================================================ */
+
+.citation-marker {
+  color: #2563eb;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  position: relative;
+  text-decoration: underline;
+  text-decoration-style: dotted;
+  text-decoration-color: rgba(37, 99, 235, 0.5);
+  text-underline-offset: 3px;
+}
+
+.citation-marker sup {
+  font-size: 0.75em;
+  color: #1d4ed8;
+  font-weight: 600;
+  margin-left: 2px;
+}
+
+.citation-marker:hover {
+  color: #1d4ed8;
+  background-color: rgba(37, 99, 235, 0.15);
+  padding: 2px 6px;
+  margin: 0 -4px;
+  border-radius: 4px;
+  text-decoration-color: #1d4ed8;
+  box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.1);
+}
+
+.citation-marker:active {
+  transform: translateY(1px);
+}
+
+.citation-inline {
+  color: #6b7280;
+  font-style: italic;
+  cursor: pointer;
+  transition: color 0.2s;
+}
+
+.citation-inline:hover {
+  color: #374151;
+}
+
+.citation-labeled {
+  color: #7c3aed;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.citation-labeled sup {
+  font-size: 0.75em;
+  color: #6d28d9;
+  font-weight: 600;
+  margin-left: 2px;
+}
+
+.citation-labeled:hover {
+  color: #6d28d9;
+  background-color: rgba(124, 58, 237, 0.1);
+  padding: 2px 4px;
+  margin: 0 -2px;
+  border-radius: 3px;
+}
+
+.citation-definition {
+  color: #059669;
+  cursor: help;
+  border-bottom: 1px dotted #059669;
+  transition: all 0.2s;
+}
+
+.citation-definition:hover {
+  color: #047857;
+  border-bottom-style: solid;
+  background-color: rgba(5, 150, 105, 0.1);
+}
+
+/* ============================================================================
+   CITATION LISTS
+   ============================================================================ */
+
+.citations-container {
+  margin-top: 2rem;
+  padding-top: 1.5rem;
+  border-top: 2px solid #e5e7eb;
+}
+
+.citations-title {
+  font-size: 1.125rem;
+  font-weight: 700;
+  color: #1f2937;
+  margin-bottom: 1rem;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.citations-title::before {
+  content: '📚';
+  font-size: 1.25rem;
+}
+
+.citations-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+/* ============================================================================
+   CITATION ENTRY STYLES
+   ============================================================================ */
+
+.citation-entry {
+  display: flex;
+  gap: 0.75rem;
+  padding: 0.75rem;
+  background-color: #f9fafb;
+  border-radius: 0.5rem;
+  border-left: 3px solid #2563eb;
+  transition: all 0.2s;
+}
+
+.citation-entry:hover {
+  background-color: #f3f4f6;
+  border-left-color: #1d4ed8;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+}
+
+.citation-number {
+  font-weight: 700;
+  color: #2563eb;
+  font-size: 0.875rem;
+  flex-shrink: 0;
+  min-width: 2rem;
+}
+
+.citation-content {
+  flex: 1;
+  font-size: 0.875rem;
+  color: #374151;
+  line-height: 1.6;
+}
+
+.citation-content strong {
+  color: #1f2937;
+  font-weight: 600;
+}
+
+.citation-content em {
+  font-style: italic;
+  color: #4b5563;
+}
+
+.citation-content a {
+  color: #2563eb;
+  text-decoration: underline;
+  transition: color 0.2s;
+}
+
+.citation-content a:hover {
+  color: #1d4ed8;
+}
+
+/* ============================================================================
+   CITATION CONTENT VARIANTS
+   ============================================================================ */
+
+.citation-preview {
+  margin-top: 0.5rem;
+  padding: 0.5rem;
+  background-color: white;
+  border-left: 2px solid #e5e7eb;
+  font-size: 0.8125rem;
+  color: #6b7280;
+  line-height: 1.5;
+}
+
+.citation-source {
+  margin-top: 0.375rem;
+  font-size: 0.75rem;
+  color: #9ca3af;
+  font-style: italic;
+}
+
+.citation-definition-text {
+  margin-top: 0.375rem;
+  padding: 0.5rem;
+  background-color: #ecfdf5;
+  border-left: 2px solid #059669;
+  font-size: 0.8125rem;
+  color: #047857;
+  border-radius: 0.25rem;
+}
+
+.citation-text {
+  margin-top: 0.375rem;
+  padding: 0.5rem;
+  background-color: white;
+  border: 1px solid #e5e7eb;
+  font-size: 0.8125rem;
+  color: #4b5563;
+  border-radius: 0.25rem;
+  font-family: 'Georgia', serif;
+  line-height: 1.6;
+}
+
+/* ============================================================================
+   DEFINITION POPUP
+   ============================================================================ */
+
+.definition-popup {
+  position: absolute;
+  z-index: 1000;
+  background-color: white;
+  border: 1px solid #d1d5db;
+  border-radius: 0.5rem;
+  box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.1),
+              0 4px 6px -2px rgba(0, 0, 0, 0.05);
+  padding: 1rem;
+  max-width: 24rem;
+  min-width: 16rem;
+}
+
+.definition-title {
+  font-weight: 700;
+  color: #059669;
+  font-size: 0.875rem;
+  margin-bottom: 0.5rem;
+  padding-bottom: 0.5rem;
+  border-bottom: 1px solid #d1fae5;
+}
+
+.definition-content {
+  font-size: 0.8125rem;
+  color: #4b5563;
+  line-height: 1.6;
+}
+
+/* ============================================================================
+   SECTION CITATIONS
+   ============================================================================ */
+
+.section-citations {
+  margin-top: 2rem;
+  padding: 1.5rem;
+  background-color: #fafafa;
+  border-radius: 0.75rem;
+  border: 1px solid #e5e7eb;
+}
+
+.section-citations h4 {
+  color: #1f2937;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-bottom: 1rem;
+}
+
+/* ============================================================================
+   PARAGRAPH WITH CITATIONS
+   ============================================================================ */
+
+.paragraph-with-citations {
+  margin-bottom: 1.5rem;
+}
+
+.paragraph-text {
+  font-size: 1rem;
+  line-height: 1.75;
+  color: #374151;
+  margin-bottom: 1rem;
+}
+
+.citations-section {
+  font-size: 0.875rem;
+  background-color: #f9fafb;
+  padding: 1rem;
+  border-radius: 0.5rem;
+}
+
+.citation-item {
+  padding: 0.5rem 1rem;
+  transition: background-color 0.2s;
+  border-radius: 0.375rem;
+}
+
+.citation-item:hover {
+  background-color: #f3f4f6;
+}
+
+/* ============================================================================
+   RESPONSIVE STYLES
+   ============================================================================ */
+
+@media (max-width: 768px) {
+  .citation-entry {
+    flex-direction: column;
+    gap: 0.5rem;
+  }
+  
+  .citation-number {
+    min-width: auto;
+  }
+  
+  .definition-popup {
+    max-width: calc(100vw - 2rem);
+    left: 1rem !important;
+    right: 1rem !important;
+  }
+}
+
+/* ============================================================================
+   PRINT STYLES
+   ============================================================================ */
+
+@media print {
+  .citation-marker,
+  .citation-labeled,
+  .citation-inline {
+    color: black;
+    background-color: transparent !important;
+  }
+  
+  .citation-entry {
+    page-break-inside: avoid;
+    border-left-color: #000;
+    background-color: white;
+  }
+  
+  .citations-container {
+    border-top-color: #000;
+  }
+  
+  .citation-number {
+    color: #000;
+  }
+}
+
+/* ============================================================================
+   ANIMATION
+   ============================================================================ */
+
+@keyframes citationHighlight {
+  0% {
+    background-color: transparent;
+  }
+  50% {
+    background-color: rgba(37, 99, 235, 0.2);
+  }
+  100% {
+    background-color: transparent;
+  }
+}
+
+.citation-marker.highlight,
+.citation-entry.highlight {
+  animation: citationHighlight 1s ease-in-out;
+}
+
+/* ============================================================================
+   ACCESSIBILITY
+   ============================================================================ */
+
+.citation-marker:focus,
+.citation-labeled:focus,
+.citation-definition:focus {
+  outline: 2px solid #2563eb;
+  outline-offset: 2px;
+  border-radius: 3px;
+}
+
+.citation-entry:focus-within {
+  outline: 2px solid #2563eb;
+  outline-offset: 2px;
+}
+
+/* Screen reader only text */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border-width: 0;
+}

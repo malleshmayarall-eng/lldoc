@@ -1,0 +1,94 @@
+It is the season of appreciation for this installment of our November Newsletter
+
+( https://thunkable.com/#/ )
+
+*******************
+November Newsletter
+*******************
+
+Happy Thunksgiving
+
+The holiday season is fast approaching and it is a good time for us to reflect on things we are thankful for. Recently we announced major milestones ( https://www.prnewswire.com/news-releases/thunkable-achieves-new-milestones-and-announces-new-product-innovations-301418609.html ) for Thunkable. There are now over 2 million users from 184 different countries using our platform, and turning their ideas into apps. In fact, our users have created over a 6.5+million apps that have been published to PlayStore, AppStore, or downloaded directly onto devices. We are so appreciative of you and your support of Thunkable.
+
+To accompany these milestones, we have some exciting product news to share. These new capabilities are now available on Thunkable:
+
+* *Figma Import* : You can now import a UI designed in Figma directly to Thunkable, to make the design process even faster.
+* *WebApps* : Make your app available everywhere by publishing to the web. Put your app on a unique URL or embed it within an iframe.
+* *Tablet View* : Create tablet-specific applications to create the perfect user experience based on your device of choice.
+* *In-App Payments* : Create a premium experience, charge users for gated features, collect donations, and more with in-app purchasing. Turn your idea into a revenue-generating app.
+* *Webflow Integration* : For those of you that want to extend your Webflow project to mobile, you can now use Webflow's back end as a datasource within Thunkbable to keep information consistent and clean, across all devices.
+
+During the season of appreciation – we'd like to say "thank you" for your continued support of Thunkable. Make sure to log in to the Thunkable platform throughout the week. We will be running our Black Friday and Cyber Monday promotions! Take advantage of this once-a-year deal starting on November 24th!
+
+Start Building ( http://x.thunkable.com )
+
+***********
+What's New?
+***********
+
+*In- App Payments Are Here!*
+
+Turn your idea into a revenue generating app. Create premium experiences, gate certain content, or collect donations from users – all possible with in-app payments. Now available for Pro, Business, and Enterprise users.
+
+Learn More ( https://blog.thunkable.com/new-feature-announcement-in-app-payments-f7e2a28e187a )
+
+*Import Your UI Designs Via Figma*
+
+The most import part of any app is the User Interface (UI). You can now design your UI in Figma, and import it directly to Thunkable. Build beautiful apps, quickly, with Figma import capabilities.
+
+Watch Now ( https://youtu.be/tDSq4wM5yAE )
+
+*Tablet View*
+*Now Available*
+
+Create a complete app experience by providing a tablet version of your app. Remix your existing project, or start fresh to create an app specifically for tablet devices. Give it a try today!
+
+Check It Out ( https://docs.thunkable.com/v/drag-and-drop/project-settings#default-app-layout )
+
+****************
+Where To Find Us
+****************
+
+*Webinar: Build a Job Board App w/ Thunkable and Airtable*
+
+We are joining our friends at NoCodeDevs to show you how to create a Job Board app, utilizing Thunkable and Airtable. Swing by this free webinar to see how you can create a custom community board, learn about our deep integration with AirTable, and ask questions from the best no-code experts around.
+
+Sign Up ( https://lu.ma/aotnz2j8 )
+
+*Office Hours*
+
+Due to our previous Office Hour events' smashing success, we want to make this a regular thing! Each meeting will have a topic or theme, but you're always welcome to bring any questions you may have. Join us on November 24th to see in-app payments in action. We'll see you there!
+
+Join In ( https://thunkable.site/web-build/index.html?webAppId=Sjxj2QEry )
+
+****************
+App of the Month
+****************
+
+*Try this out!*
+
+*Template Name:*
+*DripAdvisor*
+
+*Description*
+
+Earlier this month we joined our friends at NoCodeDevs and Xano for a webinar ( https://www.nocodedevs.com/v/recW3MU2YlCgViWzi ). We showcased how you can build a "Yelp-style" app, with Thunkable + Xano. Now you can take our DripAdvisor app and create your own app. Build your UI in Figma and import it into Thunkable, or use our template. Give this one a try and create your own search & ranking app for your own favorite local spots!
+
+Take A Look ( https://x.thunkable.com/copy/f86ff7063c1baee8cc8fc8faa955ef79 )
+
+Thank you for reading!
+❤️ The Thunkable Team
+
+( https://www.facebook.com/thunkable/ ) ( https://twitter.com/thunkable ) ( https://www.instagram.com/thunkable/ ) ( https://www.linkedin.com/company/thunkable/mycompany/ )
+
+Copyright © 2021 Thunkable, All rights reserved.
+
+*Our mailing address is:*
+PO BOX 22162
+San Francisco, CA 94122
+
+Billy Beaver
+
+PO Box 22162 , San Francisco , CA 94122
+
+Unsubscribe ( http://url5821.thunkable.com/asm/unsubscribe/?user_id=6512343&data=GSDZyF_PDaaZaHeDk9B2fnKH8eGlraGL2YBvD8Ada7LVL_mC473VwmrX8kByAGzpHT69lDelbaGlGIV-9AOTgxpMwMlQHK8xfbqG-sgwIsBkw5lTR34-910WIisSpz5u4YINTHtl6eDMlSpecUgi0_06DaThSEjQGa9l8BxNM9CltdoK3PI9XZvu30Rp4VWO2vE5j3t-ydhgHdyfEeFifEIIr8NWM3jNZ5NKbfB2Fmib8Nm3yhh90xmT6_3vmYz8aFfgK8kRJgkokIfEMFZ_EkhhiwYYjG68dWYyQjoZGs8M-_oAcf1fDNE3FAjiWNlNTuohWVHhax76_zr-EKNKYFxTl34kpH_qA3T37PDiHpU9J9gWhKYMBWrz2HREJYbJbB2uPBNy8HMpFomh5i1wHawB0ej04fwiAdtXASi4nCSVZcROY0W_IoYp4PcK1i76TbxMlRucCtgggBAzJ5vJnEkO6oiy7yfOXiGV79kWwilxd2xsbgJDsb9-WaIEmk5rgjo7kr9J8B7efP_VLyV6TfbiU-3XCQYZNVzU-iS7s7yk77wFkmYBoqn75T8-_CBTO0DO_5lsBG7Dda87FousCnk_JfJdo8wKl4LmvCQVeP6ZAuMX4sR2mxxHaXCtM3OHun30iCEV6a4aSGD-usVqB0v8lTLB4pC38p41MU7zhW2m_IfQR5wu6l91cgvhAm6SlOg1OnazXmibPDJBTRCYt-Cca6Ua27KnsOD_YYuChLDNNfkMPm40K-DTmh8hytlrM7VZ1Pi7xKGkyvjRKE8hEWjfkvVjlXEJIOsZjFuIV7spxBEr7SdMQGmCSLiSnYYd8yjPAy6L0833mEl35faLajiCueLzCw-0z0iRPljNvpKPBv2tBUdnGzcMngDvNy97ATq-aNYDSRjFDj9eQMtcu_E_vW5Z_fyb3oZ8f9aPlcYjIBVv-W4DVhL_JwNSya0Okc8lywkAzZv9mpJiFaBq5zRziex84yraoRMxdMdj_l4iX9jN2Q0lcL628ii7xCqIbDjD--UC0uOJ4j2q4DVyTK9U2d0s92FOY0Hu8jy7rt-gNX0inl1Xwq-PjU-1o63ZCsJ6Rx88UZzCIhcSQTv9UCEqIsOdTTqV8GXyJ1dK2qLIfih5Tg8ofOztIbL0ajXzf8ZBTmfPOq7-VEoheXR4zFt3kTUIL9Fku9UO9G2Puw4uz62bxjdZ6KpNg-U5oGoa ) - Unsubscribe Preferences ( http://url5821.thunkable.com/asm/?user_id=6512343&data=BiHMBq4g4ESj96Vy8fMtZjXIJCok4SZdbGg1VELgv3kibJzoy5Lj4g5zK-4_qQz_wP31fTEmevZ8F0nRm0SZwopFbvpmiX2JCmRJAtMZhtAlWDXgPLCvCvlXSLYi1QEP8jV80jpYh53yJ4GW8Dx4ahDpEgoeQbpyayqFCKagZDdKPJRBRsWrgkBYiThKAL-CVns2nTtseh9Kd97ez1W7knttKyzyPAV_pBZx4TMgeAsGfvDU7gt3Imi0zJV-Ng2M4Q5jKxDjbVCKIG0ALqaIYSRTB7m1tuinUQ1QAkLrcc846hRUdZ8i-NseMqSSTcx0lGeHhubsOrYVn61LMSE9g44QmnRUhKVv9c_M66kVilGQYvB0t56kuMDoKXaYm49tAZ_gkPGGsm0DXwkvF0e7_Jax_ZpGqLjTfA5kDrRRd6VWgkpNODjUWVCLdlUh4x5lkbXqVq1q1d0cekPXB1KnA9BDul5e0Z4zSeuWF46EE-cQp3AbB2XzL6XPPYB82igG1im9CkbIkKsm56Q2LvgZGsDn1Mi2pskd51a50sOuUesk92F3KrrtZ1jvoEeHUqHXjZS8OffT19vVM6_wrxKsdLWSqoS7FGPku3CwTAuarQb9K31bGHKE4n5_LSMG4zS8wpJjDZw2rVldcfyhvh3UimsA3owB9u8xv9yrG3SfZQFR71eirH1vMdVbYE5nbmDf5qP3SOsdLD0fCyG-2is_IakviBtnX8Sr4mGX6OUsIUq36cNTmgIvjCxx10Y4ssFEuuBwgfkdRS1SJJA9Pv0OombmqlhVGN1GMNQGxQExEBm8dwp3seafTmVd7VykRCnCrvCvnWCDo61PHdNZ2odOGjnItqNpG-67m5elAvXq_UP60cqLObfwL943Ft7BIXCOb_SBcPNJXG5m8PnsycruPEIVxW4t5OxPHU61LYSjLrCkJIQt427dy3Y7uMM9JHwIh_DJH_uLd1fT0VqCvMuSQuIUftbtOEzjmFaPmuPFJhnEIfrq1GdO4lsKfVx1qHIDcuKjRYqSqCZnKXkzxNNORDG2w9modwYjJveOnfT-OxR9GJDCKRkiWrS02fQJIFSDFHNMIXhpxix27caLqHeM6-pKnyA9Hg4_5HjV6tE6d6zKo2GhEbl23Y9UZ41u5nILNBE8-VzkfW0Ua33c4AJQyuNp0KSUHUV7roywapunhcc= )

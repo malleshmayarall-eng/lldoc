@@ -1,0 +1,14 @@
+[image: Google]
+Your password was changed
+
+
+mayaramallesh12@gmail.com
+The password for your Google account mayaramallesh12@gmail.com was changed.
+If you didn't change it, you should recover your account
+<https://accounts.google.com/RecoverAccount?fpOnly=1&source=ancp&Email=mayaramallesh12@gmail.com&et=0&anexp=nret-fa>
+.
+You can also see security activity at
+https://myaccount.google.com/notifications
+You received this email to let you know about important changes to your
+Google Account and services.
+© 2021 Google LLC, 1600 Amphitheatre Parkway, Mountain View, CA 94043, USA

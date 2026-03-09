@@ -1,0 +1,41 @@
+Add cool components and see how it will really work live with our companion app
+
+Email not displaying correctly? View it ( https://cdn.mc-weblink.sg-mktg.com/weblink/MTYyNzMxMjkwMXxvSjRCWlpJeGM2NkhfYkFDcTdsekltSHZmLXUxQ1pwVEdxMkgtMzRyaW9ER19ROWRLcTI2WkN5T3FvcWNGMXVFUWVESVRndENJRmlNQTUzVUhDdUJHcS1aY3hVa05uWVBCRVhtUEd3LTktRUJfeXhmb290Y01iRjJlOGF2b0dPeEUyZV9KZVBXQUYyTXRVMFlZdFEwZ1BCOWZQbU5pcDBxd3Nxb0dSOXE1VV91ZnNVRXFYUGN4aF9HM3dwQ2JsalV1VjZSVDZWdnBfWnFvcHpQc2ZQUXpIVmJLZ2pyS3lEV3NFNDdFb1RZVXBPRjdBZ2drZ1RVMGxaUkNVU2E1aVByVnlBTDJZcThIQlFtcldnN3NFRUdYVWIyQVRhb2tzSU1rRUJyVGgwRmZwTjlzdTExNGtZblVORWxDemVPSzNNWExEbXVRME9MVjhRPXxa35--HQujd0WRu1G0IIUPs9GQxQsgiNai38iyiH77OA== ) in your browser.
+
+*Add Advanced Components & Test It Live To See Your Creation Come To Life*
+
+We have helped millions of creators build tens of millions of app projects. With that, we've seen everything that goes into an app and made it all accessible to you! That's why there are over 50+ drag-and-drop components for you to add and customize within your project.
+
+Once you add a component to your app – test it in real-time to see your creation come to life. Check out these handy tips & tricks as you progress on your app development.
+
+*Tips & Tricks*
+
+*Watch: Adding Components Blocks To Your App*
+Our YouTube channel has short 2-3 minute tutorials that show you exactly how to add advanced functionality with simple components to your app. Easily add camera functionality, sound recording & playback, and more to your project.
+
+Check It Out ( https://www.youtube.com/playlist?list=PLB89L9PPGIrxGeViKhkRvHVD7yFc4q_Np )
+
+*Bookmark: Component Documentation*
+Put a pin in this page as it will help you understand, add, and deploy all the custom components available in Thunkable.
+
+Read More ( https://docs.thunkable.com/components )
+
+*Download: Companion App*
+As your app comes to life, make sure you test it out. You can do so by either clicking "Live Preview" on the top right of the project screen or downloading our companion app. The companion app updates in real-time so as you make edits, you can view them on your mobile device.
+
+Download iOS ( https://apps.apple.com/us/app/thunkable-live/id1223262700 )
+
+Download Android ( https://play.google.com/store/apps/details?id=com.thunkable.live&hl=en_US&gl=US )
+
+*Feeling Stuck? Here's Some Help!*
+If you've hit a wall or need inspiration – the Thunkable Community is here to help. Our Community is full of fellow creators & Thunkable staff that is available to answer your questions, test your creation, or provide constructive feedback on your app. It's free to join and there are plenty of resources there to help you get your app on track.
+
+Join Our Community ( https://community.thunkable.com/ )
+
+( https://www.facebook.com/thunkable/ ) ( https://twitter.com/thunkable ) ( https://www.instagram.com/thunkable/ ) ( https://www.linkedin.com/company/thunkable/ )
+
+Billy Beaver
+
+PO Box 22162 , San Francisco , CA 94122
+
+Unsubscribe ( https://u6512343.ct.sendgrid.net/asm/unsubscribe/?user_id=6512343&data=G5jlr91GGUTYMOULBo2zpLcTm-aB-7kFRpaHqxG_sXYNLnr-Mg_HhJOsxbHynUbrOcPQKnmQtDidN5tnIu95H5OD-KboNbSHmvBCPrLzWxk00w2uxtv-5dbwKI1sDuXRBvizuW7xiaQ026V9eQFDLlQZMLndjquqNBW43B4FQSOTdg2vuCv2ZP0tJ20-J1MJFrpBioEUl7vCqNJg68IK6xisQ4XgTNPHChllsy-ztX_U_Qb2Mk-O6XrYHXLIap4TASXyWV15PPgpyRLZVd3j8J4yFof0Eb5Dh64wXu7Mp2YgVbHjYI3AV5-yoI9ifx1rxhm9HMVJXtdRWaVqiB_a3t4xOGS4ij5HwSZvmNWK-2n8Kbb8R2uC1y3aXWs2QxwvWsKTSz1ZS5urDe6My90ZPw3eVvhgmOYTEkfaXxAshW61YP8lZRfMGn7sfZvoPjYMPSTUv_CeOGURm-g7ONwdrf4OOCcw307GkIKnKu0wL40mpVYe2KH811rcE5dqQ-S-gFaqO8r9ImzT6rfhRm63YhsgF9S6cBM5PwBIojMF7CSRkf_zwC-JtgM5pXB_l3zp99NrJ4SuqeXEZ-zIRSPpJu6sHJV2Jp2TeD9KmrFC31I9x6mZkjRvJPK-hlGV9eIBsVuQWo2igHmEumdelcZ-f-t8S67YCiW03hob6pl16LphiPGX3PmoiHfS32Xrj8DlUER9c1li564oor_gv1mVeQHEvGcV2L-YT6NHRze_QyoI6v1SUtcR4PxjAqPHvhNyb61Ym-HFYiblAJwlJNTPwnnHhAJwQVdT_CVxsf8-IeyqUgX0-s0cMfASVYCJULU0Kcd_jIUJAbWNdhCyk3su1MDDt2adpdeyxERzumfloipa7RxjRTpZJ3Wx5a26FHX0J3FaUcXbb2tvTINY-juDMmaag9CzRy5T6x36O_KlbdNXmVFr1x-iUCGSqb2s9comSPh8laB1B1C4c0XJ5a9wnBo1qUX4MQt7KxNU6boP2TkC-Hl-hZCfftcGW3_ce7Mz-XLvBnz7d0fKxAhqlGXXhg_BvFmhZWaxRrtBMOkg5tWNx-BNwFkixPIqNRr8JOImNgsvdAf7unbQg9f4V1M_5O1woqCoWf0RrE2y8cGhLo86yMtATWEJx0I1bwbUPyRtontALknR804ZB3Z2jCyqTadoX6s5vXXbrMkpGZajFeunX4gd-WY7ePBoUMLtnZXP6Nf5qzEfkYOlTBsa_oz8xY1oTcy_tNHBmmPZrhXGECYXINChpYNpGx-4oEqbdBaO ) - Unsubscribe Preferences ( https://u6512343.ct.sendgrid.net/asm/?user_id=6512343&data=9-bGRn7jCXsdGkQPh3BtseCbAhs99t1D5BRu7IRct1J9zZH0L6R7e5nrPL_2JQGmK3rE8De6YdlexecTGV56srMvc7Z8roTyNKG4GeIMgsR7mxX4xy-hJg86gH-d3RQbeLqsDwrx0EHjSMVZIaLLa8j2E_vaijBCspJxLdDkFSi46_ZLREVAxPvWFobRyfuM4fTB1jXhXENxTEeubpz5oXnPBCJluc5iVRvhHqYQGgvwItPhj_zPFkz8-mdTqDxiPZZMskMf7wFoFPQKm0VONr46qvVLvxmQkNmzZ6RAuZYln1aUDadhPNQI7dtV3r0KCkCbK9kSVsNesKAJihfd-K0rZ58Mn-xLrPvMgFeH5lIm6fw6ViS7JVvVdaQxiBUD94yvSr7a-a2Ty8AQIyUfq5-xhO1xf67BAc1Z3mXcXS6NUaxsOY0wmM2VJRPZcgBHP406WOmNVhI76qAaLv1WVzhQodqINGVowKgiqgNKPzd0HqLiOWC8_8t00IK9gbKyolWLCRNLqHuQ3OcjrCHxriyxqjDXcowrLA1p5mGT0ZRG7XjbkiH2HloSr9qZBT8z7vQFJRqC8nQ5GipNXY6B4Ck0pjR0N15lSQMh2rpqy2IRtvHfNSlRjgQtG8k_fUDIJTGAilFuT7GYHUl-6z5kQ35NaTtz2XXTT26Niz44gQDgty_iXehV_rKbNf-ogiO-N3eQaas2X8g8sAReNvxSdufEAVCUdTaPApsShRMZo8ISZen4IDuxY5k1z6KVCdF1DGiDQgbwota-jSrbRo7RiDBVvJ4rtDriwOJgGDgds12Vju_IoXwP3v9aUl5bDXN8C9N_zvnAhfQGGRNOl3JjuljF-tFQ-ru_hcc19-hFMnlrP7Tppbdnsyb57NbLN7_QB10oJSQSOeG4vQs1Dl_tWwNLddAKXlGVFYdXDpG5vHr9X9J4tmxEIb-oPN1kRnoHZTNPWtStHLkLsMCbfu88wlXSmEfL-032THeY1yAYGzz0TI2HUv5QmAdkXN-9dRKKaMVLNihdhIIdc9niSIBnqohMQlQdcRH3xBU8hD7MYbrXK-kVBtD-ekVv7LR-IPLsl23wjqHdhJD_Kz4YP1MawCsQ5c82gq5g9TaA_hsyY7olEQNiJuIZoRjudeDMpMeneXtG6YukuknOMy-F_DgMQ5n-Vc7hPz9W2PsgB5nUtbqiBlsRvls-_H_V5UhPH5lQZB8owIf7U7AP7sU9yu4RG51QFjU7aXs5HsY2aXs-4AA= )

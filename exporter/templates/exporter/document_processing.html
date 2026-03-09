@@ -1,0 +1,2902 @@
+{% load static %}
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Document Processing – {{ document_id }}</title>
+    <style>
+        :root {
+            --bg: #0b1120;
+            --panel: #0f172a;
+            --panel-2: #111827;
+            --panel-3: #0b1324;
+            --accent: #38bdf8;
+            --accent-2: #6366f1;
+            --text: #f8fafc;
+            --muted: #94a3b8;
+            --border: #1f2937;
+            --success: #34d399;
+            --danger: #f87171;
+        }
+        * { box-sizing: border-box; }
+        body {
+            margin: 0;
+            font-family: "Inter", system-ui, -apple-system, sans-serif;
+            background: var(--bg);
+            color: var(--text);
+        }
+        header {
+            position: sticky;
+            top: 0;
+            z-index: 20;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 18px 28px;
+            border-bottom: 1px solid var(--border);
+            background: linear-gradient(135deg, #0f172a 0%, #0b1120 100%);
+        }
+        header h1 {
+            margin: 0;
+            font-size: 20px;
+            font-weight: 600;
+        }
+        header .user {
+            font-size: 13px;
+            color: var(--muted);
+        }
+        .header-meta {
+            display: flex;
+            gap: 12px;
+            align-items: center;
+        }
+        .chip {
+            padding: 6px 10px;
+            border-radius: 999px;
+            font-size: 12px;
+            background: rgba(56, 189, 248, 0.15);
+            color: var(--accent);
+            border: 1px solid rgba(56, 189, 248, 0.35);
+        }
+        .layout {
+            display: grid;
+            grid-template-columns: 280px minmax(0, 1fr) 360px;
+            min-height: calc(100vh - 72px);
+        }
+        .sidebar, .settings {
+            background: var(--panel-2);
+            padding: 22px;
+            border-right: 1px solid var(--border);
+            overflow-y: auto;
+        }
+        .settings {
+            border-right: none;
+            border-left: 1px solid var(--border);
+        }
+        .panel-hidden {
+            display: none;
+        }
+        .sidebar h2, .settings h2 {
+            margin-top: 0;
+            font-size: 15px;
+            text-transform: uppercase;
+            letter-spacing: 0.08em;
+            color: var(--muted);
+        }
+        .nav-item {
+            padding: 10px 12px;
+            border-radius: 8px;
+            margin-bottom: 8px;
+            cursor: pointer;
+            background: #0b1220;
+            border: 1px solid transparent;
+        }
+        .nav-item.active {
+            border-color: var(--accent);
+            color: var(--accent);
+        }
+        .feature-dock {
+            display: grid;
+            grid-template-columns: repeat(3, minmax(0, 1fr));
+            gap: 10px;
+            margin-top: 16px;
+        }
+        .feature-icon {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            gap: 6px;
+            padding: 10px 8px;
+            border-radius: 12px;
+            border: 1px solid var(--border);
+            background: #0b1220;
+            color: var(--text);
+            font-size: 12px;
+            cursor: pointer;
+        }
+        .feature-icon span {
+            font-size: 18px;
+        }
+        .feature-icon small {
+            color: var(--muted);
+            text-align: center;
+        }
+        .content {
+            padding: 24px;
+            background: var(--panel-3);
+        }
+        .status {
+            padding: 12px;
+            border-radius: 8px;
+            background: #0b1220;
+            border: 1px solid var(--border);
+            color: var(--muted);
+            margin-bottom: 12px;
+        }
+        .status.ok { color: var(--success); border-color: #14532d; }
+        .status.error { color: var(--danger); border-color: #7f1d1d; }
+        .toolbar {
+            display: flex;
+            gap: 12px;
+            flex-wrap: wrap;
+            margin-bottom: 16px;
+        }
+        .btn {
+            padding: 10px 14px;
+            border-radius: 8px;
+            border: 1px solid transparent;
+            font-size: 13px;
+            font-weight: 600;
+            cursor: pointer;
+        }
+        .btn-primary {
+            background: var(--accent);
+            color: #0f172a;
+        }
+        .btn-secondary {
+            background: rgba(99, 102, 241, 0.15);
+            color: #c7d2fe;
+            border-color: rgba(99, 102, 241, 0.4);
+        }
+        .btn-ghost {
+            background: transparent;
+            color: var(--muted);
+            border-color: var(--border);
+        }
+        .panel-card {
+            background: #0b1220;
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            padding: 14px;
+            margin-bottom: 16px;
+        }
+        .panel-card h3 {
+            margin: 0 0 8px;
+            font-size: 14px;
+            color: var(--text);
+        }
+        .chip-list {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 6px;
+            margin-top: 8px;
+        }
+        .chip-pill {
+            padding: 4px 8px;
+            border-radius: 999px;
+            font-size: 11px;
+            background: rgba(56, 189, 248, 0.15);
+            color: var(--accent);
+            border: 1px solid rgba(56, 189, 248, 0.35);
+            cursor: pointer;
+        }
+        .metadata-field {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 6px 8px;
+            border-radius: 8px;
+            background: rgba(148, 163, 184, 0.1);
+            color: var(--text);
+            font-size: 12px;
+            margin-bottom: 6px;
+        }
+        .metadata-field input {
+            width: auto;
+            margin: 0;
+        }
+        label { display: block; margin-top: 12px; font-size: 13px; color: var(--muted); }
+        select, input {
+            width: 100%;
+            padding: 8px 10px;
+            margin-top: 6px;
+            background: #0b1220;
+            color: var(--text);
+            border: 1px solid var(--border);
+            border-radius: 6px;
+        }
+        iframe {
+            width: 100%;
+            height: calc(100vh - 190px);
+            border: 1px solid var(--border);
+            border-radius: 10px;
+            background: #fff;
+        }
+        .hint {
+            font-size: 12px;
+            color: var(--muted);
+            margin-top: 8px;
+        }
+    </style>
+</head>
+<body>
+<header>
+    <div>
+        <h1>Export Studio</h1>
+        <div class="user" id="userInfo">Checking user…</div>
+    </div>
+    <div class="header-meta">
+        <span class="chip">Document ID: {{ document_id }}</span>
+        <span class="user" id="accessBadge">Preview pending…</span>
+    </div>
+</header>
+
+<div class="layout">
+    <aside class="sidebar">
+        <h2>Workspace</h2>
+    <div class="nav-item active" data-panel="layout">Document Preview</div>
+    <div class="nav-item" data-panel="layout">Document Layout</div>
+    <div class="nav-item" data-panel="headers">Header & Footer</div>
+    <div class="nav-item" data-panel="metadata">Metadata</div>
+    <div class="nav-item">Output Profiles</div>
+        <div class="panel-card">
+            <h3>Quick Actions</h3>
+            <button class="btn btn-primary" id="openPrint">Open Print View</button>
+            <button class="btn btn-secondary" id="downloadPdf">Download PDF</button>
+            <div class="hint">These actions reuse the current preview settings.</div>
+        </div>
+        <div class="panel-card">
+            <h3>Feature Dock</h3>
+            <div class="feature-dock">
+                <button class="feature-icon" type="button">
+                    <span>🧩</span>
+                    <small>Sections</small>
+                </button>
+                <button class="feature-icon" type="button">
+                    <span>🧾</span>
+                    <small>Invoice</small>
+                </button>
+                <button class="feature-icon" type="button">
+                    <span>🔖</span>
+                    <small>Headers</small>
+                </button>
+                <button class="feature-icon" type="button">
+                    <span>📎</span>
+                    <small>Assets</small>
+                </button>
+                <button class="feature-icon" type="button">
+                    <span>🛡️</span>
+                    <small>Access</small>
+                </button>
+                <button class="feature-icon" type="button">
+                    <span>⚙️</span>
+                    <small>Settings</small>
+                </button>
+            </div>
+            <div class="hint">Tap icons to unlock new tools in this space.</div>
+        </div>
+    </aside>
+
+    <main class="content">
+        <div id="accessStatus" class="status">Validating access…</div>
+        <div class="toolbar">
+            <button class="btn btn-primary" id="refreshPreview">Refresh Preview</button>
+        </div>
+        <iframe id="previewFrame" title="Document Preview"></iframe>
+    </main>
+
+    <aside class="settings">
+        <h2>Export Settings</h2>
+        <div class="panel-card" id="layoutPanel">
+            <h3>Layout</h3>
+            <label for="pageSize">Page Size</label>
+            <select id="pageSize">
+                <option value="a3">A3 (297×420mm)</option>
+                <option value="a4" selected>A4 (210×297mm)</option>
+                <option value="a5">A5 (148×210mm)</option>
+                <option value="a6">A6 (105×148mm)</option>
+                <option value="letter">Letter (8.5×11in)</option>
+                <option value="legal">Legal (8.5×14in)</option>
+                <option value="tabloid">Tabloid (11×17in)</option>
+            </select>
+
+            <label for="margin">Margins</label>
+            <select id="margin">
+                <option value="none">None</option>
+                <option value="narrow">Narrow (0.5in)</option>
+                <option value="moderate">Moderate (0.75in)</option>
+                <option value="normal" selected>Normal (1in)</option>
+                <option value="wide">Wide (2in)</option>
+            </select>
+
+            <label for="font">Font</label>
+            <select id="font">
+                <option value="serif" selected>Serif (Georgia)</option>
+                <option value="sans">Sans-serif (Arial)</option>
+                <option value="mono">Monospace (Courier)</option>
+            </select>
+
+            <label for="fontSize">Font Size</label>
+            <select id="fontSize">
+                <option value="10pt">10pt</option>
+                <option value="11pt">11pt</option>
+                <option value="12pt" selected>12pt</option>
+                <option value="13pt">13pt</option>
+                <option value="14pt">14pt</option>
+            </select>
+
+            <label for="lineSpacing">Line Spacing</label>
+            <select id="lineSpacing">
+                <option value="single">Single</option>
+                <option value="1.15">1.15</option>
+                <option value="1.5" selected>1.5</option>
+                <option value="double">Double</option>
+            </select>
+        </div>
+
+        <details class="panel-card" data-panel-group="layout" open>
+            <summary>PDF Images</summary>
+            <label for="logoImage">Logo</label>
+            <select id="logoImage">
+                <option value="">No logo</option>
+            </select>
+            <div class="row" style="margin-top: 6px;">
+                <button class="btn btn-ghost" id="downloadLogoSelect">Download Logo</button>
+            </div>
+
+            <label for="watermarkImage">Watermark</label>
+            <select id="watermarkImage">
+                <option value="">No watermark</option>
+            </select>
+            <div class="row" style="margin-top: 6px;">
+                <button class="btn btn-ghost" id="downloadWatermarkSelect">Download Watermark</button>
+            </div>
+
+            <label for="backgroundImage">Background</label>
+            <select id="backgroundImage">
+                <option value="">No background</option>
+            </select>
+            <div class="row" style="margin-top: 6px;">
+                <button class="btn btn-ghost" id="downloadBackgroundSelect">Download Background</button>
+            </div>
+
+            <div class="row" style="margin-top: 12px;">
+                <button class="btn btn-secondary" id="savePdfImages">Save PDF Images</button>
+            </div>
+            <div class="hint">Select uploaded images to use as logo, watermark, or background.</div>
+            <div class="hint" id="pdfImagesStatus"></div>
+        </details>
+
+        <details class="panel-card" data-panel-group="layout">
+            <summary>Table Styles</summary>
+            <label for="tableStylePreset">Style preset</label>
+            <select id="tableStylePreset">
+                <option value="standard">Standard</option>
+                <option value="clean" selected>Clean</option>
+                <option value="dark">Dark</option>
+                <option value="minimal">Minimal</option>
+            </select>
+
+            <label for="tableOverflowMode">Overflow mode</label>
+            <select id="tableOverflowMode">
+                <option value="none">None</option>
+                <option value="split_columns" selected>Split columns</option>
+                <option value="separate_page">Separate page</option>
+                <option value="rotate_page">Rotate page</option>
+            </select>
+
+            <label for="tableSplitCount">Columns per split</label>
+            <input id="tableSplitCount" type="number" min="2" step="1" value="6" />
+
+            <div class="row" style="margin-top: 12px;">
+                <button class="btn btn-secondary" id="applyTableStyles">Apply to all tables</button>
+            </div>
+            <div class="hint" id="tableStyleStatus"></div>
+        </details>
+
+        <details class="panel-card" data-panel-group="layout">
+            <summary>PDF File Display</summary>
+            <label for="filePdfScale">PDF scale (%)</label>
+            <input id="filePdfScale" type="number" min="60" max="100" step="1" value="80" />
+
+            <label for="filePageRange">Page range</label>
+            <input id="filePageRange" placeholder="1-3,5" />
+
+            <div class="row" style="margin-top: 6px;">
+                <label><input type="checkbox" id="fileShowBorder" checked /> Border</label>
+                <label><input type="checkbox" id="fileShowCaption" /> Caption + metadata</label>
+            </div>
+
+            <div class="row" style="margin-top: 12px;">
+                <button class="btn btn-secondary" id="applyFileDisplay">Apply to all file PDFs</button>
+            </div>
+            <div class="hint" id="fileDisplayStatus"></div>
+        </details>
+
+        <details class="panel-card" data-panel-group="layout">
+            <summary>PDF Security</summary>
+            <label><input type="checkbox" id="pdfPasswordEnabled" /> Require password</label>
+            <label for="pdfUserPassword">User password</label>
+            <input id="pdfUserPassword" type="password" placeholder="Enter user password" />
+            <label for="pdfOwnerPassword">Owner password (optional)</label>
+            <input id="pdfOwnerPassword" type="password" placeholder="Enter owner password" />
+            <div class="panel-card" style="margin-top: 12px;">
+                <h3>Text protection</h3>
+                <label><input type="checkbox" id="textProtectionEnabled" /> Make PDF non-selectable</label>
+                <label for="textProtectionMode">Mode</label>
+                <select id="textProtectionMode">
+                    <option value="rasterize">Rasterize (image-only)</option>
+                </select>
+                <label for="textProtectionDpi">Rasterize DPI</label>
+                <input id="textProtectionDpi" type="number" min="120" max="600" step="10" value="200" />
+                <label><input type="checkbox" id="textProtectionRemoveMetadata" checked /> Remove metadata</label>
+                <label for="textProtectionKey">Encryption key (optional)</label>
+                <input id="textProtectionKey" type="password" placeholder="Key to recover text" />
+                <div class="hint">Original text is stored as an encrypted attachment when a key is provided.</div>
+            </div>
+            <div class="row" style="margin-top: 12px;">
+                <button class="btn btn-secondary" id="savePdfSecurity">Save PDF Security</button>
+            </div>
+            <div class="hint" id="pdfSecurityStatus"></div>
+        </details>
+
+        <details class="panel-card panel-hidden" id="metadataPanel">
+            <summary>Metadata Columns</summary>
+            <div class="hint">Toggle which metadata fields are embedded in PDF metadata.</div>
+            <div id="metadataFieldList" style="margin-top: 8px;"></div>
+            <div class="row" style="margin-top: 12px;">
+                <button class="btn btn-secondary" id="saveMetadataFields">Save Metadata Fields</button>
+            </div>
+            <div class="hint" id="metadataFieldStatus"></div>
+        </details>
+
+        <div class="panel-card panel-hidden" id="headerFooterPanel">
+            <h3>Headers & Footers</h3>
+            <label for="headerTemplate">Header Template</label>
+            <select id="headerTemplate">
+                <option value="">No header template</option>
+            </select>
+
+            <label for="footerTemplate">Footer Template</label>
+            <select id="footerTemplate">
+                <option value="">No footer template</option>
+            </select>
+
+            <div class="panel-card">
+                <h3>Header Display</h3>
+                <label for="headerPageScope">Show header on</label>
+                <select id="headerPageScope">
+                    <option value="all">All pages</option>
+                    <option value="first">First page only</option>
+                    <option value="custom">Specific pages</option>
+                </select>
+                <input id="headerPageList" placeholder="Pages: 1,2,5" />
+                <label for="headerContentSpacing">Header to content spacing (px)</label>
+                <input id="headerContentSpacing" type="number" min="0" step="1" placeholder="0" />
+                <div class="hint">Use comma-separated page numbers for specific pages.</div>
+            </div>
+
+            <div class="panel-card">
+                <h3>Template Preview</h3>
+                <div class="hint" id="headerTemplatePreview">Select a header template to preview fields.</div>
+                <div class="hint" id="footerTemplatePreview">Select a footer template to preview fields.</div>
+            </div>
+
+            <!-- ===== Unified Header/Footer PDF Upload & Crop ===== -->
+            <div class="panel-card">
+                <h3>📄 Header / Footer PDF</h3>
+                <div class="hint" style="margin-top:0;margin-bottom:10px;">Upload a PDF letterhead, then crop header and/or footer regions with a visual slider.</div>
+
+                <label for="hfPdfSourceFile">Source PDF</label>
+                <select id="hfPdfSourceFile">
+                    <option value="">Select a PDF…</option>
+                </select>
+                <div class="row" style="margin-top: 8px; gap: 6px;">
+                    <input type="file" id="hfPdfUploadInput" accept="application/pdf" style="flex:1;" />
+                    <button class="btn btn-secondary" id="hfPdfUploadBtn">Upload</button>
+                </div>
+                <div class="hint" id="hfPdfUploadStatus"></div>
+
+                <!-- Active header/footer indicators -->
+                <div id="hfActiveHeader" style="display:none; margin-top:10px; padding:8px 10px; border-radius:8px; background:rgba(52,211,153,0.1); border:1px solid rgba(52,211,153,0.3);">
+                    <div style="display:flex;justify-content:space-between;align-items:center;">
+                        <span style="font-size:12px;color:var(--success);">✓ Header: <span id="hfActiveHeaderName">—</span> (<span id="hfActiveHeaderHeight">—</span>pt)</span>
+                        <button class="btn btn-ghost" style="padding:4px 8px;font-size:11px;" id="hfRemoveHeader">Remove</button>
+                    </div>
+                    <div style="margin-top:4px;">
+                        <label style="font-size:11px;margin-top:0;" for="headerPdfPageScope">Apply on</label>
+                        <select id="headerPdfPageScope" style="display:inline-block;width:auto;padding:4px 6px;font-size:11px;">
+                            <option value="first" selected>First page only</option>
+                            <option value="all">All pages</option>
+                            <option value="custom">Specific pages</option>
+                        </select>
+                        <input id="headerPdfPageList" placeholder="1,2,5" style="display:inline-block;width:80px;padding:4px 6px;font-size:11px;" />
+                    </div>
+                </div>
+
+                <div id="hfActiveFooter" style="display:none; margin-top:8px; padding:8px 10px; border-radius:8px; background:rgba(52,211,153,0.1); border:1px solid rgba(52,211,153,0.3);">
+                    <div style="display:flex;justify-content:space-between;align-items:center;">
+                        <span style="font-size:12px;color:var(--success);">✓ Footer: <span id="hfActiveFooterName">—</span> (<span id="hfActiveFooterHeight">—</span>pt)</span>
+                        <button class="btn btn-ghost" style="padding:4px 8px;font-size:11px;" id="hfRemoveFooter">Remove</button>
+                    </div>
+                    <div style="margin-top:4px;">
+                        <label style="font-size:11px;margin-top:0;" for="footerPdfPageScope">Apply on</label>
+                        <select id="footerPdfPageScope" style="display:inline-block;width:auto;padding:4px 6px;font-size:11px;">
+                            <option value="first" selected>First page only</option>
+                            <option value="all">All pages</option>
+                            <option value="custom">Specific pages</option>
+                        </select>
+                        <input id="footerPdfPageList" placeholder="1,2,5" style="display:inline-block;width:80px;padding:4px 6px;font-size:11px;" />
+                    </div>
+                </div>
+
+                <div style="margin-top:10px;">
+                    <button class="btn btn-primary" id="hfOpenCropModal" disabled>Open Crop Editor</button>
+                    <button class="btn btn-ghost" id="hfAutoDetectBtn" disabled>Auto-Detect</button>
+                </div>
+
+                <!-- Hidden legacy elements for backward compat -->
+                <select id="headerPdfFile" style="display:none;"><option value="">No header PDF</option></select>
+                <input id="headerPdfUpload" type="file" accept="application/pdf" style="display:none;" />
+                <input id="headerPdfHeight" style="display:none;" />
+                <select id="footerPdfFile" style="display:none;"><option value="">No footer PDF</option></select>
+                <input id="footerPdfUpload" type="file" accept="application/pdf" style="display:none;" />
+                <input id="footerPdfHeight" style="display:none;" />
+                <div id="headerPdfStatus" style="display:none;"></div>
+                <div id="footerPdfStatus" style="display:none;"></div>
+            </div>
+
+            <!-- ===== Library: saved header/footer PDFs ===== -->
+            <div class="panel-card">
+                <h3>📚 My Header/Footer Library</h3>
+                <div id="hfLibraryList" style="max-height:200px;overflow-y:auto;">
+                    <div class="hint">No saved items yet.</div>
+                </div>
+                <button class="btn btn-ghost" id="hfRefreshLibrary" style="margin-top:8px;font-size:11px;">Refresh Library</button>
+            </div>
+
+            <!-- ===== CROP MODAL OVERLAY ===== -->
+            <div id="hfCropModal" style="display:none; position:fixed; inset:0; z-index:1000; background:rgba(0,0,0,0.88); overflow-y:auto;">
+                <div style="max-width:820px; margin:24px auto; background:var(--panel); border:1px solid var(--border); border-radius:16px; padding:28px; position:relative;">
+                    <button id="hfCropModalClose" style="position:absolute;top:14px;right:14px;background:transparent;border:none;color:var(--muted);font-size:22px;cursor:pointer;z-index:20;">✕</button>
+                    <h2 style="margin:0 0 4px;font-size:18px;">✂️ Crop Header / Footer Region</h2>
+                    <div class="hint" style="margin-bottom:14px;">PDF first page is shown below. <strong>Drag the blue/purple horizontal lines</strong> or use the sliders to define crop regions.</div>
+
+                    <!-- Region type selector -->
+                    <div style="display:flex;gap:16px;margin-bottom:14px;padding:10px 14px;background:#0b1220;border-radius:10px;border:1px solid var(--border);">
+                        <label style="display:flex;align-items:center;gap:6px;cursor:pointer;margin:0;font-size:13px;color:var(--text);font-weight:500;">
+                            <input type="radio" name="hfRegionType" value="header" style="width:auto;margin:0;" />
+                            <span style="color:var(--accent);">⬒</span> Header only
+                        </label>
+                        <label style="display:flex;align-items:center;gap:6px;cursor:pointer;margin:0;font-size:13px;color:var(--text);font-weight:500;">
+                            <input type="radio" name="hfRegionType" value="footer" style="width:auto;margin:0;" />
+                            <span style="color:var(--accent-2);">⬓</span> Footer only
+                        </label>
+                        <label style="display:flex;align-items:center;gap:6px;cursor:pointer;margin:0;font-size:13px;color:var(--text);font-weight:500;">
+                            <input type="radio" name="hfRegionType" value="both" checked style="width:auto;margin:0;" />
+                            <span>⬒⬓</span> Both
+                        </label>
+                    </div>
+
+                    <!-- PDF Preview with horizontal crop lines -->
+                    <div id="hfPreviewContainer" style="position:relative; border:2px solid var(--border); border-radius:8px; overflow:hidden; background:#fff; margin-bottom:16px; user-select:none; line-height:0;">
+                        <img id="hfPreviewImage" alt="PDF Page 1" style="display:block;width:100%;height:auto;pointer-events:none;" draggable="false" />
+
+                        <!-- ─── HEADER: shaded overlay (top → headerPx) ─── -->
+                        <div id="hfHeaderOverlay" style="position:absolute;top:0;left:0;right:0;height:0;background:rgba(56,189,248,0.15);border-bottom:none;pointer-events:none;transition:height 0.05s linear;display:none;"></div>
+
+                        <!-- ─── HEADER: horizontal line at headerPx from top ─── -->
+                        <div id="hfHeaderLine" style="position:absolute;left:0;right:0;top:0;height:3px;background:#38bdf8;box-shadow:0 0 8px rgba(56,189,248,0.7),0 1px 3px rgba(0,0,0,0.3);pointer-events:none;z-index:6;display:none;transition:top 0.05s linear;"></div>
+                        <!-- Header line label (positioned via JS) -->
+                        <div id="hfHeaderLabel" style="position:absolute;left:50%;top:0;transform:translateX(-50%);background:#38bdf8;color:#0f172a;font-size:10px;font-weight:700;padding:2px 10px;border-radius:0 0 5px 5px;white-space:nowrap;pointer-events:none;z-index:7;display:none;letter-spacing:0.5px;">HEADER ▼ <span id="hfHeaderLabelPts">80</span>pt</div>
+                        <!-- Header drag handle: invisible 28px tall hit-area centered on line -->
+                        <div id="hfHeaderHandle" style="position:absolute;left:0;right:0;height:28px;top:0;cursor:row-resize;z-index:12;display:none;"></div>
+
+                        <!-- ─── FOOTER: shaded overlay (bottom → footerPx) ─── -->
+                        <div id="hfFooterOverlay" style="position:absolute;bottom:0;left:0;right:0;height:0;background:rgba(99,102,241,0.15);border-top:none;pointer-events:none;transition:height 0.05s linear;display:none;"></div>
+
+                        <!-- ─── FOOTER: horizontal line at footerPx from bottom ─── -->
+                        <div id="hfFooterLine" style="position:absolute;left:0;right:0;bottom:0;height:3px;background:#6366f1;box-shadow:0 0 8px rgba(99,102,241,0.7),0 -1px 3px rgba(0,0,0,0.3);pointer-events:none;z-index:6;display:none;transition:bottom 0.05s linear;"></div>
+                        <!-- Footer line label (positioned via JS) -->
+                        <div id="hfFooterLabel" style="position:absolute;left:50%;bottom:0;transform:translateX(-50%);background:#6366f1;color:#fff;font-size:10px;font-weight:700;padding:2px 10px;border-radius:5px 5px 0 0;white-space:nowrap;pointer-events:none;z-index:7;display:none;letter-spacing:0.5px;">▲ FOOTER <span id="hfFooterLabelPts">80</span>pt</div>
+                        <!-- Footer drag handle -->
+                        <div id="hfFooterHandle" style="position:absolute;left:0;right:0;height:28px;bottom:0;cursor:row-resize;z-index:12;display:none;"></div>
+
+                        <!-- Loading spinner overlay -->
+                        <div id="hfPreviewLoading" style="display:none;position:absolute;inset:0;background:rgba(0,0,0,0.5);display:none;align-items:center;justify-content:center;z-index:20;">
+                            <div style="color:#fff;font-size:14px;">Loading PDF…</div>
+                        </div>
+                    </div>
+
+                    <!-- Slider controls -->
+                    <div id="hfHeaderSliderRow" style="display:flex;align-items:center;gap:10px;margin-bottom:10px;">
+                        <label style="margin:0;font-size:12px;width:110px;flex-shrink:0;color:#38bdf8;font-weight:600;">⬒ Header height</label>
+                        <input type="range" id="hfHeaderSlider" min="0" max="500" value="80" step="1" style="flex:1;accent-color:#38bdf8;" />
+                        <input type="number" id="hfHeaderValue" min="0" max="500" value="80" style="width:64px;text-align:center;padding:5px 4px;font-size:13px;border-radius:6px;" />
+                        <span style="font-size:11px;color:var(--muted);">pt</span>
+                    </div>
+                    <div id="hfFooterSliderRow" style="display:flex;align-items:center;gap:10px;margin-bottom:16px;">
+                        <label style="margin:0;font-size:12px;width:110px;flex-shrink:0;color:#6366f1;font-weight:600;">⬓ Footer height</label>
+                        <input type="range" id="hfFooterSlider" min="0" max="500" value="80" step="1" style="flex:1;accent-color:#6366f1;" />
+                        <input type="number" id="hfFooterValue" min="0" max="500" value="80" style="width:64px;text-align:center;padding:5px 4px;font-size:13px;border-radius:6px;" />
+                        <span style="font-size:11px;color:var(--muted);">pt</span>
+                    </div>
+
+                    <!-- Name inputs -->
+                    <div id="hfHeaderNameRow" style="display:flex;align-items:center;gap:10px;margin-bottom:8px;">
+                        <label style="margin:0;font-size:12px;width:110px;flex-shrink:0;">Header name</label>
+                        <input id="hfHeaderName" placeholder="e.g. Corporate Header" style="flex:1;padding:6px 10px;" />
+                    </div>
+                    <div id="hfFooterNameRow" style="display:flex;align-items:center;gap:10px;margin-bottom:16px;">
+                        <label style="margin:0;font-size:12px;width:110px;flex-shrink:0;">Footer name</label>
+                        <input id="hfFooterName" placeholder="e.g. Corporate Footer" style="flex:1;padding:6px 10px;" />
+                    </div>
+
+                    <!-- Actions -->
+                    <div style="display:flex;gap:10px;justify-content:flex-end;">
+                        <button class="btn btn-ghost" id="hfCropAutoDetect">🔍 Auto-Detect</button>
+                        <button class="btn btn-ghost" id="hfCropCancel">Cancel</button>
+                        <button class="btn btn-primary" id="hfCropSave">💾 Save & Apply</button>
+                    </div>
+                    <div class="hint" id="hfCropStatus" style="text-align:right;margin-top:6px;"></div>
+                </div>
+            </div>
+
+            <div class="panel-card">
+                <h3>Organization Info</h3>
+                <input id="orgName" placeholder="Organization name" />
+                <input id="orgPhone" placeholder="Phone" />
+                <input id="orgEmail" placeholder="Email" />
+                <input id="orgWebsite" placeholder="Website" />
+                <input id="orgAddress1" placeholder="Address line 1" />
+                <input id="orgAddress2" placeholder="Address line 2" />
+                <input id="orgCity" placeholder="City" />
+                <input id="orgState" placeholder="State" />
+                <input id="orgPostal" placeholder="Postal code" />
+                <input id="orgCountry" placeholder="Country" />
+                <div class="hint">Updating these fields updates the organization profile.</div>
+            </div>
+
+            <div class="panel-card">
+                <h3>PDF Images</h3>
+                <div class="image-upload-row">
+                    <label for="logoUpload">Logo</label>
+                    <input type="file" id="logoUpload" accept="image/*" />
+                    <div class="row" style="margin-top: 8px;">
+                        <button class="btn btn-secondary" id="uploadLogo">Upload Logo</button>
+                        <button class="btn btn-ghost" id="clearLogo">Remove</button>
+                    </div>
+                </div>
+                <div class="image-upload-row">
+                    <label for="watermarkUpload">Watermark</label>
+                    <input type="file" id="watermarkUpload" accept="image/*" />
+                    <div class="row" style="margin-top: 8px;">
+                        <button class="btn btn-secondary" id="uploadWatermark">Upload Watermark</button>
+                        <button class="btn btn-ghost" id="clearWatermark">Remove</button>
+                    </div>
+                </div>
+                <div class="image-upload-row">
+                    <label for="backgroundUpload">Background</label>
+                    <input type="file" id="backgroundUpload" accept="image/*" />
+                    <div class="row" style="margin-top: 8px;">
+                        <button class="btn btn-secondary" id="uploadBackground">Upload Background</button>
+                        <button class="btn btn-ghost" id="clearBackground">Remove</button>
+                    </div>
+                </div>
+                <div class="hint" id="imageUploadStatus"></div>
+            </div>
+
+            <div class="panel-card">
+                <h3>Custom Metadata (JSON)</h3>
+                <textarea id="customMetadata" placeholder='{"invoice": {"number": "INV-001"}}'></textarea>
+                <div class="hint">Custom fields are available as {invoice.number} placeholders.</div>
+            </div>
+
+            <div class="panel-card">
+                <h3>Placeholder Canvas</h3>
+                <div class="chip-list" id="placeholderCanvas"></div>
+                <div class="hint">Click a token to insert it into the active field.</div>
+            </div>
+
+            <div class="row" style="margin-top: 12px;">
+                <button class="btn btn-secondary" id="saveHeaderFooter">Save Header/Footer</button>
+                <button class="btn btn-ghost" id="backToLayout">Back to Layout</button>
+            </div>
+            <div class="hint">Applies to PDF export.</div>
+            <div class="hint" id="headerFooterStatus"></div>
+        </div>
+
+        <div class="panel-card" id="headerFooterLauncher">
+            <h3>Header & Footer</h3>
+            <button class="btn btn-secondary" id="openHeaderFooter">Edit Header/Footer</button>
+            <div class="hint">Switches the sidebar to header/footer controls.</div>
+        </div>
+
+        <button class="btn btn-primary" id="applySettings">Apply Preview</button>
+        <div class="hint">Preview uses the settings above.</div>
+    </aside>
+</div>
+
+<script>
+    const documentId = "{{ document_id }}";
+    const userInfo = document.getElementById("userInfo");
+    const accessStatus = document.getElementById("accessStatus");
+    const previewFrame = document.getElementById("previewFrame");
+    const accessBadge = document.getElementById("accessBadge");
+    const refreshPreview = document.getElementById("refreshPreview");
+    const openPrint = document.getElementById("openPrint");
+    const downloadPdf = document.getElementById("downloadPdf");
+    const openHeaderFooter = document.getElementById("openHeaderFooter");
+    const backToLayout = document.getElementById("backToLayout");
+    const saveHeaderFooter = document.getElementById("saveHeaderFooter");
+    const headerFooterStatus = document.getElementById("headerFooterStatus");
+    const headerTemplateSelect = document.getElementById("headerTemplate");
+    const footerTemplateSelect = document.getElementById("footerTemplate");
+    const headerTemplatePreview = document.getElementById("headerTemplatePreview");
+    const footerTemplatePreview = document.getElementById("footerTemplatePreview");
+    const placeholderCanvas = document.getElementById("placeholderCanvas");
+    const customMetadataInput = document.getElementById("customMetadata");
+    const headerPageScope = document.getElementById("headerPageScope");
+    const headerPageList = document.getElementById("headerPageList");
+    const headerContentSpacing = document.getElementById("headerContentSpacing");
+    const logoUpload = document.getElementById("logoUpload");
+    const watermarkUpload = document.getElementById("watermarkUpload");
+    const backgroundUpload = document.getElementById("backgroundUpload");
+    const uploadLogo = document.getElementById("uploadLogo");
+    const uploadWatermark = document.getElementById("uploadWatermark");
+    const uploadBackground = document.getElementById("uploadBackground");
+    const clearLogo = document.getElementById("clearLogo");
+    const clearWatermark = document.getElementById("clearWatermark");
+    const clearBackground = document.getElementById("clearBackground");
+    const headerPdfFileSelect = document.getElementById("headerPdfFile");
+    const headerPdfUpload = document.getElementById("headerPdfUpload");
+    const headerPdfHeight = document.getElementById("headerPdfHeight");
+    const headerPdfPageScope = document.getElementById("headerPdfPageScope");
+    const headerPdfPageList = document.getElementById("headerPdfPageList");
+    const headerPdfStatus = document.getElementById("headerPdfStatus");
+    const footerPdfFileSelect = document.getElementById("footerPdfFile");
+    const footerPdfUpload = document.getElementById("footerPdfUpload");
+    const footerPdfHeight = document.getElementById("footerPdfHeight");
+    const footerPdfPageScope = document.getElementById("footerPdfPageScope");
+    const footerPdfPageList = document.getElementById("footerPdfPageList");
+    const footerPdfStatus = document.getElementById("footerPdfStatus");
+    const orgName = document.getElementById("orgName");
+    const orgPhone = document.getElementById("orgPhone");
+    const orgEmail = document.getElementById("orgEmail");
+    const orgWebsite = document.getElementById("orgWebsite");
+    const orgAddress1 = document.getElementById("orgAddress1");
+    const orgAddress2 = document.getElementById("orgAddress2");
+    const orgCity = document.getElementById("orgCity");
+    const orgState = document.getElementById("orgState");
+    const orgPostal = document.getElementById("orgPostal");
+    const orgCountry = document.getElementById("orgCountry");
+    const layoutPanel = document.getElementById("layoutPanel");
+    const headerFooterPanel = document.getElementById("headerFooterPanel");
+    const metadataPanel = document.getElementById("metadataPanel");
+    const layoutGroups = Array.from(document.querySelectorAll('[data-panel-group="layout"]'));
+    const navItems = Array.from(document.querySelectorAll(".nav-item[data-panel]"));
+    const logoImageSelect = document.getElementById("logoImage");
+    const watermarkImageSelect = document.getElementById("watermarkImage");
+    const backgroundImageSelect = document.getElementById("backgroundImage");
+    const savePdfImages = document.getElementById("savePdfImages");
+    const pdfImagesStatus = document.getElementById("pdfImagesStatus");
+    const downloadLogoSelect = document.getElementById("downloadLogoSelect");
+    const downloadWatermarkSelect = document.getElementById("downloadWatermarkSelect");
+    const downloadBackgroundSelect = document.getElementById("downloadBackgroundSelect");
+    const tableStylePreset = document.getElementById("tableStylePreset");
+    const tableOverflowMode = document.getElementById("tableOverflowMode");
+    const tableSplitCount = document.getElementById("tableSplitCount");
+    const applyTableStyles = document.getElementById("applyTableStyles");
+    const tableStyleStatus = document.getElementById("tableStyleStatus");
+    const filePdfScale = document.getElementById("filePdfScale");
+    const filePageRange = document.getElementById("filePageRange");
+    const fileShowBorder = document.getElementById("fileShowBorder");
+    const fileShowCaption = document.getElementById("fileShowCaption");
+    const applyFileDisplay = document.getElementById("applyFileDisplay");
+    const fileDisplayStatus = document.getElementById("fileDisplayStatus");
+    const pdfPasswordEnabled = document.getElementById("pdfPasswordEnabled");
+    const pdfUserPassword = document.getElementById("pdfUserPassword");
+    const pdfOwnerPassword = document.getElementById("pdfOwnerPassword");
+    const textProtectionEnabled = document.getElementById("textProtectionEnabled");
+    const textProtectionMode = document.getElementById("textProtectionMode");
+    const textProtectionDpi = document.getElementById("textProtectionDpi");
+    const textProtectionRemoveMetadata = document.getElementById("textProtectionRemoveMetadata");
+    const textProtectionKey = document.getElementById("textProtectionKey");
+    const savePdfSecurity = document.getElementById("savePdfSecurity");
+    const pdfSecurityStatus = document.getElementById("pdfSecurityStatus");
+    const metadataFieldList = document.getElementById("metadataFieldList");
+    const saveMetadataFields = document.getElementById("saveMetadataFields");
+    const metadataFieldStatus = document.getElementById("metadataFieldStatus");
+    let activeField = null;
+
+    /* ===== New Header/Footer Crop Modal DOM refs ===== */
+    const hfPdfSourceFile = document.getElementById("hfPdfSourceFile");
+    const hfPdfUploadInput = document.getElementById("hfPdfUploadInput");
+    const hfPdfUploadBtn = document.getElementById("hfPdfUploadBtn");
+    const hfPdfUploadStatus = document.getElementById("hfPdfUploadStatus");
+    const hfOpenCropModal = document.getElementById("hfOpenCropModal");
+    const hfAutoDetectBtn = document.getElementById("hfAutoDetectBtn");
+    const hfActiveHeader = document.getElementById("hfActiveHeader");
+    const hfActiveHeaderName = document.getElementById("hfActiveHeaderName");
+    const hfActiveHeaderHeight = document.getElementById("hfActiveHeaderHeight");
+    const hfRemoveHeader = document.getElementById("hfRemoveHeader");
+    const hfActiveFooter = document.getElementById("hfActiveFooter");
+    const hfActiveFooterName = document.getElementById("hfActiveFooterName");
+    const hfActiveFooterHeight = document.getElementById("hfActiveFooterHeight");
+    const hfRemoveFooter = document.getElementById("hfRemoveFooter");
+    const hfRefreshLibrary = document.getElementById("hfRefreshLibrary");
+    const hfLibraryList = document.getElementById("hfLibraryList");
+    // Modal
+    const hfCropModal = document.getElementById("hfCropModal");
+    const hfCropModalClose = document.getElementById("hfCropModalClose");
+    const hfPreviewImage = document.getElementById("hfPreviewImage");
+    const hfPreviewContainer = document.getElementById("hfPreviewContainer");
+    const hfPreviewLoading = document.getElementById("hfPreviewLoading");
+    const hfHeaderOverlay = document.getElementById("hfHeaderOverlay");
+    const hfFooterOverlay = document.getElementById("hfFooterOverlay");
+    const hfHeaderLine = document.getElementById("hfHeaderLine");
+    const hfFooterLine = document.getElementById("hfFooterLine");
+    const hfHeaderLabel = document.getElementById("hfHeaderLabel");
+    const hfFooterLabel = document.getElementById("hfFooterLabel");
+    const hfHeaderLabelPts = document.getElementById("hfHeaderLabelPts");
+    const hfFooterLabelPts = document.getElementById("hfFooterLabelPts");
+    const hfHeaderHandle = document.getElementById("hfHeaderHandle");
+    const hfFooterHandle = document.getElementById("hfFooterHandle");
+    const hfHeaderSlider = document.getElementById("hfHeaderSlider");
+    const hfHeaderValue = document.getElementById("hfHeaderValue");
+    const hfFooterSlider = document.getElementById("hfFooterSlider");
+    const hfFooterValue = document.getElementById("hfFooterValue");
+    const hfHeaderSliderRow = document.getElementById("hfHeaderSliderRow");
+    const hfFooterSliderRow = document.getElementById("hfFooterSliderRow");
+    const hfHeaderNameRow = document.getElementById("hfHeaderNameRow");
+    const hfFooterNameRow = document.getElementById("hfFooterNameRow");
+    const hfHeaderName = document.getElementById("hfHeaderName");
+    const hfFooterName = document.getElementById("hfFooterName");
+    const hfCropAutoDetect = document.getElementById("hfCropAutoDetect");
+    const hfCropCancel = document.getElementById("hfCropCancel");
+    const hfCropSave = document.getElementById("hfCropSave");
+    const hfCropStatus = document.getElementById("hfCropStatus");
+
+    /* ===== Crop Modal State ===== */
+    let hfCropState = {
+        sourceFileId: null,
+        pageCount: 1,
+        currentPage: 1,
+        pageWidthPts: 595.28,
+        pageHeightPts: 841.89,
+        // Image display → pts scale
+        get pxPerPt() {
+            const imgEl = hfPreviewImage;
+            if (!imgEl || !imgEl.naturalHeight || !this.pageHeightPts) return 1;
+            return imgEl.clientHeight / this.pageHeightPts;
+        },
+    };
+
+    function buildPreviewUrl() {
+        const params = new URLSearchParams({
+            pageSize: document.getElementById("pageSize").value,
+            margin: document.getElementById("margin").value,
+            font: document.getElementById("font").value,
+            fontSize: document.getElementById("fontSize").value,
+            lineSpacing: document.getElementById("lineSpacing").value,
+        });
+        // Show PDF directly in iframe
+        return `/documents/${documentId}/download-pdf/?${params.toString()}`;
+    }
+
+    function buildDownloadUrl() {
+        const params = new URLSearchParams({
+            pageSize: document.getElementById("pageSize").value,
+            margin: document.getElementById("margin").value,
+            font: document.getElementById("font").value,
+            fontSize: document.getElementById("fontSize").value,
+            lineSpacing: document.getElementById("lineSpacing").value,
+        });
+        return `/documents/${documentId}/download-pdf/?${params.toString()}`;
+    }
+
+    function setPanel(panel) {
+        const showLayout = panel !== "headers" && panel !== "metadata";
+        layoutPanel.classList.toggle("panel-hidden", !showLayout);
+        headerFooterPanel.classList.toggle("panel-hidden", panel !== "headers");
+        layoutGroups.forEach((panelItem) => panelItem.classList.toggle("panel-hidden", !showLayout));
+        if (metadataPanel) {
+            metadataPanel.classList.toggle("panel-hidden", panel !== "metadata");
+            if (panel === "metadata") {
+                metadataPanel.open = true;
+            }
+        }
+        navItems.forEach((item) => {
+            item.classList.toggle("active", item.dataset.panel === panel);
+        });
+    }
+
+    function setHeaderFooterStatus(message, ok = true) {
+        headerFooterStatus.textContent = message;
+        headerFooterStatus.style.color = ok ? "var(--success)" : "var(--danger)";
+    }
+
+    function setHeaderPdfStatus(message, ok = true) {
+        if (!headerPdfStatus) return;
+        headerPdfStatus.textContent = message;
+        headerPdfStatus.style.color = ok ? "var(--success)" : "var(--danger)";
+    }
+
+    function updateHeaderTemplateAvailability() {
+        if (!headerTemplateSelect) return;
+        const headerPdfActive = !!(headerPdfFileSelect?.value);
+        headerTemplateSelect.disabled = headerPdfActive;
+        if (headerPdfActive) {
+            headerTemplateSelect.value = "";
+            if (headerTemplatePreview) {
+                headerTemplatePreview.textContent = "Header PDF active — template disabled";
+            }
+        }
+    }
+
+    function setFooterPdfStatus(message, ok = true) {
+        if (!footerPdfStatus) return;
+        footerPdfStatus.textContent = message;
+        footerPdfStatus.style.color = ok ? "var(--success)" : "var(--danger)";
+    }
+
+    function updateFooterTemplateAvailability() {
+        if (!footerTemplateSelect) return;
+        const footerPdfActive = !!(footerPdfFileSelect?.value);
+        footerTemplateSelect.disabled = footerPdfActive;
+        if (footerPdfActive) {
+            footerTemplateSelect.value = "";
+            if (footerTemplatePreview) {
+                footerTemplatePreview.textContent = "Footer PDF active — template disabled";
+            }
+        }
+    }
+
+    function setPdfImagesStatus(message, ok = true) {
+        pdfImagesStatus.textContent = message;
+        pdfImagesStatus.style.color = ok ? "var(--success)" : "var(--danger)";
+    }
+
+    function setTableStyleStatus(message, ok = true) {
+        if (!tableStyleStatus) return;
+        tableStyleStatus.textContent = message;
+        tableStyleStatus.style.color = ok ? "var(--success)" : "var(--danger)";
+    }
+
+    function setFileDisplayStatus(message, ok = true) {
+        if (!fileDisplayStatus) return;
+        fileDisplayStatus.textContent = message;
+        fileDisplayStatus.style.color = ok ? "var(--success)" : "var(--danger)";
+    }
+
+    function setMetadataFieldStatus(message, ok = true) {
+        if (!metadataFieldStatus) return;
+        metadataFieldStatus.textContent = message;
+        metadataFieldStatus.style.color = ok ? "var(--success)" : "var(--danger)";
+    }
+
+    function setPdfSecurityStatus(message, ok = true) {
+        if (!pdfSecurityStatus) return;
+        pdfSecurityStatus.textContent = message;
+        pdfSecurityStatus.style.color = ok ? "var(--success)" : "var(--danger)";
+    }
+
+    /* ═══════════════════════════════════════════════════════════════════
+       HEADER / FOOTER CROP MODAL – functions
+       ═══════════════════════════════════════════════════════════════════ */
+
+    function setHfUploadStatus(msg, ok = true) {
+        if (!hfPdfUploadStatus) return;
+        hfPdfUploadStatus.textContent = msg;
+        hfPdfUploadStatus.style.color = ok ? "var(--success)" : "var(--danger)";
+    }
+
+    function setHfCropStatus(msg, ok = true) {
+        if (!hfCropStatus) return;
+        hfCropStatus.textContent = msg;
+        hfCropStatus.style.color = ok ? "var(--success)" : "var(--danger)";
+    }
+
+    function getSelectedRegionType() {
+        const checked = document.querySelector('input[name="hfRegionType"]:checked');
+        return checked ? checked.value : "both";
+    }
+
+    /** Load available PDF files into the source file select */
+    async function loadHfSourceFiles() {
+        if (!hfPdfSourceFile) return;
+        const resp = await fetch("/api/documents/files/?file_type=pdf", { credentials: "include" });
+        if (!resp.ok) return;
+        const data = await resp.json();
+        const files = Array.isArray(data) ? data : (data.files || data.results || []);
+        const currentVal = hfPdfSourceFile.value;
+        hfPdfSourceFile.innerHTML = '<option value="">Select a PDF…</option>';
+        files.forEach((f) => {
+            const opt = document.createElement("option");
+            opt.value = f.id;
+            opt.textContent = f.name || f.original_filename || "Untitled PDF";
+            hfPdfSourceFile.appendChild(opt);
+        });
+        if (currentVal) hfPdfSourceFile.value = currentVal;
+        // Also sync hidden selects for backward compat
+        if (headerPdfFileSelect) {
+            headerPdfFileSelect.innerHTML = '<option value="">No header PDF</option>';
+            files.forEach((f) => {
+                const opt = document.createElement("option");
+                opt.value = f.id;
+                opt.textContent = f.name || f.original_filename || "Untitled PDF";
+                headerPdfFileSelect.appendChild(opt);
+            });
+        }
+        if (footerPdfFileSelect) {
+            footerPdfFileSelect.innerHTML = '<option value="">No footer PDF</option>';
+            files.forEach((f) => {
+                const opt = document.createElement("option");
+                opt.value = f.id;
+                opt.textContent = f.name || f.original_filename || "Untitled PDF";
+                footerPdfFileSelect.appendChild(opt);
+            });
+        }
+        // Enable/disable buttons
+        const hasFile = !!hfPdfSourceFile.value;
+        if (hfOpenCropModal) hfOpenCropModal.disabled = !hasFile;
+        if (hfAutoDetectBtn) hfAutoDetectBtn.disabled = !hasFile;
+    }
+
+    /** Sync the active header/footer indicators from current document processing settings */
+    function refreshHfActiveIndicators() {
+        const hps = documentProcessingSettings?.header_pdf;
+        const fps = documentProcessingSettings?.footer_pdf;
+        if (hfActiveHeader) {
+            const show = !!(hps && hps.file_id);
+            hfActiveHeader.style.display = show ? "block" : "none";
+            if (show) {
+                hfActiveHeaderName.textContent = hps.name || hps.file_id || "—";
+                hfActiveHeaderHeight.textContent = Math.round(hps.height || hps.crop_height || 0);
+            }
+        }
+        if (hfActiveFooter) {
+            const show = !!(fps && fps.file_id);
+            hfActiveFooter.style.display = show ? "block" : "none";
+            if (show) {
+                hfActiveFooterName.textContent = fps.name || fps.file_id || "—";
+                hfActiveFooterHeight.textContent = Math.round(fps.height || fps.crop_height || 0);
+            }
+        }
+    }
+
+    /** Load user's saved header/footer PDFs library */
+    async function loadHfLibrary() {
+        if (!hfLibraryList) return;
+        try {
+            const resp = await fetch("/api/documents/header-footer-pdfs/my-library/", { credentials: "include" });
+            if (!resp.ok) { hfLibraryList.innerHTML = '<div class="hint">Unable to load library.</div>'; return; }
+            const data = await resp.json();
+            const items = data.results || [];
+            if (!items.length) {
+                hfLibraryList.innerHTML = '<div class="hint">No saved items yet.</div>';
+                return;
+            }
+            hfLibraryList.innerHTML = "";
+            items.forEach((item) => {
+                const el = document.createElement("div");
+                el.style.cssText = "display:flex;justify-content:space-between;align-items:center;padding:6px 8px;border-radius:6px;background:rgba(148,163,184,0.08);margin-bottom:4px;font-size:12px;";
+                const typeColor = item.region_type === "header" ? "var(--accent)" : "var(--accent-2)";
+                el.innerHTML = `
+                    <span><span style="color:${typeColor};font-weight:600;text-transform:uppercase;font-size:10px;">${item.region_type}</span> ${item.name || "Untitled"} <span style="color:var(--muted);">(${Math.round(item.crop_height || 0)}pt)</span></span>
+                    <button class="btn btn-ghost" style="padding:2px 8px;font-size:10px;" data-hf-apply-id="${item.id}" data-hf-type="${item.region_type}">Apply</button>
+                `;
+                hfLibraryList.appendChild(el);
+            });
+            // Wire apply buttons
+            hfLibraryList.querySelectorAll("[data-hf-apply-id]").forEach((btn) => {
+                btn.addEventListener("click", async () => {
+                    const hfId = btn.dataset.hfApplyId;
+                    try {
+                        const resp = await fetch(`/api/documents/header-footer-pdfs/${hfId}/apply/`, {
+                            method: "POST",
+                            headers: { "Content-Type": "application/json" },
+                            credentials: "include",
+                            body: JSON.stringify({
+                                document_id: documentId,
+                                show_on_first_page: true,
+                                show_on_all_pages: false,
+                            }),
+                        });
+                        if (resp.ok) {
+                            setHfUploadStatus("Applied from library", true);
+                            await loadHeaderFooterSelection();
+                            refreshHfActiveIndicators();
+                            previewFrame.src = buildPreviewUrl();
+                        } else {
+                            setHfUploadStatus("Failed to apply", false);
+                        }
+                    } catch (e) {
+                        setHfUploadStatus("Apply failed: " + e.message, false);
+                    }
+                });
+            });
+        } catch (e) {
+            hfLibraryList.innerHTML = '<div class="hint">Library load error.</div>';
+        }
+    }
+
+    /** Update overlay + horizontal line positions based on slider values.
+     *  ──────────────────────────────────────────────────────────────────
+     *  Coordinate model:
+     *    - Header: top of image → headerPx  (overlay shades top region)
+     *      Line sits AT headerPx from the top.
+     *    - Footer: bottom of image → footerPx (overlay shades bottom region)
+     *      Line sits AT footerPx from the bottom.
+     *    - scale = imgClientHeight / pageHeightPts  (px per pt)
+     *  All elements use absolute positioning within hfPreviewContainer.
+     */
+    function updateCropOverlays() {
+        const regionType = getSelectedRegionType();
+        const imgEl = hfPreviewImage;
+        if (!imgEl || !imgEl.clientHeight) return;
+
+        const imgH = imgEl.clientHeight;
+        const pageH = hfCropState.pageHeightPts || 841.89;
+        if (pageH <= 0) return;
+        const scale = imgH / pageH;  // px per pt
+
+        const showHeader = regionType === "header" || regionType === "both";
+        const showFooter = regionType === "footer" || regionType === "both";
+
+        // ── Header region ──────────────────────────────────────────────
+        const headerPts = parseFloat(hfHeaderSlider.value) || 0;
+        const headerPx = Math.round(headerPts * scale);
+
+        // Shaded overlay: covers from top to headerPx
+        if (hfHeaderOverlay) {
+            hfHeaderOverlay.style.display = showHeader ? "block" : "none";
+            hfHeaderOverlay.style.height = headerPx + "px";
+        }
+        // Horizontal line: positioned at headerPx from top (3px tall)
+        if (hfHeaderLine) {
+            hfHeaderLine.style.display = showHeader ? "block" : "none";
+            hfHeaderLine.style.top = (headerPx - 1) + "px";  // center the 3px line on the boundary
+        }
+        // Label: sits just below the line
+        if (hfHeaderLabel) {
+            hfHeaderLabel.style.display = showHeader ? "block" : "none";
+            hfHeaderLabel.style.top = (headerPx + 2) + "px";
+        }
+        if (hfHeaderLabelPts) {
+            hfHeaderLabelPts.textContent = Math.round(headerPts);
+        }
+        // Drag handle: 28px tall, centered on the line
+        if (hfHeaderHandle) {
+            hfHeaderHandle.style.display = showHeader ? "block" : "none";
+            hfHeaderHandle.style.top = Math.max(0, headerPx - 14) + "px";
+        }
+
+        // ── Footer region ──────────────────────────────────────────────
+        const footerPts = parseFloat(hfFooterSlider.value) || 0;
+        const footerPx = Math.round(footerPts * scale);
+
+        // Shaded overlay: covers from bottom to footerPx
+        if (hfFooterOverlay) {
+            hfFooterOverlay.style.display = showFooter ? "block" : "none";
+            hfFooterOverlay.style.height = footerPx + "px";
+        }
+        // Horizontal line: positioned at footerPx from bottom (3px tall)
+        if (hfFooterLine) {
+            hfFooterLine.style.display = showFooter ? "block" : "none";
+            hfFooterLine.style.bottom = (footerPx - 1) + "px";
+        }
+        // Label: sits just above the line
+        if (hfFooterLabel) {
+            hfFooterLabel.style.display = showFooter ? "block" : "none";
+            hfFooterLabel.style.bottom = (footerPx + 2) + "px";
+        }
+        if (hfFooterLabelPts) {
+            hfFooterLabelPts.textContent = Math.round(footerPts);
+        }
+        // Drag handle: 28px tall, centered on the line
+        if (hfFooterHandle) {
+            hfFooterHandle.style.display = showFooter ? "block" : "none";
+            hfFooterHandle.style.bottom = Math.max(0, footerPx - 14) + "px";
+        }
+
+        // ── Overlap guard ──────────────────────────────────────────────
+        if (showHeader && showFooter && (headerPx + footerPx) > imgH - 30) {
+            if (hfCropStatus) {
+                hfCropStatus.textContent = "⚠ Header + Footer regions overlap!";
+                hfCropStatus.style.color = "var(--danger)";
+            }
+        }
+
+        // ── Show/hide slider rows + name rows based on region type ────
+        if (hfHeaderSliderRow) hfHeaderSliderRow.style.display = showHeader ? "flex" : "none";
+        if (hfFooterSliderRow) hfFooterSliderRow.style.display = showFooter ? "flex" : "none";
+        if (hfHeaderNameRow) hfHeaderNameRow.style.display = showHeader ? "flex" : "none";
+        if (hfFooterNameRow) hfFooterNameRow.style.display = showFooter ? "flex" : "none";
+    }
+
+    /** Load first-page preview image for the crop modal.
+     *  Uses requestAnimationFrame to ensure the image has been laid out
+     *  by the browser before calculating overlay positions.
+     */
+    async function loadCropPreview() {
+        if (!hfCropState.sourceFileId) return;
+        hfCropState.currentPage = 1;
+        setHfCropStatus("Loading PDF first page…", true);
+
+        // Show loading spinner
+        if (hfPreviewLoading) hfPreviewLoading.style.display = "flex";
+
+        // 1. Fetch page info (dimensions, page count)
+        try {
+            const infoResp = await fetch(`/api/documents/header-footer-pdfs/page-info/?source_file_id=${hfCropState.sourceFileId}&page=1`, { credentials: "include" });
+            if (infoResp.ok) {
+                const info = await infoResp.json();
+                hfCropState.pageWidthPts = info.width_pts || 595.28;
+                hfCropState.pageHeightPts = info.height_pts || 841.89;
+                hfCropState.pageCount = info.page_count || 1;
+                // Set slider max to ~45% of page height (reasonable crop limit)
+                const maxH = Math.round(hfCropState.pageHeightPts * 0.45);
+                if (hfHeaderSlider) { hfHeaderSlider.max = maxH; hfHeaderValue.max = maxH; }
+                if (hfFooterSlider) { hfFooterSlider.max = maxH; hfFooterValue.max = maxH; }
+            }
+        } catch (e) { /* proceed anyway with defaults */ }
+
+        // 2. Load preview image (always page 1, 150 DPI for clarity)
+        const previewUrl = `/api/documents/header-footer-pdfs/preview/?source_file_id=${hfCropState.sourceFileId}&page=1&dpi=150&_t=${Date.now()}`;
+        hfPreviewImage.src = previewUrl;
+        hfPreviewImage.onload = () => {
+            // Hide loading spinner
+            if (hfPreviewLoading) hfPreviewLoading.style.display = "none";
+            // Wait one animation frame for browser layout, then position overlays
+            requestAnimationFrame(() => {
+                requestAnimationFrame(() => {
+                    updateCropOverlays();
+                    setHfCropStatus("Drag the blue/purple lines or use sliders.", true);
+                });
+            });
+        };
+        hfPreviewImage.onerror = () => {
+            if (hfPreviewLoading) hfPreviewLoading.style.display = "none";
+            setHfCropStatus("Failed to load PDF preview. Check the source file.", false);
+        };
+    }
+
+    /** Open the crop modal — always shows first page */
+    function openCropModal() {
+        const fileId = hfPdfSourceFile?.value;
+        if (!fileId) { setHfUploadStatus("Select a source PDF first", false); return; }
+        hfCropState.sourceFileId = fileId;
+        hfCropState.currentPage = 1;
+
+        // Reset sliders to sensible defaults
+        if (hfHeaderSlider) { hfHeaderSlider.value = 80; hfHeaderValue.value = 80; }
+        if (hfFooterSlider) { hfFooterSlider.value = 80; hfFooterValue.value = 80; }
+        // Default names from selected file
+        const selectedOpt = hfPdfSourceFile.selectedOptions?.[0];
+        const baseName = selectedOpt?.textContent?.replace(/\.pdf$/i, "") || "Letterhead";
+        if (hfHeaderName) hfHeaderName.value = baseName + " Header";
+        if (hfFooterName) hfFooterName.value = baseName + " Footer";
+        // Default to "Both"
+        const bothRadio = document.querySelector('input[name="hfRegionType"][value="both"]');
+        if (bothRadio) bothRadio.checked = true;
+
+        hfCropModal.style.display = "block";
+        document.body.style.overflow = "hidden";
+        loadCropPreview();
+    }
+
+    /** Close the crop modal */
+    function closeCropModal() {
+        hfCropModal.style.display = "none";
+        document.body.style.overflow = "";
+    }
+
+    /** Run auto-detect and populate sliders */
+    async function runAutoDetect() {
+        const fileId = hfCropState.sourceFileId || hfPdfSourceFile?.value;
+        if (!fileId) return;
+        setHfCropStatus("Auto-detecting…", true);
+        try {
+            const resp = await fetch(`/api/documents/header-footer-pdfs/auto-detect/?source_file_id=${fileId}&page=${hfCropState.currentPage || 1}`, { credentials: "include" });
+            if (!resp.ok) { setHfCropStatus("Auto-detect failed", false); return; }
+            const data = await resp.json();
+            if (data.header && hfHeaderSlider) {
+                hfHeaderSlider.value = Math.round(data.header.crop_height);
+                hfHeaderValue.value = Math.round(data.header.crop_height);
+            }
+            if (data.footer && hfFooterSlider) {
+                hfFooterSlider.value = Math.round(data.footer.crop_height);
+                hfFooterValue.value = Math.round(data.footer.crop_height);
+            }
+            updateCropOverlays();
+            setHfCropStatus("Auto-detected — adjust sliders if needed", true);
+        } catch (e) {
+            setHfCropStatus("Auto-detect error: " + e.message, false);
+        }
+    }
+
+    /** Save the crop (create HeaderFooterPDF records) and apply to document */
+    async function saveCropAndApply() {
+        const regionType = getSelectedRegionType();
+        const fileId = hfCropState.sourceFileId;
+        if (!fileId) { setHfCropStatus("No source file", false); return; }
+
+        setHfCropStatus("Saving…", true);
+        const page = hfCropState.currentPage || 1;
+        const tasks = [];
+
+        if (regionType === "header" || regionType === "both") {
+            tasks.push({
+                type: "header",
+                payload: {
+                    source_file_id: fileId,
+                    region_type: "header",
+                    name: hfHeaderName?.value || "Header",
+                    page: page,
+                    crop_top_offset: 0,
+                    crop_height: parseFloat(hfHeaderValue.value) || 80,
+                    access_level: "user",
+                },
+            });
+        }
+        if (regionType === "footer" || regionType === "both") {
+            const footerCropH = parseFloat(hfFooterValue.value) || 80;
+            tasks.push({
+                type: "footer",
+                payload: {
+                    source_file_id: fileId,
+                    region_type: "footer",
+                    name: hfFooterName?.value || "Footer",
+                    page: page,
+                    crop_top_offset: hfCropState.pageHeightPts - footerCropH,
+                    crop_height: footerCropH,
+                    access_level: "user",
+                },
+            });
+        }
+
+        for (const task of tasks) {
+            try {
+                // 1. Create (crop) the HeaderFooterPDF
+                const createResp = await fetch("/api/documents/header-footer-pdfs/", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    credentials: "include",
+                    body: JSON.stringify(task.payload),
+                });
+                if (!createResp.ok) {
+                    const err = await createResp.json().catch(() => ({}));
+                    setHfCropStatus(`Failed to create ${task.type}: ${JSON.stringify(err)}`, false);
+                    return;
+                }
+                const created = await createResp.json();
+
+                // 2. Apply to this document
+                const applyResp = await fetch(`/api/documents/header-footer-pdfs/${created.id}/apply/`, {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    credentials: "include",
+                    body: JSON.stringify({
+                        document_id: documentId,
+                        show_on_first_page: true,
+                        show_on_all_pages: false,
+                    }),
+                });
+                if (!applyResp.ok) {
+                    setHfCropStatus(`Created ${task.type} but failed to apply`, false);
+                    return;
+                }
+            } catch (e) {
+                setHfCropStatus("Error: " + e.message, false);
+                return;
+            }
+        }
+
+        setHfCropStatus("Saved & applied!", true);
+        closeCropModal();
+        await loadHeaderFooterSelection();
+        refreshHfActiveIndicators();
+        await loadHfLibrary();
+        previewFrame.src = buildPreviewUrl();
+    }
+
+    /* ===== Drag-handle logic for horizontal crop lines ===== */
+    function initCropDragHandles() {
+        let dragging = null; // "header" | "footer" | null
+        let startY = 0;
+        let startVal = 0;
+
+        function getScale() {
+            const imgEl = hfPreviewImage;
+            if (!imgEl || !imgEl.clientHeight || !hfCropState.pageHeightPts) return 1;
+            return imgEl.clientHeight / hfCropState.pageHeightPts;
+        }
+
+        function onPointerDown(e, which) {
+            e.preventDefault();
+            e.stopPropagation();
+            dragging = which;
+            startY = e.clientY;
+            startVal = parseFloat(which === "header" ? hfHeaderSlider.value : hfFooterSlider.value) || 0;
+            document.addEventListener("pointermove", onPointerMove);
+            document.addEventListener("pointerup", onPointerUp);
+            document.body.style.cursor = "row-resize";
+            document.body.style.userSelect = "none";
+        }
+
+        function onPointerMove(e) {
+            if (!dragging) return;
+            const dy = e.clientY - startY;
+            const scale = getScale();
+            if (scale <= 0) return;
+            const deltaPts = dy / scale;
+            const maxVal = parseFloat(dragging === "header" ? hfHeaderSlider.max : hfFooterSlider.max) || 500;
+
+            let newVal;
+            if (dragging === "header") {
+                // Dragging header line DOWN → increases header height
+                newVal = Math.max(0, Math.min(maxVal, Math.round(startVal + deltaPts)));
+                hfHeaderSlider.value = newVal;
+                hfHeaderValue.value = newVal;
+            } else {
+                // Dragging footer line UP → increases footer height
+                newVal = Math.max(0, Math.min(maxVal, Math.round(startVal - deltaPts)));
+                hfFooterSlider.value = newVal;
+                hfFooterValue.value = newVal;
+            }
+            updateCropOverlays();
+        }
+
+        function onPointerUp() {
+            dragging = null;
+            document.body.style.cursor = "";
+            document.body.style.userSelect = "";
+            document.removeEventListener("pointermove", onPointerMove);
+            document.removeEventListener("pointerup", onPointerUp);
+        }
+
+        if (hfHeaderHandle) {
+            hfHeaderHandle.addEventListener("pointerdown", (e) => onPointerDown(e, "header"));
+        }
+        if (hfFooterHandle) {
+            hfFooterHandle.addEventListener("pointerdown", (e) => onPointerDown(e, "footer"));
+        }
+
+        // Recalculate overlays on window resize (container width changes → img height changes)
+        window.addEventListener("resize", () => {
+            if (hfCropModal && hfCropModal.style.display === "block") {
+                requestAnimationFrame(updateCropOverlays);
+            }
+        });
+    }
+
+    /** Wire all crop modal events */
+    function initCropModalEvents() {
+        // Source file select change
+        if (hfPdfSourceFile) {
+            hfPdfSourceFile.addEventListener("change", () => {
+                const has = !!hfPdfSourceFile.value;
+                if (hfOpenCropModal) hfOpenCropModal.disabled = !has;
+                if (hfAutoDetectBtn) hfAutoDetectBtn.disabled = !has;
+            });
+        }
+
+        // Upload
+        if (hfPdfUploadBtn) {
+            hfPdfUploadBtn.addEventListener("click", async () => {
+                if (!hfPdfUploadInput?.files?.length) { setHfUploadStatus("Select a PDF to upload", false); return; }
+                const file = hfPdfUploadInput.files[0];
+                const formData = new FormData();
+                formData.append("file", file);
+                formData.append("name", file.name || "Header/Footer PDF");
+                formData.append("file_type", "pdf");
+                formData.append("category", "template");
+                formData.append("access_level", "user");
+                setHfUploadStatus("Uploading…", true);
+                try {
+                    const resp = await fetch("/api/documents/files/", { method: "POST", credentials: "include", body: formData });
+                    if (!resp.ok) { setHfUploadStatus("Upload failed", false); return; }
+                    const data = await resp.json();
+                    await loadHfSourceFiles();
+                    if (data?.id && hfPdfSourceFile) {
+                        hfPdfSourceFile.value = data.id;
+                        if (hfOpenCropModal) hfOpenCropModal.disabled = false;
+                        if (hfAutoDetectBtn) hfAutoDetectBtn.disabled = false;
+                    }
+                    setHfUploadStatus("Uploaded! Open Crop Editor to select regions.", true);
+                    hfPdfUploadInput.value = "";
+                } catch (e) {
+                    setHfUploadStatus("Upload error: " + e.message, false);
+                }
+            });
+        }
+
+        // Open / close modal
+        if (hfOpenCropModal) hfOpenCropModal.addEventListener("click", openCropModal);
+        if (hfCropModalClose) hfCropModalClose.addEventListener("click", closeCropModal);
+        if (hfCropCancel) hfCropCancel.addEventListener("click", closeCropModal);
+
+        // Auto-detect buttons
+        if (hfAutoDetectBtn) hfAutoDetectBtn.addEventListener("click", async () => {
+            const fileId = hfPdfSourceFile?.value;
+            if (!fileId) return;
+            hfCropState.sourceFileId = fileId;
+            hfCropState.currentPage = 1;
+            // Open modal and run auto-detect
+            openCropModal();
+            setTimeout(() => runAutoDetect(), 500);
+        });
+        if (hfCropAutoDetect) hfCropAutoDetect.addEventListener("click", runAutoDetect);
+
+        // Save
+        if (hfCropSave) hfCropSave.addEventListener("click", saveCropAndApply);
+
+        // Region type radio change
+        document.querySelectorAll('input[name="hfRegionType"]').forEach((radio) => {
+            radio.addEventListener("change", updateCropOverlays);
+        });
+
+        // Slider ↔ input sync: header
+        if (hfHeaderSlider && hfHeaderValue) {
+            hfHeaderSlider.addEventListener("input", () => { hfHeaderValue.value = hfHeaderSlider.value; updateCropOverlays(); });
+            hfHeaderValue.addEventListener("input", () => { hfHeaderSlider.value = hfHeaderValue.value; updateCropOverlays(); });
+        }
+        // Slider ↔ input sync: footer
+        if (hfFooterSlider && hfFooterValue) {
+            hfFooterSlider.addEventListener("input", () => { hfFooterValue.value = hfFooterSlider.value; updateCropOverlays(); });
+            hfFooterValue.addEventListener("input", () => { hfFooterSlider.value = hfFooterValue.value; updateCropOverlays(); });
+        }
+
+        // Remove header/footer
+        if (hfRemoveHeader) hfRemoveHeader.addEventListener("click", async () => {
+            try {
+                await fetch(`/api/documents/${documentId}/header-footer/`, {
+                    method: "PATCH", headers: { "Content-Type": "application/json" }, credentials: "include",
+                    body: JSON.stringify({ header_pdf: null }),
+                });
+                await loadHeaderFooterSelection();
+                refreshHfActiveIndicators();
+                previewFrame.src = buildPreviewUrl();
+            } catch (e) { setHfUploadStatus("Remove failed", false); }
+        });
+        if (hfRemoveFooter) hfRemoveFooter.addEventListener("click", async () => {
+            try {
+                await fetch(`/api/documents/${documentId}/header-footer/`, {
+                    method: "PATCH", headers: { "Content-Type": "application/json" }, credentials: "include",
+                    body: JSON.stringify({ footer_pdf: null }),
+                });
+                await loadHeaderFooterSelection();
+                refreshHfActiveIndicators();
+                previewFrame.src = buildPreviewUrl();
+            } catch (e) { setHfUploadStatus("Remove failed", false); }
+        });
+
+        // Library refresh
+        if (hfRefreshLibrary) hfRefreshLibrary.addEventListener("click", loadHfLibrary);
+
+        // Escape key closes modal
+        document.addEventListener("keydown", (e) => {
+            if (e.key === "Escape" && hfCropModal?.style.display === "block") closeCropModal();
+        });
+
+        // Init drag handles
+        initCropDragHandles();
+    }
+
+    // Initialize crop modal events immediately
+    initCropModalEvents();
+
+    async function uploadDocumentImage(file, imageType) {
+        const formData = new FormData();
+        formData.append("image", file);
+        formData.append("image_type", imageType);
+        formData.append("name", file.name || `${imageType} image`);
+        formData.append("document", documentId);
+
+    const response = await fetch("/api/documents/images/upload/", {
+            method: "POST",
+            credentials: "include",
+            body: formData,
+        });
+        if (!response.ok) {
+            const error = await response.json().catch(() => ({}));
+            throw new Error(error.error || "Image upload failed");
+        }
+        const payload = await response.json();
+        return payload.image || payload;
+    }
+
+    async function updateDocumentImages(payload) {
+        const response = await fetch(`/api/documents/${documentId}/edit-full/`, {
+            method: "PATCH",
+            headers: {
+                "Content-Type": "application/json",
+            },
+            credentials: "include",
+            body: JSON.stringify(payload),
+        });
+        if (!response.ok) {
+            const error = await response.json().catch(() => ({}));
+            throw new Error(error.error || "Failed to update document images");
+        }
+        return response.json();
+    }
+
+    const templateIndex = { header: {}, footer: {} };
+    let organizationSnapshot = {};
+    let orgProcessingDefaults = {};
+    let documentProcessingSettings = {};
+    let documentImageState = { logo: "", watermark: "", background: "" };
+    let orgDefaultsApplied = false;
+    let headerConfigDraft = {};
+    let currentCustomMetadata = {};
+    let metadataFieldState = {};
+    let metadataFieldOrder = [];
+
+    function setActiveField(event) {
+        activeField = event.target;
+    }
+
+    function insertPlaceholder(value) {
+        if (!activeField) {
+            return;
+        }
+        const start = activeField.selectionStart ?? activeField.value.length;
+        const end = activeField.selectionEnd ?? activeField.value.length;
+        const text = activeField.value;
+        activeField.value = text.slice(0, start) + value + text.slice(end);
+        activeField.focus();
+        const cursor = start + value.length;
+        activeField.setSelectionRange(cursor, cursor);
+    }
+
+    function renderTemplatePreview(target, template) {
+        if (!target) return;
+        if (!template || !template.text) {
+            target.textContent = "No template selected";
+            return;
+        }
+        const values = Object.values(template.text || {}).filter(Boolean);
+        target.textContent = values.length ? values.join(" | ") : "Template has no text blocks";
+    }
+
+    function renderPlaceholderCanvas(placeholders) {
+        if (!placeholderCanvas) return;
+        placeholderCanvas.innerHTML = "";
+        if (!placeholders || !placeholders.length) {
+            const empty = document.createElement("div");
+            empty.className = "hint";
+            empty.textContent = "No placeholders available";
+            placeholderCanvas.appendChild(empty);
+            return;
+        }
+        placeholders.forEach((token) => {
+            const chip = document.createElement("button");
+            chip.type = "button";
+            chip.className = "chip-pill";
+            chip.textContent = token;
+            chip.addEventListener("click", () => insertPlaceholder(token));
+            placeholderCanvas.appendChild(chip);
+        });
+    }
+
+    function renderMetadataFieldList(fields) {
+        if (!metadataFieldList) return;
+        metadataFieldList.innerHTML = "";
+        if (!fields.length) {
+            metadataFieldList.innerHTML = '<div class="hint">No metadata fields found.</div>';
+            return;
+        }
+
+        const groups = {
+            core: { title: "Core Metadata", fields: [] },
+            custom: { title: "Custom Metadata", fields: [] },
+            structured: { title: "Structured Metadata", fields: [] },
+            other: { title: "Other", fields: [] },
+        };
+
+        fields.forEach((field) => {
+            if (field.startsWith("custom_metadata.")) {
+                groups.custom.fields.push(field);
+            } else if (field.startsWith("document_metadata.")) {
+                groups.structured.fields.push(field);
+            } else if (field.startsWith("document_") || field === "created_at" || field === "created_by" || field === "updated_at" || field === "extracted_at") {
+                groups.core.fields.push(field);
+            } else {
+                groups.other.fields.push(field);
+            }
+        });
+
+        Object.values(groups).forEach((group) => {
+            if (!group.fields.length) return;
+            const title = document.createElement("div");
+            title.className = "hint";
+            title.style.marginTop = "12px";
+            title.textContent = group.title;
+            metadataFieldList.appendChild(title);
+
+            group.fields.forEach((field) => {
+                const label = document.createElement("label");
+                label.className = "metadata-field";
+                const checkbox = document.createElement("input");
+                checkbox.type = "checkbox";
+                checkbox.dataset.field = field;
+                const enabled = metadataFieldState[field];
+                checkbox.checked = enabled !== false;
+                const span = document.createElement("span");
+                span.textContent = field;
+                label.appendChild(checkbox);
+                label.appendChild(span);
+                metadataFieldList.appendChild(label);
+            });
+        });
+    }
+
+    function loadMetadataFieldStateFromCustom() {
+        const processingSettings = currentCustomMetadata.processing_settings || {};
+        const metadataFields = processingSettings.metadata_fields || {};
+        metadataFieldState = metadataFields.enabled || {};
+    }
+
+    function populateImageSelect(selectEl, images, emptyLabel) {
+        if (!selectEl) return;
+        selectEl.innerHTML = "";
+        const emptyOption = document.createElement("option");
+        emptyOption.value = "";
+        emptyOption.textContent = emptyLabel;
+        selectEl.appendChild(emptyOption);
+
+        (images || []).forEach((image) => {
+            const option = document.createElement("option");
+            option.value = image.id;
+            option.textContent = image.name || image.caption || "Untitled image";
+            option.dataset.url = image.url || "";
+            selectEl.appendChild(option);
+        });
+    }
+
+    function setSelectedByUrl(selectEl, url) {
+        if (!selectEl || !url) return;
+        const match = Array.from(selectEl.options).find((option) => option.dataset.url === url);
+        if (match) {
+            selectEl.value = match.value;
+        }
+    }
+
+    async function loadPdfImageOptions() {
+        const [logos, watermarks, backgrounds] = await Promise.all([
+            fetch("/api/documents/images/by-type/logo/", { credentials: "include" }),
+            fetch("/api/documents/images/by-type/watermark/", { credentials: "include" }),
+            fetch("/api/documents/images/by-type/background/", { credentials: "include" }),
+        ]);
+
+        if (logos.ok) {
+            const data = await logos.json();
+            populateImageSelect(logoImageSelect, data.images || [], "No logo");
+        }
+        if (watermarks.ok) {
+            const data = await watermarks.json();
+            populateImageSelect(watermarkImageSelect, data.images || [], "No watermark");
+        }
+        if (backgrounds.ok) {
+            const data = await backgrounds.json();
+            populateImageSelect(backgroundImageSelect, data.images || [], "No background");
+        }
+    }
+
+    async function loadPdfImageSelection() {
+        const response = await fetch(`/api/documents/${documentId}/complete/`, { credentials: "include" });
+        if (!response.ok) {
+            return;
+        }
+        const data = await response.json();
+        setSelectedByUrl(logoImageSelect, data.logo_url);
+        setSelectedByUrl(watermarkImageSelect, data.watermark_url);
+        setSelectedByUrl(backgroundImageSelect, data.background_image_url);
+        documentImageState = {
+            logo: data.logo_url || "",
+            watermark: data.watermark_url || "",
+            background: data.background_image_url || "",
+        };
+        applyOrganizationDefaults();
+        applyOrgDefaultsToDocumentIfMissing();
+    }
+
+    function getSelectedImageUrl(selectEl) {
+        const option = selectEl?.selectedOptions?.[0];
+        return option?.dataset?.url || "";
+    }
+
+    function populateHeaderPdfSelect(files) {
+        if (!headerPdfFileSelect) return;
+        headerPdfFileSelect.innerHTML = "";
+        const emptyOption = document.createElement("option");
+        emptyOption.value = "";
+        emptyOption.textContent = "No header PDF";
+        headerPdfFileSelect.appendChild(emptyOption);
+        (files || []).forEach((file) => {
+            const option = document.createElement("option");
+            option.value = file.id;
+            option.textContent = file.name || file.original_filename || "Untitled PDF";
+            option.dataset.url = file.file_url || "";
+            headerPdfFileSelect.appendChild(option);
+        });
+    }
+
+    async function loadHeaderPdfFiles() {
+        if (!headerPdfFileSelect) return;
+        const response = await fetch("/api/documents/files/?file_type=pdf", { credentials: "include" });
+        if (!response.ok) {
+            setHeaderPdfStatus("Unable to load header PDFs", false);
+            return;
+        }
+        const data = await response.json();
+        const files = Array.isArray(data) ? data : (data.files || data.results || []);
+        populateHeaderPdfSelect(files);
+    }
+
+    function populateFooterPdfSelect(files) {
+        if (!footerPdfFileSelect) return;
+        footerPdfFileSelect.innerHTML = "";
+        const emptyOption = document.createElement("option");
+        emptyOption.value = "";
+        emptyOption.textContent = "No footer PDF";
+        footerPdfFileSelect.appendChild(emptyOption);
+        (files || []).forEach((file) => {
+            const option = document.createElement("option");
+            option.value = file.id;
+            option.textContent = file.name || file.original_filename || "Untitled PDF";
+            option.dataset.url = file.file_url || "";
+            footerPdfFileSelect.appendChild(option);
+        });
+    }
+
+    async function loadFooterPdfFiles() {
+        if (!footerPdfFileSelect) return;
+        const response = await fetch("/api/documents/files/?file_type=pdf", { credentials: "include" });
+        if (!response.ok) {
+            setFooterPdfStatus("Unable to load footer PDFs", false);
+            return;
+        }
+        const data = await response.json();
+        const files = Array.isArray(data) ? data : (data.files || data.results || []);
+        populateFooterPdfSelect(files);
+    }
+
+    function updateDownloadState() {
+        if (downloadLogoSelect) downloadLogoSelect.disabled = !getSelectedImageUrl(logoImageSelect);
+        if (downloadWatermarkSelect) downloadWatermarkSelect.disabled = !getSelectedImageUrl(watermarkImageSelect);
+        if (downloadBackgroundSelect) downloadBackgroundSelect.disabled = !getSelectedImageUrl(backgroundImageSelect);
+    }
+
+    async function loadHeaderFooterTemplates() {
+        const [headers, footers] = await Promise.all([
+            fetch("/api/documents/header-footer-templates/?type=header", { credentials: "include" }),
+            fetch("/api/documents/header-footer-templates/?type=footer", { credentials: "include" }),
+        ]);
+        if (headers.ok) {
+            const data = await headers.json();
+            headerTemplateSelect.innerHTML = '<option value="">No header template</option>';
+            data.templates.forEach((template) => {
+                templateIndex.header[template.id] = template;
+                const option = document.createElement("option");
+                option.value = template.id;
+                option.textContent = template.name;
+                headerTemplateSelect.appendChild(option);
+            });
+        }
+        if (footers.ok) {
+            const data = await footers.json();
+            footerTemplateSelect.innerHTML = '<option value="">No footer template</option>';
+            data.templates.forEach((template) => {
+                templateIndex.footer[template.id] = template;
+                const option = document.createElement("option");
+                option.value = template.id;
+                option.textContent = template.name;
+                footerTemplateSelect.appendChild(option);
+            });
+        }
+
+        const headerTemplate = templateIndex.header[headerTemplateSelect.value];
+        const footerTemplate = templateIndex.footer[footerTemplateSelect.value];
+        renderTemplatePreview(headerTemplatePreview, headerTemplate);
+        renderTemplatePreview(footerTemplatePreview, footerTemplate);
+        renderPlaceholderCanvas([
+            ...(headerTemplate?.placeholders || []),
+            ...(footerTemplate?.placeholders || []),
+        ]);
+    }
+
+    async function loadHeaderFooterSelection() {
+        const response = await fetch(`/api/documents/${documentId}/header-footer/`, { credentials: "include" });
+        if (!response.ok) {
+            setHeaderFooterStatus("Unable to load header/footer settings", false);
+            return;
+        }
+        const data = await response.json();
+        const orgDefaults = orgProcessingDefaults?.header_footer || {};
+        const hasHeaderTemplate = !!data.header_template;
+        const hasFooterTemplate = !!data.footer_template;
+        const hasHeaderConfig = data.header_config && Object.keys(data.header_config || {}).length > 0;
+
+    currentCustomMetadata = data.custom_metadata || {};
+    documentProcessingSettings = currentCustomMetadata.processing_settings || {};
+    headerTemplateSelect.value = data.header_template || orgDefaults.header_template || "";
+    footerTemplateSelect.value = data.footer_template || orgDefaults.footer_template || "";
+    customMetadataInput.value = JSON.stringify(currentCustomMetadata || {}, null, 2);
+    loadMetadataFieldStateFromCustom();
+        headerConfigDraft = hasHeaderConfig ? (data.header_config || {}) : (orgDefaults.header_config || {});
+
+        const effectiveHeader = hasHeaderConfig ? (data.effective_header_config || {}) : (orgDefaults.header_config || {});
+        const showPages = Array.isArray(effectiveHeader.show_pages) ? effectiveHeader.show_pages : [];
+        if (showPages.length) {
+            headerPageScope.value = "custom";
+            headerPageList.value = showPages.join(",");
+        } else if (effectiveHeader.show_on_all_pages === false && effectiveHeader.show_on_first_page === true) {
+            headerPageScope.value = "first";
+            headerPageList.value = "";
+        } else {
+            headerPageScope.value = "all";
+            headerPageList.value = "";
+        }
+        const spacingValue = effectiveHeader?.style?.content_spacing ?? "";
+        headerContentSpacing.value = spacingValue !== undefined && spacingValue !== null ? spacingValue : "";
+
+        const headerPdfConfig = documentProcessingSettings?.header_pdf || orgProcessingDefaults?.header_pdf || {};
+        if (headerPdfFileSelect) {
+            headerPdfFileSelect.value = headerPdfConfig?.file_id || "";
+        }
+        if (headerPdfHeight) {
+            headerPdfHeight.value = headerPdfConfig?.height ?? "";
+        }
+        const headerPdfPages = Array.isArray(headerPdfConfig?.show_pages) ? headerPdfConfig.show_pages : [];
+        if (headerPdfPageScope && headerPdfPageList) {
+            if (headerPdfPages.length) {
+                headerPdfPageScope.value = "custom";
+                headerPdfPageList.value = headerPdfPages.join(",");
+            } else if (headerPdfConfig?.show_on_all_pages) {
+                headerPdfPageScope.value = "all";
+                headerPdfPageList.value = "";
+            } else {
+                headerPdfPageScope.value = "first";
+                headerPdfPageList.value = "";
+            }
+        }
+        updateHeaderTemplateAvailability();
+
+        const footerPdfConfig = documentProcessingSettings?.footer_pdf || orgProcessingDefaults?.footer_pdf || {};
+        if (footerPdfFileSelect) {
+            footerPdfFileSelect.value = footerPdfConfig?.file_id || "";
+        }
+        if (footerPdfHeight) {
+            footerPdfHeight.value = footerPdfConfig?.height ?? "";
+        }
+        const footerPdfPages = Array.isArray(footerPdfConfig?.show_pages) ? footerPdfConfig.show_pages : [];
+        if (footerPdfPageScope && footerPdfPageList) {
+            if (footerPdfPages.length) {
+                footerPdfPageScope.value = "custom";
+                footerPdfPageList.value = footerPdfPages.join(",");
+            } else if (footerPdfConfig?.show_on_all_pages) {
+                footerPdfPageScope.value = "all";
+                footerPdfPageList.value = "";
+            } else {
+                footerPdfPageScope.value = "first";
+                footerPdfPageList.value = "";
+            }
+        }
+        updateFooterTemplateAvailability();
+
+        const headerTemplate = templateIndex.header[headerTemplateSelect.value];
+        const footerTemplate = templateIndex.footer[footerTemplateSelect.value];
+        renderTemplatePreview(headerTemplatePreview, headerTemplate);
+        renderTemplatePreview(footerTemplatePreview, footerTemplate);
+        renderPlaceholderCanvas([
+            ...(headerTemplate?.placeholders || []),
+            ...(footerTemplate?.placeholders || []),
+        ]);
+        applyOrganizationDefaults();
+        applyOrgDefaultsToDocumentIfMissing();
+    }
+
+    // Helper to flatten nested objects with dot notation
+    function flattenObject(obj, prefix = '', excludePatterns = []) {
+        const flattened = {};
+        for (const key in obj) {
+            if (!obj.hasOwnProperty(key)) continue;
+            const value = obj[key];
+            const newKey = prefix ? `${prefix}.${key}` : key;
+            
+            // Skip excluded patterns
+            if (excludePatterns.some(pattern => newKey.startsWith(pattern))) continue;
+            
+            if (value !== null && typeof value === 'object' && !Array.isArray(value)) {
+                Object.assign(flattened, flattenObject(value, newKey, excludePatterns));
+            } else {
+                flattened[newKey] = value;
+            }
+        }
+        return flattened;
+    }
+
+    async function loadMetadataFields() {
+        const defaults = [
+            "document_id",
+            "document_title",
+            "document_type",
+            "created_at",
+            "created_by",
+        ];
+        
+        // Get metadata from header-footer endpoint which includes full metadata
+        const response = await fetch(`/api/documents/${documentId}/header-footer/`, { credentials: "include" });
+        if (!response.ok) {
+            metadataFieldOrder = defaults;
+            renderMetadataFieldList(metadataFieldOrder);
+            setMetadataFieldStatus("Unable to load metadata fields", false);
+            return;
+        }
+        const data = await response.json();
+        const metadata = data.metadata || {};
+        
+        // Flatten entire metadata response, excluding internal processing settings
+        const excludePatterns = [
+            'custom_metadata.processing_settings.file_config',
+            'custom_metadata.processing_settings.image_config',
+            'custom_metadata.processing_settings.table_config',
+            'custom_metadata.processing_settings.metadata_fields',
+            'custom_metadata.processing_settings.header_config',
+            'custom_metadata.processing_settings.footer_config',
+            'custom_metadata.processing_settings.header_footer',
+            'custom_metadata.processing_settings.header_pdf',
+            'custom_metadata.search_metadata'
+        ];
+        
+        const allFields = flattenObject(metadata, '', excludePatterns);
+        const fieldKeys = Object.keys(allFields);
+        
+        // Ensure defaults come first, then alphabetically sort remaining
+        metadataFieldOrder = Array.from(new Set([...defaults, ...fieldKeys])).sort((a, b) => {
+            const aIdx = defaults.indexOf(a);
+            const bIdx = defaults.indexOf(b);
+            if (aIdx !== -1 && bIdx !== -1) return aIdx - bIdx;
+            if (aIdx !== -1) return -1;
+            if (bIdx !== -1) return 1;
+            return a.localeCompare(b);
+        });
+        
+        renderMetadataFieldList(metadataFieldOrder);
+        setMetadataFieldStatus(`${metadataFieldOrder.length} metadata fields available`, true);
+    }
+
+    async function loadOrganization() {
+        const response = await fetch("/api/users/organizations/current/", { credentials: "include" });
+        if (!response.ok) {
+            return;
+        }
+        const data = await response.json();
+        organizationSnapshot = {
+            id: data.id,
+            name: data.name || "",
+            phone: data.phone || "",
+            email: data.email || "",
+            website: data.website || "",
+            address_line1: data.address_line1 || "",
+            address_line2: data.address_line2 || "",
+            city: data.city || "",
+            state: data.state || "",
+            postal_code: data.postal_code || "",
+            country: data.country || "",
+        };
+        orgName.value = organizationSnapshot.name;
+        orgPhone.value = organizationSnapshot.phone;
+        orgEmail.value = organizationSnapshot.email;
+        orgWebsite.value = organizationSnapshot.website;
+        orgAddress1.value = organizationSnapshot.address_line1;
+        orgAddress2.value = organizationSnapshot.address_line2;
+        orgCity.value = organizationSnapshot.city;
+        orgState.value = organizationSnapshot.state;
+        orgPostal.value = organizationSnapshot.postal_code;
+        orgCountry.value = organizationSnapshot.country;
+    }
+
+    async function loadOrganizationPreferences() {
+        if (!organizationSnapshot?.id) {
+            return;
+        }
+        const response = await fetch(`/api/users/organizations/${organizationSnapshot.id}/document-settings/`, {
+            credentials: "include",
+        });
+        if (!response.ok) {
+            return;
+        }
+        const data = await response.json();
+        const preferences = data.preferences || {};
+        orgProcessingDefaults = preferences.processing_defaults || {};
+        applyOrganizationDefaults();
+        applyOrgDefaultsToDocumentIfMissing();
+    }
+
+    async function loadExportSettings() {
+        const response = await fetch(`/api/documents/${documentId}/export-settings/`, { credentials: "include" });
+        if (!response.ok) {
+            return;
+        }
+        const data = await response.json();
+        const processingSettings = data.processing_settings || {};
+        const pdfSecurity = processingSettings.pdf_security || {};
+        const textProtection = processingSettings.pdf_text_protection || {};
+        if (pdfPasswordEnabled) {
+            pdfPasswordEnabled.checked = !!pdfSecurity.enabled;
+        }
+        if (pdfUserPassword) {
+            pdfUserPassword.value = pdfSecurity.user_password || "";
+        }
+        if (pdfOwnerPassword) {
+            pdfOwnerPassword.value = pdfSecurity.owner_password || "";
+        }
+        if (textProtectionEnabled) {
+            textProtectionEnabled.checked = !!textProtection.enabled;
+        }
+        if (textProtectionMode) {
+            textProtectionMode.value = textProtection.mode || "rasterize";
+        }
+        if (textProtectionDpi) {
+            textProtectionDpi.value = textProtection.dpi ?? 200;
+        }
+        if (textProtectionRemoveMetadata) {
+            textProtectionRemoveMetadata.checked = textProtection.remove_metadata !== false;
+        }
+        if (textProtectionKey) {
+            textProtectionKey.value = textProtection.encryption_key || "";
+        }
+    }
+
+    function applyOrganizationDefaults() {
+        const defaults = orgProcessingDefaults || {};
+
+        if (defaults.table_config) {
+            if (defaults.table_config.style_preset) {
+                tableStylePreset.value = defaults.table_config.style_preset;
+            }
+            if (defaults.table_config.overflow_mode) {
+                tableOverflowMode.value = defaults.table_config.overflow_mode;
+            }
+            if (defaults.table_config.split_column_count !== undefined) {
+                tableSplitCount.value = defaults.table_config.split_column_count;
+            }
+        }
+
+        if (defaults.file_config) {
+            if (defaults.file_config.width_percent !== undefined) {
+                filePdfScale.value = defaults.file_config.width_percent;
+            }
+            if (defaults.file_config.page_range !== undefined) {
+                filePageRange.value = defaults.file_config.page_range || "";
+            }
+            if (defaults.file_config.show_border !== undefined) {
+                fileShowBorder.checked = !!defaults.file_config.show_border;
+            }
+            if (defaults.file_config.show_caption_metadata !== undefined) {
+                fileShowCaption.checked = !!defaults.file_config.show_caption_metadata;
+            }
+        }
+
+        if (defaults.pdf_images) {
+            if (!logoImageSelect.value && defaults.pdf_images.logo_image_id) {
+                logoImageSelect.value = defaults.pdf_images.logo_image_id;
+            }
+            if (!watermarkImageSelect.value && defaults.pdf_images.watermark_image_id) {
+                watermarkImageSelect.value = defaults.pdf_images.watermark_image_id;
+            }
+            if (!backgroundImageSelect.value && defaults.pdf_images.background_image_id) {
+                backgroundImageSelect.value = defaults.pdf_images.background_image_id;
+            }
+            updateDownloadState();
+        }
+
+        if (defaults.header_pdf) {
+            if (headerPdfFileSelect && !headerPdfFileSelect.value && defaults.header_pdf.file_id) {
+                headerPdfFileSelect.value = defaults.header_pdf.file_id;
+            }
+            if (headerPdfHeight && !headerPdfHeight.value && defaults.header_pdf.height) {
+                headerPdfHeight.value = defaults.header_pdf.height;
+            }
+            if (headerPdfPageScope && headerPdfPageList && !headerPdfPageList.value) {
+                const headerPdfPages = Array.isArray(defaults.header_pdf.show_pages) ? defaults.header_pdf.show_pages : [];
+                if (headerPdfPages.length) {
+                    headerPdfPageScope.value = "custom";
+                    headerPdfPageList.value = headerPdfPages.join(",");
+                } else if (defaults.header_pdf.show_on_all_pages) {
+                    headerPdfPageScope.value = "all";
+                    headerPdfPageList.value = "";
+                }
+            }
+        }
+    }
+
+    async function applyOrgDefaultsToDocumentIfMissing() {
+        if (orgDefaultsApplied) {
+            return;
+        }
+
+        const defaults = orgProcessingDefaults || {};
+        if (!Object.keys(defaults).length) {
+            return;
+        }
+
+        const settings = documentProcessingSettings || {};
+        const updates = [];
+
+        if (!settings.header_footer && defaults.header_footer) {
+            const payload = {
+                header_template: defaults.header_footer.header_template || null,
+                footer_template: defaults.header_footer.footer_template || null,
+                header_config: defaults.header_footer.header_config || {},
+                footer_config: defaults.header_footer.footer_config || {},
+            };
+            updates.push(
+                fetch(`/api/documents/${documentId}/header-footer/`, {
+                    method: "PATCH",
+                    headers: { "Content-Type": "application/json" },
+                    credentials: "include",
+                    body: JSON.stringify(payload),
+                })
+            );
+        }
+
+        if (!settings.header_pdf && defaults.header_pdf) {
+            updates.push(
+                fetch(`/api/documents/${documentId}/header-footer/`, {
+                    method: "PATCH",
+                    headers: { "Content-Type": "application/json" },
+                    credentials: "include",
+                    body: JSON.stringify({ header_pdf: defaults.header_pdf }),
+                })
+            );
+        }
+
+        if (!settings.table_config && defaults.table_config) {
+            updates.push(
+                fetch("/api/documents/tables/apply-config/", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    credentials: "include",
+                    body: JSON.stringify({ document_id: documentId, table_config: defaults.table_config }),
+                })
+            );
+        }
+
+        if (!settings.file_config && defaults.file_config) {
+            updates.push(
+                fetch("/api/documents/file-components/apply-config/", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    credentials: "include",
+                    body: JSON.stringify({ document_id: documentId, file_config: defaults.file_config }),
+                })
+            );
+        }
+
+        if (!settings.pdf_images && defaults.pdf_images) {
+            const hasDocImages = documentImageState.logo || documentImageState.watermark || documentImageState.background;
+            if (!hasDocImages) {
+                updates.push(
+                    updateDocumentImages({
+                        logo_image_id: defaults.pdf_images.logo_image_id || null,
+                        watermark_image_id: defaults.pdf_images.watermark_image_id || null,
+                        background_image_id: defaults.pdf_images.background_image_id || null,
+                    })
+                );
+            }
+        }
+
+        if (!updates.length) {
+            return;
+        }
+
+        orgDefaultsApplied = true;
+        try {
+            await Promise.all(updates);
+            await loadHeaderFooterSelection();
+        } catch (err) {
+            orgDefaultsApplied = false;
+        }
+    }
+
+    async function loadUser() {
+        const response = await fetch("/api/auth/me/", { credentials: "include" });
+        if (response.ok) {
+            const data = await response.json();
+            const name = data.user?.full_name || data.full_name || data.user?.username || data.user?.email || "Logged in";
+            const email = data.user?.email || data.user?.username || data.email || "";
+            userInfo.textContent = email ? `User: ${name} (${email})` : `User: ${name}`;
+            return true;
+        }
+        userInfo.textContent = "Not logged in";
+        return false;
+    }
+
+    async function checkAccess() {
+        const response = await fetch(`/api/documents/${documentId}/`, { credentials: "include" });
+        if (response.ok) {
+            accessStatus.textContent = "Access granted. Loading preview…";
+            accessStatus.classList.add("ok");
+            accessBadge.textContent = "Access verified";
+            previewFrame.src = buildPreviewUrl();
+        } else {
+            accessStatus.textContent = "Access denied or login required.";
+            accessStatus.classList.add("error");
+            accessBadge.textContent = "Access denied";
+        }
+    }
+
+    document.getElementById("applySettings").addEventListener("click", () => {
+        previewFrame.src = buildPreviewUrl();
+    });
+
+    ["pageSize", "margin", "font", "fontSize", "lineSpacing"].forEach((id) => {
+        const element = document.getElementById(id);
+        if (element) {
+            element.addEventListener("change", () => {
+                previewFrame.src = buildPreviewUrl();
+            });
+        }
+    });
+
+    refreshPreview.addEventListener("click", () => {
+        previewFrame.src = buildPreviewUrl();
+    });
+
+    openPrint.addEventListener("click", () => {
+        window.open(buildPreviewUrl(), "_blank");
+    });
+
+    downloadPdf.addEventListener("click", () => {
+        const url = buildDownloadUrl() + '&download=1';
+        window.open(url, "_blank");
+    });
+
+    navItems.forEach((item) => {
+        item.addEventListener("click", () => {
+            setPanel(item.dataset.panel);
+            if (item.dataset.panel === "headers") {
+                loadHeaderFooterTemplates();
+                loadHeaderFooterSelection().then(() => refreshHfActiveIndicators());
+                loadHfSourceFiles();
+                loadHfLibrary();
+                loadOrganization()
+                    .then(loadOrganizationPreferences)
+                    .then(applyOrganizationDefaults);
+            }
+            if (item.dataset.panel === "metadata") {
+                loadMetadataFields();
+            }
+        });
+    });
+
+    headerTemplateSelect.addEventListener("change", () => {
+        const headerTemplate = templateIndex.header[headerTemplateSelect.value];
+        renderTemplatePreview(headerTemplatePreview, headerTemplate);
+        renderPlaceholderCanvas([
+            ...(headerTemplate?.placeholders || []),
+            ...(templateIndex.footer[footerTemplateSelect.value]?.placeholders || []),
+        ]);
+    });
+
+    footerTemplateSelect.addEventListener("change", () => {
+        const footerTemplate = templateIndex.footer[footerTemplateSelect.value];
+        renderTemplatePreview(footerTemplatePreview, footerTemplate);
+        renderPlaceholderCanvas([
+            ...(templateIndex.header[headerTemplateSelect.value]?.placeholders || []),
+            ...(footerTemplate?.placeholders || []),
+        ]);
+    });
+
+    saveHeaderFooter.addEventListener("click", async () => {
+        let customMetadata = null;
+        const customRaw = customMetadataInput.value.trim();
+        if (customRaw) {
+            try {
+                customMetadata = JSON.parse(customRaw);
+            } catch (err) {
+                setHeaderFooterStatus("Custom metadata must be valid JSON", false);
+                return;
+            }
+        }
+
+        const orgUpdates = {};
+        if (orgName.value !== organizationSnapshot.name) orgUpdates.name = orgName.value;
+        if (orgPhone.value !== organizationSnapshot.phone) orgUpdates.phone = orgPhone.value;
+        if (orgEmail.value !== organizationSnapshot.email) orgUpdates.email = orgEmail.value;
+        if (orgWebsite.value !== organizationSnapshot.website) orgUpdates.website = orgWebsite.value;
+        if (orgAddress1.value !== organizationSnapshot.address_line1) orgUpdates.address_line1 = orgAddress1.value;
+        if (orgAddress2.value !== organizationSnapshot.address_line2) orgUpdates.address_line2 = orgAddress2.value;
+        if (orgCity.value !== organizationSnapshot.city) orgUpdates.city = orgCity.value;
+        if (orgState.value !== organizationSnapshot.state) orgUpdates.state = orgState.value;
+        if (orgPostal.value !== organizationSnapshot.postal_code) orgUpdates.postal_code = orgPostal.value;
+        if (orgCountry.value !== organizationSnapshot.country) orgUpdates.country = orgCountry.value;
+
+        if (Object.keys(orgUpdates).length) {
+            const orgResponse = await fetch("/api/users/organizations/current/", {
+                method: "PATCH",
+                headers: {
+                    "Content-Type": "application/json",
+                },
+                credentials: "include",
+                body: JSON.stringify(orgUpdates),
+            });
+            if (!orgResponse.ok) {
+                setHeaderFooterStatus("Organization update failed", false);
+                return;
+            }
+            organizationSnapshot = { ...organizationSnapshot, ...orgUpdates };
+        }
+
+        const scope = headerPageScope?.value || "all";
+        const headerConfig = { ...(headerConfigDraft || {}) };
+        headerConfig.show_on_all_pages = scope === "all";
+        headerConfig.show_on_first_page = scope === "first";
+        headerConfig.show_pages = scope === "custom"
+            ? (headerPageList.value || "")
+                .split(",")
+                .map((value) => parseInt(value.trim(), 10))
+                .filter((value) => Number.isFinite(value))
+            : [];
+        headerConfig.style = { ...(headerConfig.style || {}) };
+        if (headerContentSpacing?.value !== "") {
+            headerConfig.style.content_spacing = parseFloat(headerContentSpacing.value || 0);
+        } else {
+            delete headerConfig.style.content_spacing;
+        }
+
+        let headerPdfConfig = null;
+        const headerPdfFileId = headerPdfFileSelect?.value || "";
+        if (headerPdfFileId) {
+            // Height is optional; backend will attempt auto-detection when omitted.
+            const headerPdfHeightValue = headerPdfHeight?.value?.trim();
+            const headerPdfScope = headerPdfPageScope?.value || "first";
+            headerPdfConfig = {
+                file_id: headerPdfFileId,
+                // only include height if user provided one
+                ...(headerPdfHeightValue ? { height: headerPdfHeightValue } : {}),
+                show_on_all_pages: headerPdfScope === "all",
+                show_on_first_page: headerPdfScope === "first",
+                show_pages: headerPdfScope === "custom"
+                    ? (headerPdfPageList?.value || "")
+                        .split(",")
+                        .map((value) => parseInt(value.trim(), 10))
+                        .filter((value) => Number.isFinite(value))
+                    : [],
+            };
+        }
+
+        let footerPdfConfig = null;
+        const footerPdfFileId = footerPdfFileSelect?.value || "";
+        if (footerPdfFileId) {
+            const footerPdfHeightValue = footerPdfHeight?.value?.trim();
+            const footerPdfScope = footerPdfPageScope?.value || "first";
+            footerPdfConfig = {
+                file_id: footerPdfFileId,
+                ...(footerPdfHeightValue ? { height: footerPdfHeightValue } : {}),
+                show_on_all_pages: footerPdfScope === "all",
+                show_on_first_page: footerPdfScope === "first",
+                show_pages: footerPdfScope === "custom"
+                    ? (footerPdfPageList?.value || "")
+                        .split(",")
+                        .map((value) => parseInt(value.trim(), 10))
+                        .filter((value) => Number.isFinite(value))
+                    : [],
+            };
+        }
+
+        const payload = {
+            header_template: headerPdfConfig ? null : (headerTemplateSelect.value || null),
+            footer_template: footerPdfConfig ? null : (footerTemplateSelect.value || null),
+            header_config: headerPdfConfig ? {} : headerConfig,
+            header_pdf: headerPdfConfig,
+            footer_pdf: footerPdfConfig,
+        };
+        if (customMetadata) {
+            payload.custom_metadata = customMetadata;
+        }
+        const response = await fetch(`/api/documents/${documentId}/header-footer/`, {
+            method: "PATCH",
+            headers: {
+                "Content-Type": "application/json",
+            },
+            credentials: "include",
+            body: JSON.stringify(payload),
+        });
+        if (response.ok) {
+            setHeaderFooterStatus("Header/footer updated", true);
+            previewFrame.src = buildPreviewUrl();
+        } else {
+            setHeaderFooterStatus("Failed to update header/footer", false);
+        }
+    });
+
+    /* ========= Legacy header/footer PDF handlers removed — replaced by crop modal ========= */
+
+    savePdfImages.addEventListener("click", async () => {
+        const payload = {
+            logo_image_id: logoImageSelect.value || null,
+            watermark_image_id: watermarkImageSelect.value || null,
+            background_image_id: backgroundImageSelect.value || null,
+        };
+
+        const response = await fetch(`/api/documents/${documentId}/edit-full/`, {
+            method: "PATCH",
+            headers: {
+                "Content-Type": "application/json",
+            },
+            credentials: "include",
+            body: JSON.stringify(payload),
+        });
+
+        if (response.ok) {
+            setPdfImagesStatus("PDF images updated", true);
+            previewFrame.src = buildPreviewUrl();
+        } else {
+            setPdfImagesStatus("Failed to update PDF images", false);
+        }
+    });
+
+    if (applyTableStyles) {
+        applyTableStyles.addEventListener("click", async () => {
+            const payload = {
+                document_id: documentId,
+                table_config: {
+                    style_preset: tableStylePreset.value || "standard",
+                    overflow_mode: tableOverflowMode.value || "none",
+                    split_column_count: parseInt(tableSplitCount.value || "6", 10),
+                },
+            };
+
+            const response = await fetch("/api/documents/tables/apply-config/", {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/json",
+                },
+                credentials: "include",
+                body: JSON.stringify(payload),
+            });
+
+            if (response.ok) {
+                setTableStyleStatus("Table styles updated", true);
+                previewFrame.src = buildPreviewUrl();
+            } else {
+                setTableStyleStatus("Failed to update table styles", false);
+            }
+        });
+    }
+
+    if (applyFileDisplay) {
+        applyFileDisplay.addEventListener("click", async () => {
+            const payload = {
+                document_id: documentId,
+                file_config: {
+                    width_percent: parseInt(filePdfScale.value || "80", 10),
+                    page_range: filePageRange.value || "",
+                    show_border: !!fileShowBorder.checked,
+                    show_caption_metadata: !!fileShowCaption.checked,
+                },
+            };
+
+            const response = await fetch("/api/documents/file-components/apply-config/", {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/json",
+                },
+                credentials: "include",
+                body: JSON.stringify(payload),
+            });
+
+            if (response.ok) {
+                setFileDisplayStatus("PDF file display updated", true);
+                previewFrame.src = buildPreviewUrl();
+            } else {
+                setFileDisplayStatus("Failed to update PDF file display", false);
+            }
+        });
+    }
+
+    if (savePdfSecurity) {
+        savePdfSecurity.addEventListener("click", async () => {
+            if (pdfPasswordEnabled?.checked && !pdfUserPassword?.value?.trim()) {
+                setPdfSecurityStatus("User password is required when enabled", false);
+                return;
+            }
+            const payload = {
+                processing_settings: {
+                    pdf_security: {
+                        enabled: !!pdfPasswordEnabled?.checked,
+                        user_password: pdfUserPassword?.value?.trim() || "",
+                        owner_password: pdfOwnerPassword?.value?.trim() || "",
+                    },
+                    pdf_text_protection: {
+                        enabled: !!textProtectionEnabled?.checked,
+                        mode: textProtectionMode?.value || "rasterize",
+                        dpi: Number(textProtectionDpi?.value || 200),
+                        remove_metadata: !!textProtectionRemoveMetadata?.checked,
+                        encryption_key: textProtectionKey?.value?.trim() || "",
+                    },
+                },
+            };
+
+            const response = await fetch(`/api/documents/${documentId}/export-settings/`, {
+                method: "PATCH",
+                headers: { "Content-Type": "application/json" },
+                credentials: "include",
+                body: JSON.stringify(payload),
+            });
+
+            if (response.ok) {
+                setPdfSecurityStatus("PDF security settings saved", true);
+            } else {
+                setPdfSecurityStatus("Failed to save PDF security settings", false);
+            }
+        });
+    }
+
+    if (pdfPasswordEnabled) {
+        const togglePdfSecurityInputs = () => {
+            const enabled = !!pdfPasswordEnabled.checked;
+            if (pdfUserPassword) pdfUserPassword.disabled = !enabled;
+            if (pdfOwnerPassword) pdfOwnerPassword.disabled = !enabled;
+            if (!enabled) {
+                if (pdfUserPassword) pdfUserPassword.value = "";
+                if (pdfOwnerPassword) pdfOwnerPassword.value = "";
+            }
+        };
+        pdfPasswordEnabled.addEventListener("change", togglePdfSecurityInputs);
+        togglePdfSecurityInputs();
+    }
+
+    if (textProtectionEnabled) {
+        const toggleTextProtectionInputs = () => {
+            const enabled = !!textProtectionEnabled.checked;
+            if (textProtectionMode) textProtectionMode.disabled = !enabled;
+            if (textProtectionDpi) textProtectionDpi.disabled = !enabled;
+            if (textProtectionRemoveMetadata) textProtectionRemoveMetadata.disabled = !enabled;
+            if (textProtectionKey) textProtectionKey.disabled = !enabled;
+            if (!enabled && textProtectionKey) {
+                textProtectionKey.value = "";
+            }
+        };
+        textProtectionEnabled.addEventListener("change", toggleTextProtectionInputs);
+        toggleTextProtectionInputs();
+    }
+
+    if (saveMetadataFields) {
+        saveMetadataFields.addEventListener("click", async () => {
+            const enabled = {};
+            const inputs = metadataFieldList?.querySelectorAll('input[type="checkbox"]') || [];
+            inputs.forEach((input) => {
+                enabled[input.dataset.field] = !!input.checked;
+            });
+            const updated = { ...(currentCustomMetadata || {}) };
+            updated.processing_settings = { ...(updated.processing_settings || {}) };
+            updated.processing_settings.metadata_fields = { enabled };
+
+            const response = await fetch(`/api/documents/${documentId}/header-footer/`, {
+                method: "PATCH",
+                headers: { "Content-Type": "application/json" },
+                credentials: "include",
+                body: JSON.stringify({ custom_metadata: updated }),
+            });
+            if (response.ok) {
+                currentCustomMetadata = updated;
+                customMetadataInput.value = JSON.stringify(updated, null, 2);
+                metadataFieldState = enabled;
+                setMetadataFieldStatus("Metadata fields saved", true);
+            } else {
+                setMetadataFieldStatus("Failed to save metadata fields", false);
+            }
+        });
+    }
+
+    if (uploadLogo) {
+        uploadLogo.addEventListener("click", async () => {
+            if (!logoUpload?.files?.length) {
+                setPdfImagesStatus("Choose a logo file first", false);
+                return;
+            }
+            try {
+                setPdfImagesStatus("Uploading logo…", true);
+                const image = await uploadDocumentImage(logoUpload.files[0], "logo");
+                await loadPdfImageOptions();
+                setSelectedByUrl(logoImageSelect, image.url || "");
+                await updateDocumentImages({ logo_image_id: image.id });
+                updateDownloadState();
+                setPdfImagesStatus("Logo updated", true);
+                previewFrame.src = buildPreviewUrl();
+            } catch (err) {
+                setPdfImagesStatus(err.message || "Logo upload failed", false);
+            }
+        });
+    }
+
+    if (uploadWatermark) {
+        uploadWatermark.addEventListener("click", async () => {
+            if (!watermarkUpload?.files?.length) {
+                setPdfImagesStatus("Choose a watermark file first", false);
+                return;
+            }
+            try {
+                setPdfImagesStatus("Uploading watermark…", true);
+                const image = await uploadDocumentImage(watermarkUpload.files[0], "watermark");
+                await loadPdfImageOptions();
+                setSelectedByUrl(watermarkImageSelect, image.url || "");
+                await updateDocumentImages({ watermark_image_id: image.id });
+                updateDownloadState();
+                setPdfImagesStatus("Watermark updated", true);
+                previewFrame.src = buildPreviewUrl();
+            } catch (err) {
+                setPdfImagesStatus(err.message || "Watermark upload failed", false);
+            }
+        });
+    }
+
+    if (uploadBackground) {
+        uploadBackground.addEventListener("click", async () => {
+            if (!backgroundUpload?.files?.length) {
+                setPdfImagesStatus("Choose a background file first", false);
+                return;
+            }
+            try {
+                setPdfImagesStatus("Uploading background…", true);
+                const image = await uploadDocumentImage(backgroundUpload.files[0], "background");
+                await loadPdfImageOptions();
+                setSelectedByUrl(backgroundImageSelect, image.url || "");
+                await updateDocumentImages({ background_image_id: image.id });
+                updateDownloadState();
+                setPdfImagesStatus("Background updated", true);
+                previewFrame.src = buildPreviewUrl();
+            } catch (err) {
+                setPdfImagesStatus(err.message || "Background upload failed", false);
+            }
+        });
+    }
+
+    if (clearLogo) {
+        clearLogo.addEventListener("click", async () => {
+            try {
+                setPdfImagesStatus("Removing logo…", true);
+                await updateDocumentImages({ logo_image_id: null });
+                await loadPdfImageSelection();
+                updateDownloadState();
+                setPdfImagesStatus("Logo removed", true);
+                previewFrame.src = buildPreviewUrl();
+            } catch (err) {
+                setPdfImagesStatus(err.message || "Logo removal failed", false);
+            }
+        });
+    }
+
+    if (clearWatermark) {
+        clearWatermark.addEventListener("click", async () => {
+            try {
+                setPdfImagesStatus("Removing watermark…", true);
+                await updateDocumentImages({ watermark_image_id: null });
+                await loadPdfImageSelection();
+                updateDownloadState();
+                setPdfImagesStatus("Watermark removed", true);
+                previewFrame.src = buildPreviewUrl();
+            } catch (err) {
+                setPdfImagesStatus(err.message || "Watermark removal failed", false);
+            }
+        });
+    }
+
+    if (clearBackground) {
+        clearBackground.addEventListener("click", async () => {
+            try {
+                setPdfImagesStatus("Removing background…", true);
+                await updateDocumentImages({ background_image_id: null });
+                await loadPdfImageSelection();
+                updateDownloadState();
+                setPdfImagesStatus("Background removed", true);
+                previewFrame.src = buildPreviewUrl();
+            } catch (err) {
+                setPdfImagesStatus(err.message || "Background removal failed", false);
+            }
+        });
+    }
+
+    openHeaderFooter.addEventListener("click", () => {
+        setPanel("headers");
+        loadHeaderFooterTemplates();
+        loadHeaderFooterSelection().then(() => refreshHfActiveIndicators());
+        loadHfSourceFiles();
+        loadHfLibrary();
+        loadOrganization()
+            .then(loadOrganizationPreferences)
+            .then(applyOrganizationDefaults);
+    });
+
+    backToLayout.addEventListener("click", () => {
+        setPanel("layout");
+    });
+
+    [
+        orgName,
+        orgPhone,
+        orgEmail,
+        orgWebsite,
+        orgAddress1,
+        orgAddress2,
+        orgCity,
+        orgState,
+        orgPostal,
+        orgCountry,
+        customMetadataInput,
+    ].forEach((element) => {
+        if (element) {
+            element.addEventListener("focus", setActiveField);
+        }
+    });
+
+    loadUser()
+        .then(() => {
+            loadHeaderFooterTemplates();
+            loadHeaderFooterSelection().then(() => refreshHfActiveIndicators());
+            loadHfSourceFiles();
+            loadHfLibrary();
+            loadOrganization()
+                .then(loadOrganizationPreferences)
+                .then(applyOrganizationDefaults);
+            loadExportSettings();
+            loadMetadataFields();
+            loadPdfImageOptions()
+                .then(loadPdfImageSelection)
+                .then(updateDownloadState);
+            checkAccess();
+        })
+        .catch(() => {
+        userInfo.textContent = "Login required";
+        accessStatus.textContent = "Login required";
+        accessStatus.classList.add("error");
+    });
+
+    if (downloadLogoSelect) {
+        downloadLogoSelect.addEventListener("click", () => {
+            const url = getSelectedImageUrl(logoImageSelect);
+            if (url) window.open(url, "_blank");
+        });
+    }
+
+    if (downloadWatermarkSelect) {
+        downloadWatermarkSelect.addEventListener("click", () => {
+            const url = getSelectedImageUrl(watermarkImageSelect);
+            if (url) window.open(url, "_blank");
+        });
+    }
+
+    if (downloadBackgroundSelect) {
+        downloadBackgroundSelect.addEventListener("click", () => {
+            const url = getSelectedImageUrl(backgroundImageSelect);
+            if (url) window.open(url, "_blank");
+        });
+    }
+
+    [logoImageSelect, watermarkImageSelect, backgroundImageSelect].forEach((selectEl) => {
+        if (selectEl) {
+            selectEl.addEventListener("change", updateDownloadState);
+        }
+    });
+</script>
+</body>
+</html>

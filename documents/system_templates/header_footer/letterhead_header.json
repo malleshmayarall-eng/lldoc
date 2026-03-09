@@ -1,0 +1,32 @@
+{
+  "name": "Letterhead - Professional Header",
+  "description": "Clean, professional header perfect for official correspondence, external memos, and HR offers.",
+  "template_type": "header",
+  "category": "Letterhead",
+  "tags": ["official", "correspondence", "professional", "external"],
+  "config": {
+    "icons": [],
+    "text": {
+      "left": "{company_name}\n{company_address}\n{company_phone} | {company_email}",
+      "center": "",
+      "right": ""
+    },
+    "style": {
+      "height": "96px",
+      "background_color": "#ffffff",
+      "border_bottom": "2px solid #003366",
+      "font_family": "Arial, sans-serif",
+      "font_size": "9pt",
+      "padding": "12px 20px",
+      "text_align": {
+        "left": "left",
+        "center": "center",
+        "right": "right"
+      }
+    },
+    "show_on_first_page": true,
+    "show_on_all_pages": false,
+    "logo_position": "left",
+    "logo_size": "large"
+  }
+}

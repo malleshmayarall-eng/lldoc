@@ -1,0 +1,27 @@
+{text.developer}
+-------------------------------------------------------------
+
+
+    You have not yet purchased your Apple Developer Program. If you do not purchase your program within the next seven (7) days, we will assume you are no longer interested in continuing your enrollment and will withdraw your request.
+https://developer.apple.com/enroll/
+
+Should you wish to join the Apple Developer Program after your enrollment has been withdrawn, please contact us and reference your enrollment ID MGVS9PNRV7.
+    
+
+Best regards,
+Apple Developer Relations 
+
+-------------------------------------------------------------
+TM and © 2021 Apple Inc.  One Apple Park Way, MS 923-4DEV, Cupertino, CA 95014.
+
+All Rights Reserved
+http://www.apple.com/legal/
+
+Privacy Policy
+http://www.apple.com/legal/privacy/
+
+Account
+https://developer.apple.com/account/
+
+Support
+https://developer.apple.com/support/

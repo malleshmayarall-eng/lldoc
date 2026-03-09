@@ -1,0 +1,228 @@
+{% load static %}
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Export & Print – {{ document.title|default:"Document" }}</title>
+    <style>
+        :root {
+            --bg: #0f172a;
+            --panel: #111827;
+            --accent: #38bdf8;
+            --text: #f8fafc;
+            --muted: #94a3b8;
+        }
+        * { box-sizing: border-box; }
+        body {
+            margin: 0;
+            font-family: "Inter", system-ui, -apple-system, sans-serif;
+            background: var(--bg);
+            color: var(--text);
+        }
+        header {
+            padding: 20px 24px;
+            border-bottom: 1px solid #1f2937;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        header h1 {
+            margin: 0;
+            font-size: 18px;
+        }
+        header span {
+            color: var(--muted);
+            font-size: 14px;
+        }
+        .layout {
+            display: grid;
+            grid-template-columns: 340px 1fr;
+            min-height: calc(100vh - 64px);
+        }
+        .sidebar {
+            background: var(--panel);
+            padding: 24px;
+            border-right: 1px solid #1f2937;
+        }
+        .sidebar h2 {
+            margin-top: 0;
+            font-size: 16px;
+        }
+        .status {
+            padding: 12px;
+            border-radius: 8px;
+            background: #0b1220;
+            border: 1px solid #1f2937;
+            color: var(--muted);
+            margin-bottom: 16px;
+        }
+        .status.ok { color: #34d399; border-color: #14532d; }
+        .status.error { color: #f87171; border-color: #7f1d1d; }
+        .controls label {
+            display: block;
+            font-size: 13px;
+            margin-top: 12px;
+            color: var(--muted);
+        }
+        .controls input, .controls select {
+            width: 100%;
+            margin-top: 6px;
+            padding: 8px 10px;
+            background: #0b1220;
+            color: var(--text);
+            border: 1px solid #1f2937;
+            border-radius: 6px;
+        }
+        .controls button {
+            margin-top: 16px;
+            width: 100%;
+            padding: 10px 12px;
+            background: var(--accent);
+            color: #0f172a;
+            border: none;
+            border-radius: 6px;
+            font-weight: 600;
+            cursor: pointer;
+        }
+        .preview {
+            background: #0b1220;
+            padding: 16px;
+        }
+        iframe {
+            width: 100%;
+            height: calc(100vh - 120px);
+            border: 1px solid #1f2937;
+            border-radius: 10px;
+            background: #fff;
+        }
+    </style>
+</head>
+<body>
+    <header>
+        <div>
+            <h1>Export & Print</h1>
+            <span>{{ document.title|default:"Untitled Document" }}</span>
+        </div>
+        <span>Document ID: {{ document_id }}</span>
+    </header>
+
+    <div class="layout">
+        <aside class="sidebar">
+            <h2>Session & Export Settings</h2>
+            <div id="sessionStatus" class="status">Waiting for session bootstrap…</div>
+            <div id="userDetails" class="status">User: unknown</div>
+
+            <div class="controls">
+                <label for="pageSize">Page Size</label>
+                <select id="pageSize">
+                    <option value="a4">A4</option>
+                    <option value="letter">Letter</option>
+                    <option value="legal">Legal</option>
+                </select>
+
+                <label for="font">Font</label>
+                <select id="font">
+                    <option value="serif">Serif</option>
+                    <option value="sans">Sans</option>
+                    <option value="mono">Mono</option>
+                </select>
+
+                <label for="fontSize">Font Size</label>
+                <select id="fontSize">
+                    <option value="11pt">11pt</option>
+                    <option value="12pt" selected>12pt</option>
+                    <option value="13pt">13pt</option>
+                </select>
+
+                <label for="lineSpacing">Line Spacing</label>
+                <select id="lineSpacing">
+                    <option value="single">Single</option>
+                    <option value="1.15">1.15</option>
+                    <option value="1.5" selected>1.5</option>
+                    <option value="double">Double</option>
+                </select>
+
+                <button id="applySettings">Apply to Preview</button>
+            </div>
+        </aside>
+
+        <main class="preview">
+            <iframe id="printPreview" title="Print Preview"></iframe>
+        </main>
+    </div>
+
+    <script>
+        const documentId = "{{ document_id }}";
+        const initialToken = "{{ token }}";
+        const sessionStatus = document.getElementById("sessionStatus");
+        const previewFrame = document.getElementById("printPreview");
+
+        function buildPreviewUrl() {
+            const params = new URLSearchParams({
+                pageSize: document.getElementById("pageSize").value,
+                font: document.getElementById("font").value,
+                fontSize: document.getElementById("fontSize").value,
+                lineSpacing: document.getElementById("lineSpacing").value,
+            });
+            return `/documents/${documentId}/print/?${params.toString()}`;
+        }
+
+        function updatePreview() {
+            previewFrame.src = buildPreviewUrl();
+        }
+
+        async function bootstrapSession() {
+            const token = initialToken || new URLSearchParams(window.location.search).get("token");
+            if (!token) {
+                sessionStatus.textContent = "No token provided. Preview may require manual login.";
+                sessionStatus.classList.add("error");
+                updatePreview();
+                return;
+            }
+            try {
+                const response = await fetch("/api/auth/session-from-jwt/", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ token }),
+                    credentials: "include",
+                });
+                const data = await response.json();
+                if (response.ok) {
+                    sessionStatus.textContent = "Session ready. Loading preview…";
+                    sessionStatus.classList.add("ok");
+                } else {
+                    sessionStatus.textContent = data.message || "Failed to create session";
+                    sessionStatus.classList.add("error");
+                }
+            } catch (error) {
+                sessionStatus.textContent = "Session bootstrap failed.";
+                sessionStatus.classList.add("error");
+            }
+            updatePreview();
+        }
+
+        async function loadCurrentUser() {
+            try {
+                const response = await fetch("/api/auth/me/", { credentials: "include" });
+                const data = await response.json();
+                if (response.ok) {
+                    const name = data.user?.full_name || data.full_name || data.user?.username || data.user?.email || "Logged in";
+                    const email = data.user?.email || data.user?.username || data.email || "";
+                    userDetails.textContent = email ? `User: ${name} (${email})` : `User: ${name}`;
+                    userDetails.classList.add("ok");
+                } else {
+                    userDetails.textContent = data.message || "User not available";
+                    userDetails.classList.add("error");
+                }
+            } catch (error) {
+                userDetails.textContent = "Failed to load user";
+                userDetails.classList.add("error");
+            }
+        }
+
+        document.getElementById("applySettings").addEventListener("click", updatePreview);
+    bootstrapSession().then(loadCurrentUser);
+    </script>
+</body>
+</html>

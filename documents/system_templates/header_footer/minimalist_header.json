@@ -1,0 +1,27 @@
+{
+  "name": "Minimalist - Universal Header",
+  "description": "Clean, minimal header that works for any document type.",
+  "template_type": "header",
+  "category": "Universal",
+  "tags": ["minimalist", "universal", "clean", "simple", "versatile"],
+  "config": {
+    "icons": [],
+    "text": {
+      "left": "{company_name}",
+      "center": "{document_title}",
+      "right": "{status}"
+    },
+    "style": {
+      "height": "50px",
+      "background_color": "#ffffff",
+      "border_bottom": "1px solid #e0e0e0",
+      "font_family": "Arial, sans-serif",
+      "font_size": "10pt",
+      "padding": "10px 20px"
+    },
+    "show_on_first_page": false,
+    "show_on_all_pages": true,
+    "logo_position": "left",
+    "logo_size": "small"
+  }
+}

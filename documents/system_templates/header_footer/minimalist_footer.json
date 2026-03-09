@@ -1,0 +1,26 @@
+{
+  "name": "Minimalist - Universal Footer",
+  "description": "Simple footer with essential info only.",
+  "template_type": "footer",
+  "category": "Universal",
+  "tags": ["minimalist", "universal", "clean", "simple", "versatile"],
+  "config": {
+    "icons": [],
+    "text": {
+      "left": "{company_name}",
+      "center": "Page {page} of {total}",
+      "right": "{date}"
+    },
+    "style": {
+      "height": "35px",
+      "background_color": "#ffffff",
+      "border_top": "1px solid #e0e0e0",
+      "font_family": "Arial, sans-serif",
+      "font_size": "8pt",
+      "padding": "8px 20px",
+      "color": "#666666"
+    },
+    "show_on_first_page": false,
+    "show_on_all_pages": true
+  }
+}

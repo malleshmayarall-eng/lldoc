@@ -1,0 +1,26 @@
+{
+  "name": "Invoice - Professional Footer",
+  "description": "Clean invoice footer with payment reference, date, and page numbering.",
+  "template_type": "footer",
+  "category": "Invoice",
+  "tags": ["invoice", "bill of sale", "tax", "receipt", "finance"],
+  "config": {
+    "icons": [],
+    "text": {
+      "left": "Ref {reference_number}",
+      "center": "Page {page} of {total}",
+      "right": "{date}"
+    },
+    "style": {
+      "height": "42px",
+      "background_color": "#f7f7f7",
+      "border_top": "1px solid #cbd2d9",
+      "font_family": "Arial, sans-serif",
+      "font_size": "8pt",
+      "padding": "10px 20px",
+      "color": "#4a5568"
+    },
+    "show_on_first_page": true,
+    "show_on_all_pages": true
+  }
+}

@@ -1,0 +1,704 @@
+{% load static %}
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+    <meta http-equiv="Pragma" content="no-cache">
+    <meta http-equiv="Expires" content="0">
+    <title>{{ document.title|default:"Document" }}</title>
+    <style>
+        /* ===== CSS Variables for Customization ===== */
+        :root {
+            --font-family-serif: 'Georgia', 'Times New Roman', serif;
+            --font-family-sans: 'Arial', 'Helvetica', sans-serif;
+            --font-family-mono: 'Courier New', monospace;
+            
+            --font-family: var(--font-family-serif);
+            --font-size-base: 12pt;
+            --font-size-title: 24pt;
+            --font-size-subtitle: 18pt;
+            --font-size-h1: 18pt;
+            --font-size-h2: 16pt;
+            --font-size-h3: 14pt;
+            --font-size-footer: 10pt;
+            
+            --line-height: 1.5;
+            --paragraph-spacing: 0.5em;
+            --section-spacing: 1.5em;
+            
+            --page-width: 210mm;
+            --page-height: 297mm;
+            --margin-top: 25mm;
+            --margin-right: 20mm;
+            --margin-bottom: 25mm;
+            --margin-left: 20mm;
+            
+            --color-text: #000000;
+            --color-text-secondary: #666666;
+            --color-border: #cccccc;
+            --color-bg: #ffffff;
+            --color-header-bg: #f8f9fa;
+            
+            --image-max-width: 100%;
+        }
+
+        /* ===== Page Size Variants ===== */
+        :root[data-page-size="a4"] {
+            --page-width: 210mm;
+            --page-height: 297mm;
+        }
+        
+        :root[data-page-size="letter"] {
+            --page-width: 8.5in;
+            --page-height: 11in;
+        }
+        
+        :root[data-page-size="legal"] {
+            --page-width: 8.5in;
+            --page-height: 14in;
+        }
+
+        /* ===== Font Family Variants ===== */
+        :root[data-font="serif"] {
+            --font-family: var(--font-family-serif);
+        }
+        
+        :root[data-font="sans"] {
+            --font-family: var(--font-family-sans);
+        }
+        
+        :root[data-font="mono"] {
+            --font-family: var(--font-family-mono);
+        }
+
+        /* ===== Line Spacing Variants ===== */
+        :root[data-line-spacing="single"] {
+            --line-height: 1.0;
+        }
+        
+        :root[data-line-spacing="1.15"] {
+            --line-height: 1.15;
+        }
+        
+        :root[data-line-spacing="1.5"] {
+            --line-height: 1.5;
+        }
+        
+        :root[data-line-spacing="double"] {
+            --line-height: 2.0;
+        }
+
+        /* ===== Margin Variants ===== */
+        :root[data-margin="narrow"] {
+            --margin-top: 12.7mm;
+            --margin-right: 12.7mm;
+            --margin-bottom: 12.7mm;
+            --margin-left: 12.7mm;
+        }
+        
+        :root[data-margin="normal"] {
+            --margin-top: 25mm;
+            --margin-right: 20mm;
+            --margin-bottom: 25mm;
+            --margin-left: 20mm;
+        }
+        
+        :root[data-margin="wide"] {
+            --margin-top: 25mm;
+            --margin-right: 50mm;
+            --margin-bottom: 25mm;
+            --margin-left: 50mm;
+        }
+
+        /* ===== Image Size Variants ===== */
+        :root[data-image-size="small"] {
+            --image-max-width: 50%;
+        }
+        
+        :root[data-image-size="medium"] {
+            --image-max-width: 75%;
+        }
+        
+        :root[data-image-size="large"] {
+            --image-max-width: 100%;
+        }
+
+        /* ===== Print Media Rules ===== */
+        @page {
+            size: var(--page-width) var(--page-height);
+            margin: var(--margin-top) var(--margin-right) var(--margin-bottom) var(--margin-left);
+            
+            @top-center {
+                content: element(pageHeader);
+            }
+            @bottom-center {
+                content: counter(page) " of " counter(pages);
+                font-family: var(--font-family);
+                font-size: var(--font-size-footer);
+                color: var(--color-text-secondary);
+            }
+        }
+
+        @media print {
+            html, body {
+                width: var(--page-width);
+                height: var(--page-height);
+            }
+            
+            .no-print {
+                display: none !important;
+            }
+            
+            .page-break-before {
+                page-break-before: always;
+            }
+            
+            .page-break-after {
+                page-break-after: always;
+            }
+            
+            .avoid-break {
+                page-break-inside: avoid;
+            }
+            
+            a {
+                text-decoration: none;
+                color: var(--color-text);
+            }
+            
+            a[href]:after {
+                content: none;
+            }
+
+            .pdf-html img {
+                -webkit-print-color-adjust: exact;
+                print-color-adjust: exact;
+            }
+        }
+
+        /* ===== Base Styles ===== */
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        html, body {
+            width: 100%;
+            height: 100%;
+            margin: 0;
+            padding: 0;
+        }
+
+        body {
+            font-family: var(--font-family);
+            font-size: var(--font-size-base);
+            line-height: var(--line-height);
+            color: var(--color-text);
+            background-color: var(--color-bg);
+        }
+
+        /* ===== Document Container ===== */
+        .document-container {
+            max-width: var(--page-width);
+            margin: 0 auto;
+            padding: var(--margin-top) var(--margin-right) var(--margin-bottom) var(--margin-left);
+            background: var(--color-bg);
+        }
+
+        @media screen {
+            .document-container {
+                box-shadow: 0 0 10px rgba(0, 0, 0, 0.1);
+                margin-top: 20px;
+                margin-bottom: 20px;
+            }
+        }
+
+        /* ===== Document Header ===== */
+        .document-header {
+            text-align: center;
+            margin-bottom: var(--section-spacing);
+            page-break-after: avoid;
+        }
+
+        .document-title {
+            font-size: var(--font-size-title);
+            font-weight: bold;
+            margin-bottom: 0.5em;
+            line-height: 1.2;
+        }
+
+        .document-subtitle {
+            font-size: var(--font-size-subtitle);
+            color: var(--color-text-secondary);
+            margin-bottom: 0.5em;
+            font-weight: normal;
+        }
+
+        .document-meta {
+            font-size: var(--font-size-footer);
+            color: var(--color-text-secondary);
+            margin-top: 1em;
+        }
+
+        .document-meta span {
+            margin: 0 0.5em;
+        }
+
+        /* ===== Section Styles ===== */
+        .section {
+            margin-bottom: var(--section-spacing);
+        }
+
+        .section-header {
+            page-break-after: avoid;
+            margin-bottom: 1em;
+        }
+
+        .section-title {
+            font-size: var(--font-size-h1);
+            font-weight: bold;
+            margin-bottom: 0.5em;
+            border-bottom: 2px solid var(--color-border);
+            padding-bottom: 0.3em;
+        }
+
+        .subsection {
+            margin-left: 1.5em;
+            margin-bottom: 1em;
+        }
+
+        .subsection-title {
+            font-size: var(--font-size-h2);
+            font-weight: bold;
+            margin-bottom: 0.4em;
+        }
+
+        .sub-subsection-title {
+            font-size: var(--font-size-h3);
+            font-weight: bold;
+            margin-bottom: 0.3em;
+        }
+
+        /* ===== Paragraph Styles ===== */
+        .paragraph {
+            margin-bottom: var(--paragraph-spacing);
+            text-align: justify;
+            page-break-inside: avoid;
+        }
+
+        .paragraph p {
+            margin: 0;
+        }
+
+        .paragraph.first-paragraph {
+            text-indent: 0;
+        }
+
+        .paragraph:not(.first-paragraph) {
+            text-indent: 2em;
+        }
+
+        /* ===== Table Styles ===== */
+        .table-container {
+            margin: 1em 0;
+            page-break-inside: avoid;
+        }
+
+        .table-title {
+            font-size: var(--font-size-base);
+            font-weight: bold;
+            margin-bottom: 0.5em;
+            text-align: center;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: var(--font-size-base);
+        }
+
+        table th,
+        table td {
+            border: 1px solid var(--color-border);
+            padding: 0.5em;
+            text-align: left;
+        }
+
+        table th {
+            background-color: var(--color-header-bg);
+            font-weight: bold;
+        }
+
+        table tr:nth-child(even) {
+            background-color: #fafafa;
+        }
+
+        /* ===== Image Styles ===== */
+        .image-container {
+            margin: 1em 0;
+            text-align: center;
+            page-break-inside: avoid;
+        }
+
+        .image-container img {
+            max-width: var(--image-max-width);
+            height: auto;
+            display: block;
+            margin: 0 auto;
+            border: 1px solid var(--color-border);
+            padding: 4px;
+            background: white;
+        }
+
+        .image-caption {
+            font-size: var(--font-size-footer);
+            color: var(--color-text-secondary);
+            margin-top: 0.5em;
+            font-style: italic;
+            text-align: center;
+        }
+
+        /* ===== File/Reference Styles ===== */
+        .file-reference {
+            margin: 0.5em 0;
+            padding: 0.5em;
+            background-color: var(--color-header-bg);
+            border-left: 3px solid var(--color-border);
+            page-break-inside: avoid;
+        }
+
+        .file-reference-title {
+            font-weight: bold;
+            margin-bottom: 0.25em;
+        }
+
+        .file-reference-info {
+            font-size: var(--font-size-footer);
+            color: var(--color-text-secondary);
+        }
+
+        .file-embed {
+            margin-top: 0.5em;
+            background: #ffffff;
+            border: 1px solid var(--color-border);
+            padding: 0.5em;
+        }
+
+        .file-embed iframe,
+        .file-embed embed {
+            width: 100%;
+            border: none;
+        }
+
+        .pdf-html {
+            width: 100%;
+        }
+
+        .pdf-html img {
+            width: 100%;
+            height: auto;
+            display: block;
+            page-break-after: always;
+            image-rendering: auto;
+        }
+
+        /* ===== List Styles ===== */
+        ul, ol {
+            margin: 0.5em 0 0.5em 2em;
+            page-break-inside: avoid;
+        }
+
+        li {
+            margin-bottom: 0.25em;
+        }
+
+        /* ===== Document Footer ===== */
+        .document-footer {
+            margin-top: 3em;
+            padding-top: 1em;
+            border-top: 1px solid var(--color-border);
+            font-size: var(--font-size-footer);
+            color: var(--color-text-secondary);
+            text-align: center;
+            page-break-inside: avoid;
+        }
+
+        /* ===== Control Panel (Screen Only) ===== */
+        .control-panel {
+            position: fixed;
+            top: 20px;
+            right: 20px;
+            background: white;
+            border: 1px solid var(--color-border);
+            border-radius: 8px;
+            padding: 1em;
+            box-shadow: 0 2px 10px rgba(0, 0, 0, 0.1);
+            z-index: 1000;
+            max-width: 300px;
+        }
+
+        .control-panel h3 {
+            margin-bottom: 1em;
+            font-size: 14pt;
+            border-bottom: 1px solid var(--color-border);
+            padding-bottom: 0.5em;
+        }
+
+        .control-group {
+            margin-bottom: 1em;
+        }
+
+        .control-group label {
+            display: block;
+            font-size: 11pt;
+            font-weight: bold;
+            margin-bottom: 0.3em;
+        }
+
+        .control-group select,
+        .control-group input {
+            width: 100%;
+            padding: 0.4em;
+            border: 1px solid var(--color-border);
+            border-radius: 4px;
+            font-size: 10pt;
+        }
+
+        .control-group button {
+            width: 100%;
+            padding: 0.6em;
+            background-color: #007bff;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 11pt;
+            font-weight: bold;
+        }
+
+        .control-group button:hover {
+            background-color: #0056b3;
+        }
+
+        /* ===== Responsive Adjustments ===== */
+        @media screen and (max-width: 768px) {
+            .control-panel {
+                position: relative;
+                top: auto;
+                right: auto;
+                margin: 1em;
+                max-width: 100%;
+            }
+            
+            .document-container {
+                padding: 1em;
+            }
+        }
+
+        /* ===== Utility Classes ===== */
+        .text-center {
+            text-align: center;
+        }
+
+        .text-left {
+            text-align: left;
+        }
+
+        .text-right {
+            text-align: right;
+        }
+
+        .font-bold {
+            font-weight: bold;
+        }
+
+        .font-italic {
+            font-style: italic;
+        }
+
+        .text-muted {
+            color: var(--color-text-secondary);
+        }
+
+        .page-break {
+            page-break-after: always;
+        }
+
+        .no-break {
+            page-break-inside: avoid;
+        }
+    </style>
+</head>
+<body>
+    <!-- Control Panel (Hidden in Print) -->
+    <div class="control-panel no-print">
+        <h3>Document Formatting</h3>
+        
+        <div class="control-group">
+            <label for="pageSize">Page Size</label>
+            <select id="pageSize" onchange="updatePageSize(this.value)">
+                <option value="a4" selected>A4 (210×297mm)</option>
+                <option value="letter">Letter (8.5×11in)</option>
+                <option value="legal">Legal (8.5×14in)</option>
+            </select>
+        </div>
+        
+        <div class="control-group">
+            <label for="marginSize">Margins</label>
+            <select id="marginSize" onchange="updateMarginSize(this.value)">
+                <option value="narrow">Narrow (0.5in)</option>
+                <option value="normal" selected>Normal (1in)</option>
+                <option value="wide">Wide (2in)</option>
+            </select>
+        </div>
+        
+        <div class="control-group">
+            <label for="fontFamily">Font Family</label>
+            <select id="fontFamily" onchange="updateFontFamily(this.value)">
+                <option value="serif" selected>Serif (Georgia)</option>
+                <option value="sans">Sans-serif (Arial)</option>
+                <option value="mono">Monospace (Courier)</option>
+            </select>
+        </div>
+        
+        <div class="control-group">
+            <label for="fontSize">Font Size</label>
+            <select id="fontSize" onchange="updateFontSize(this.value)">
+                <option value="10pt">10pt</option>
+                <option value="11pt">11pt</option>
+                <option value="12pt" selected>12pt</option>
+                <option value="13pt">13pt</option>
+                <option value="14pt">14pt</option>
+            </select>
+        </div>
+        
+        <div class="control-group">
+            <label for="lineSpacing">Line Spacing</label>
+            <select id="lineSpacing" onchange="updateLineSpacing(this.value)">
+                <option value="single">Single</option>
+                <option value="1.15">1.15</option>
+                <option value="1.5" selected>1.5</option>
+                <option value="double">Double</option>
+            </select>
+        </div>
+        
+        <div class="control-group">
+            <label for="imageSize">Image Size</label>
+            <select id="imageSize" onchange="updateImageSize(this.value)">
+                <option value="small">Small (50%)</option>
+                <option value="medium" selected>Medium (75%)</option>
+                <option value="large">Large (100%)</option>
+            </select>
+        </div>
+        
+        <div class="control-group">
+            <button onclick="downloadPDF()">📥 Download as PDF</button>
+        </div>
+    </div>
+
+    <!-- Document Content -->
+    <div class="document-container">
+        <!-- Document Header -->
+        <header class="document-header no-break">
+            <h1 class="document-title">{{ document.title|default:"Untitled Document" }}</h1>
+            {% if document.subtitle %}
+            <h2 class="document-subtitle">{{ document.subtitle }}</h2>
+            {% endif %}
+            {% if document.author %}
+            <div class="document-meta">
+                <span>{{ document.author.get_full_name|default:document.author.username }}</span>
+            </div>
+            {% endif %}
+        </header>
+
+        <!-- Main Content -->
+        <main>
+            {% if document.sections.all %}
+                {% for section in document.sections.all %}
+                    {% if section.parent_id is None %}
+                        {% include 'documents/partials/section_recursive.html' with section=section level=1 %}
+                    {% endif %}
+                {% endfor %}
+            {% else %}
+                <section class="section">
+                    <div class="paragraph">
+                        <p>This document has no content yet.</p>
+                    </div>
+                </section>
+            {% endif %}
+        </main>
+
+        <!-- Document Footer - Removed -->
+    </div>
+
+    <!-- JavaScript for Controls -->
+    <script>
+        function updatePageSize(size) {
+            document.documentElement.setAttribute('data-page-size', size);
+        }
+
+        function updateMarginSize(size) {
+            document.documentElement.setAttribute('data-margin', size);
+        }
+
+        function updateFontFamily(font) {
+            document.documentElement.setAttribute('data-font', font);
+        }
+
+        function updateFontSize(size) {
+            document.documentElement.style.setProperty('--font-size-base', size);
+        }
+
+        function updateLineSpacing(spacing) {
+            document.documentElement.setAttribute('data-line-spacing', spacing);
+        }
+
+        function updateImageSize(size) {
+            document.documentElement.setAttribute('data-image-size', size);
+        }
+
+        function downloadPDF() {
+            // Use document ID from Django template
+            window.location.href = '/documents/{{ document_id }}/download-pdf/';
+        }
+
+        // Initialize from URL parameters if present
+        document.addEventListener('DOMContentLoaded', function() {
+            const params = new URLSearchParams(window.location.search);
+            
+            if (params.get('pageSize')) {
+                document.getElementById('pageSize').value = params.get('pageSize');
+                updatePageSize(params.get('pageSize'));
+            }
+            
+            if (params.get('margin')) {
+                document.getElementById('marginSize').value = params.get('margin');
+                updateMarginSize(params.get('margin'));
+            }
+            
+            if (params.get('font')) {
+                document.getElementById('fontFamily').value = params.get('font');
+                updateFontFamily(params.get('font'));
+            }
+            
+            if (params.get('fontSize')) {
+                document.getElementById('fontSize').value = params.get('fontSize');
+                updateFontSize(params.get('fontSize'));
+            }
+            
+            if (params.get('lineSpacing')) {
+                document.getElementById('lineSpacing').value = params.get('lineSpacing');
+                updateLineSpacing(params.get('lineSpacing'));
+            }
+            
+            if (params.get('imageSize')) {
+                document.getElementById('imageSize').value = params.get('imageSize');
+                updateImageSize(params.get('imageSize'));
+            }
+        });
+    </script>
+</body>
+</html>

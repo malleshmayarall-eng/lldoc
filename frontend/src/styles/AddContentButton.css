@@ -1,0 +1,296 @@
+/* Add Content Button - Modern Floating UI */
+
+.add-content-button-wrapper {
+  position: relative;
+  display: flex;
+  align-items: center;
+  margin: 2px 0;
+  opacity: 0;
+  transition: opacity 0.2s;
+}
+
+.add-content-button-wrapper:hover {
+  opacity: 1;
+}
+
+.add-content-line {
+  flex: 1;
+  height: 1px;
+  background: linear-gradient(
+    to right,
+    transparent,
+    #e5e7eb 20%,
+    #e5e7eb 80%,
+    transparent
+  );
+}
+
+.add-content-button-container {
+  position: relative;
+  padding: 0 8px;
+}
+
+.add-content-button {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  background: white;
+  border: 1.5px solid #e5e7eb;
+  border-radius: 50%;
+  color: #9ca3af;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.06);
+}
+
+.add-content-button:hover {
+  background: #3b82f6;
+  border-color: #3b82f6;
+  color: white;
+  transform: scale(1.1);
+  box-shadow: 0 4px 12px rgba(59, 130, 246, 0.3);
+}
+
+.add-content-button.active {
+  background: #3b82f6;
+  border-color: #3b82f6;
+  color: white;
+  transform: rotate(45deg) scale(1.1);
+}
+
+.add-content-button svg.rotate {
+  transition: transform 0.2s;
+}
+
+/* Backdrop */
+.add-content-backdrop {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 998;
+}
+
+/* Menu */
+.add-content-menu {
+  position: absolute;
+  top: calc(100% + 8px);
+  left: 50%;
+  transform: translateX(-50%);
+  min-width: 260px;
+  background: white;
+  border-radius: 12px;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.15);
+  padding: 8px;
+  z-index: 999;
+  animation: menuSlideIn 0.2s ease-out;
+}
+
+@keyframes menuSlideIn {
+  from {
+    opacity: 0;
+    transform: translateX(-50%) translateY(-10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(-50%) translateY(0);
+  }
+}
+
+.add-content-menu-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  padding: 12px;
+  background: transparent;
+  border: none;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: all 0.2s;
+  text-align: left;
+}
+
+.add-content-menu-item:hover {
+  background: #f9fafb;
+  transform: translateX(4px);
+}
+
+.add-content-menu-item.disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+  pointer-events: none;
+}
+
+/* Menu Item Colors */
+.add-content-menu-item.blue:hover .menu-item-icon {
+  background: #dbeafe;
+  color: #2563eb;
+}
+
+.add-content-menu-item.purple:hover .menu-item-icon {
+  background: #f3e8ff;
+  color: #7c3aed;
+}
+
+.add-content-menu-item.green:hover .menu-item-icon {
+  background: #d1fae5;
+  color: #059669;
+}
+
+.add-content-menu-item.indigo:hover .menu-item-icon {
+  background: #e0e7ff;
+  color: #4f46e5;
+}
+
+.add-content-menu-item.violet:hover .menu-item-icon {
+  background: #ede9fe;
+  color: #8b5cf6;
+}
+
+.add-content-menu-item.orange:hover .menu-item-icon {
+  background: #fed7aa;
+  color: #ea580c;
+}
+
+.menu-item-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 40px;
+  height: 40px;
+  background: #f3f4f6;
+  border-radius: 8px;
+  color: #6b7280;
+  transition: all 0.2s;
+  flex-shrink: 0;
+}
+
+.menu-item-content {
+  flex: 1;
+}
+
+.menu-item-label {
+  font-size: 14px;
+  font-weight: 600;
+  color: #111827;
+  margin-bottom: 2px;
+}
+
+.menu-item-description {
+  font-size: 12px;
+  color: #6b7280;
+}
+
+/* Alternative: Positioned at end of section */
+.add-content-button-wrapper.at-end {
+  justify-content: center;
+  opacity: 0.5;
+  margin: 24px 0;
+}
+
+.add-content-button-wrapper.at-end:hover {
+  opacity: 1;
+}
+
+.add-content-button-wrapper.at-end .add-content-line {
+  display: none;
+}
+
+/* Responsive */
+@media (max-width: 640px) {
+  .add-content-menu {
+    min-width: 240px;
+    left: auto;
+    right: 0;
+    transform: none;
+  }
+
+  @keyframes menuSlideIn {
+    from {
+      opacity: 0;
+      transform: translateY(-10px);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0);
+    }
+  }
+
+  .menu-item-icon {
+    width: 36px;
+    height: 36px;
+  }
+
+  .menu-item-label {
+    font-size: 13px;
+  }
+
+  .menu-item-description {
+    font-size: 11px;
+  }
+}
+
+/* Drag & Drop States */
+.add-content-button-wrapper.drag-over {
+  opacity: 1;
+}
+
+.add-content-button-container.drag-over {
+  transform: scale(1.15);
+}
+
+.add-content-button.drag-over {
+  background: #10b981;
+  border-color: #10b981;
+  color: white;
+  animation: pulse 0.8s ease-in-out infinite;
+  box-shadow: 0 4px 20px rgba(16, 185, 129, 0.4);
+}
+
+@keyframes pulse {
+  0%, 100% {
+    transform: scale(1);
+  }
+  50% {
+    transform: scale(1.1);
+  }
+}
+
+.drop-hint {
+  position: absolute;
+  top: calc(100% + 8px);
+  left: 50%;
+  transform: translateX(-50%);
+  background: #10b981;
+  color: white;
+  padding: 6px 12px;
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+  box-shadow: 0 4px 12px rgba(16, 185, 129, 0.3);
+  pointer-events: none;
+  z-index: 1000;
+  animation: dropHintBounce 0.6s ease-in-out infinite;
+}
+
+@keyframes dropHintBounce {
+  0%, 100% {
+    transform: translateX(-50%) translateY(0);
+  }
+  50% {
+    transform: translateX(-50%) translateY(-4px);
+  }
+}
+
+/* Print */
+@media print {
+  .add-content-button-wrapper {
+    display: none;
+  }
+}
+

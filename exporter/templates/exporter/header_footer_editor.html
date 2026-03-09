@@ -1,0 +1,387 @@
+{% load static %}
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Header & Footer Editor – {{ document_id }}</title>
+    <style>
+        :root {
+            --bg: #0b1120;
+            --panel: #0f172a;
+            --panel-2: #111827;
+            --accent: #38bdf8;
+            --accent-2: #6366f1;
+            --text: #f8fafc;
+            --muted: #94a3b8;
+            --border: #1f2937;
+            --success: #34d399;
+            --danger: #f87171;
+        }
+        * { box-sizing: border-box; }
+        body {
+            margin: 0;
+            font-family: "Inter", system-ui, -apple-system, sans-serif;
+            background: var(--bg);
+            color: var(--text);
+        }
+        header {
+            position: sticky;
+            top: 0;
+            z-index: 20;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 18px 28px;
+            border-bottom: 1px solid var(--border);
+            background: linear-gradient(135deg, #0f172a 0%, #0b1120 100%);
+        }
+        header h1 {
+            margin: 0;
+            font-size: 20px;
+            font-weight: 600;
+        }
+        header .user {
+            font-size: 13px;
+            color: var(--muted);
+        }
+        .layout {
+            display: grid;
+            grid-template-columns: minmax(0, 1fr) 360px;
+            min-height: calc(100vh - 72px);
+        }
+        .content {
+            padding: 24px;
+        }
+        .settings {
+            background: var(--panel-2);
+            padding: 22px;
+            border-left: 1px solid var(--border);
+        }
+        .panel-card {
+            background: #0b1220;
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            padding: 16px;
+            margin-bottom: 16px;
+        }
+        .panel-card h3 {
+            margin: 0 0 8px;
+            font-size: 14px;
+        }
+        label {
+            display: block;
+            margin-top: 12px;
+            font-size: 13px;
+            color: var(--muted);
+        }
+        input, textarea {
+            width: 100%;
+            padding: 10px 12px;
+            margin-top: 6px;
+            background: #0b1220;
+            color: var(--text);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            font-size: 13px;
+        }
+        textarea {
+            min-height: 180px;
+            resize: vertical;
+            font-family: "SFMono-Regular", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+        }
+        .btn {
+            padding: 10px 14px;
+            border-radius: 8px;
+            border: 1px solid transparent;
+            font-size: 13px;
+            font-weight: 600;
+            cursor: pointer;
+        }
+        .btn-primary {
+            background: var(--accent);
+            color: #0f172a;
+        }
+        .btn-secondary {
+            background: rgba(99, 102, 241, 0.15);
+            color: #c7d2fe;
+            border-color: rgba(99, 102, 241, 0.4);
+        }
+        .btn-ghost {
+            background: transparent;
+            color: var(--muted);
+            border-color: var(--border);
+        }
+        .row {
+            display: flex;
+            gap: 12px;
+            flex-wrap: wrap;
+        }
+        .row .btn {
+            flex: 1 1 auto;
+        }
+        .status {
+            margin-top: 12px;
+            font-size: 12px;
+            color: var(--muted);
+        }
+        .status.ok { color: var(--success); }
+        .status.error { color: var(--danger); }
+        .hint {
+            font-size: 12px;
+            color: var(--muted);
+            margin-top: 6px;
+        }
+        .chip {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            padding: 6px 10px;
+            border-radius: 999px;
+            font-size: 12px;
+            background: rgba(56, 189, 248, 0.15);
+            color: var(--accent);
+            border: 1px solid rgba(56, 189, 248, 0.35);
+        }
+    </style>
+</head>
+<body>
+<header>
+    <div>
+        <h1>Header & Footer Editor</h1>
+        <div class="user">Document {{ document_id }}</div>
+    </div>
+    <div class="row">
+        <button class="btn btn-ghost" id="backToProcessing">Back to Processing</button>
+    </div>
+</header>
+
+<div class="layout">
+    <main class="content">
+        <div class="panel-card">
+            <h3>Header Config</h3>
+            <label for="headerTemplate">Header Template ID</label>
+            <input id="headerTemplate" placeholder="Paste header template UUID (optional)" />
+
+            <label>Header Text</label>
+            <input id="headerTextLeft" placeholder="Left text (e.g. {company_name})" />
+            <input id="headerTextCenter" placeholder="Center text (e.g. {document_title})" />
+            <input id="headerTextRight" placeholder="Right text (e.g. Page {page} of {total})" />
+
+            <label for="headerConfig">Header Config JSON</label>
+            <textarea id="headerConfig" placeholder='{"text": {"left": "..."}, "style": {"height": "60px"}}'></textarea>
+
+            <div class="row">
+                <button class="btn btn-primary" id="saveHeader">Save Header</button>
+                <button class="btn btn-secondary" id="resetHeader">Reset Header Override</button>
+            </div>
+            <div class="status" id="headerStatus"></div>
+        </div>
+
+        <div class="panel-card">
+            <h3>Footer Config</h3>
+            <label for="footerTemplate">Footer Template ID</label>
+            <input id="footerTemplate" placeholder="Paste footer template UUID (optional)" />
+
+            <label>Footer Text</label>
+            <input id="footerTextLeft" placeholder="Left text (e.g. {company_name})" />
+            <input id="footerTextCenter" placeholder="Center text (e.g. Page {page} of {total})" />
+            <input id="footerTextRight" placeholder="Right text (e.g. {date})" />
+
+            <label for="footerConfig">Footer Config JSON</label>
+            <textarea id="footerConfig" placeholder='{"text": {"center": "Page {page} of {total}"}}'></textarea>
+
+            <div class="row">
+                <button class="btn btn-primary" id="saveFooter">Save Footer</button>
+                <button class="btn btn-secondary" id="resetFooter">Reset Footer Override</button>
+            </div>
+            <div class="status" id="footerStatus"></div>
+        </div>
+    </main>
+
+    <aside class="settings">
+        <div class="panel-card">
+            <h3>Placeholders</h3>
+            <div class="hint">Use placeholders like:</div>
+            <div class="hint">{document_title}, {company_name}, {date}, {year}, {page}, {total}</div>
+            <div class="hint">Header/Footer config uses the same JSON schema as header templates.</div>
+        </div>
+        <div class="panel-card">
+            <h3>Tips</h3>
+            <div class="hint">Save header/footer configs to apply immediately in PDF export.</div>
+            <div class="hint">If you set a template ID, leave the config empty to use the template as-is.</div>
+        </div>
+    </aside>
+</div>
+
+<script>
+    const documentId = "{{ document_id }}";
+    const apiUrl = `/api/documents/${documentId}/header-footer/`;
+
+    const headerConfigInput = document.getElementById("headerConfig");
+    const footerConfigInput = document.getElementById("footerConfig");
+    const headerTemplateInput = document.getElementById("headerTemplate");
+    const footerTemplateInput = document.getElementById("footerTemplate");
+
+    const headerTextLeft = document.getElementById("headerTextLeft");
+    const headerTextCenter = document.getElementById("headerTextCenter");
+    const headerTextRight = document.getElementById("headerTextRight");
+    const footerTextLeft = document.getElementById("footerTextLeft");
+    const footerTextCenter = document.getElementById("footerTextCenter");
+    const footerTextRight = document.getElementById("footerTextRight");
+
+    const headerStatus = document.getElementById("headerStatus");
+    const footerStatus = document.getElementById("footerStatus");
+
+    function getCookie(name) {
+        const value = `; ${document.cookie}`;
+        const parts = value.split(`; ${name}=`);
+        if (parts.length === 2) return parts.pop().split(';').shift();
+        return null;
+    }
+
+    function setStatus(element, message, ok = true) {
+        element.textContent = message;
+        element.classList.toggle("ok", ok);
+        element.classList.toggle("error", !ok);
+    }
+
+    function parseConfig(input) {
+        const raw = input.value.trim();
+        if (!raw) {
+            return {};
+        }
+        return JSON.parse(raw);
+    }
+
+    function mergeText(config, left, center, right) {
+        const updated = config || {};
+        if (!updated.text) {
+            updated.text = {};
+        }
+        if (left) updated.text.left = left;
+        if (center) updated.text.center = center;
+        if (right) updated.text.right = right;
+        return updated;
+    }
+
+    async function loadConfig() {
+        const response = await fetch(apiUrl, { credentials: "include" });
+        if (!response.ok) {
+            setStatus(headerStatus, "Failed to load header/footer config", false);
+            setStatus(footerStatus, "Failed to load header/footer config", false);
+            return;
+        }
+        const data = await response.json();
+        headerTemplateInput.value = data.header_template || "";
+        footerTemplateInput.value = data.footer_template || "";
+        headerConfigInput.value = JSON.stringify(data.header_config || {}, null, 2);
+        footerConfigInput.value = JSON.stringify(data.footer_config || {}, null, 2);
+    }
+
+    async function saveHeader() {
+        try {
+            const config = parseConfig(headerConfigInput);
+            const merged = mergeText(config, headerTextLeft.value, headerTextCenter.value, headerTextRight.value);
+            const payload = {
+                header_template: headerTemplateInput.value || null,
+                header_config: merged,
+            };
+            const response = await fetch(apiUrl, {
+                method: "PATCH",
+                headers: {
+                    "Content-Type": "application/json",
+                    "X-CSRFToken": getCookie("csrftoken") || "",
+                },
+                credentials: "include",
+                body: JSON.stringify(payload),
+            });
+            const data = await response.json();
+            if (!response.ok) {
+                throw new Error(data?.errors ? JSON.stringify(data.errors) : "Save failed");
+            }
+            headerConfigInput.value = JSON.stringify(data.header_config || {}, null, 2);
+            setStatus(headerStatus, "Header saved", true);
+        } catch (err) {
+            setStatus(headerStatus, `Header save failed: ${err.message}`, false);
+        }
+    }
+
+    async function saveFooter() {
+        try {
+            const config = parseConfig(footerConfigInput);
+            const merged = mergeText(config, footerTextLeft.value, footerTextCenter.value, footerTextRight.value);
+            const payload = {
+                footer_template: footerTemplateInput.value || null,
+                footer_config: merged,
+            };
+            const response = await fetch(apiUrl, {
+                method: "PATCH",
+                headers: {
+                    "Content-Type": "application/json",
+                    "X-CSRFToken": getCookie("csrftoken") || "",
+                },
+                credentials: "include",
+                body: JSON.stringify(payload),
+            });
+            const data = await response.json();
+            if (!response.ok) {
+                throw new Error(data?.errors ? JSON.stringify(data.errors) : "Save failed");
+            }
+            footerConfigInput.value = JSON.stringify(data.footer_config || {}, null, 2);
+            setStatus(footerStatus, "Footer saved", true);
+        } catch (err) {
+            setStatus(footerStatus, `Footer save failed: ${err.message}`, false);
+        }
+    }
+
+    async function resetHeader() {
+        const response = await fetch(apiUrl, {
+            method: "PATCH",
+            headers: {
+                "Content-Type": "application/json",
+                "X-CSRFToken": getCookie("csrftoken") || "",
+            },
+            credentials: "include",
+            body: JSON.stringify({ reset_header_to_template: true }),
+        });
+        if (response.ok) {
+            const data = await response.json();
+            headerConfigInput.value = JSON.stringify(data.header_config || {}, null, 2);
+            setStatus(headerStatus, "Header override reset", true);
+        } else {
+            setStatus(headerStatus, "Header reset failed", false);
+        }
+    }
+
+    async function resetFooter() {
+        const response = await fetch(apiUrl, {
+            method: "PATCH",
+            headers: {
+                "Content-Type": "application/json",
+                "X-CSRFToken": getCookie("csrftoken") || "",
+            },
+            credentials: "include",
+            body: JSON.stringify({ reset_footer_to_template: true }),
+        });
+        if (response.ok) {
+            const data = await response.json();
+            footerConfigInput.value = JSON.stringify(data.footer_config || {}, null, 2);
+            setStatus(footerStatus, "Footer override reset", true);
+        } else {
+            setStatus(footerStatus, "Footer reset failed", false);
+        }
+    }
+
+    document.getElementById("saveHeader").addEventListener("click", saveHeader);
+    document.getElementById("saveFooter").addEventListener("click", saveFooter);
+    document.getElementById("resetHeader").addEventListener("click", resetHeader);
+    document.getElementById("resetFooter").addEventListener("click", resetFooter);
+    document.getElementById("backToProcessing").addEventListener("click", () => {
+        window.location.href = `/documents/${documentId}/process/`;
+    });
+
+    loadConfig();
+</script>
+</body>
+</html>

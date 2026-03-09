@@ -1,0 +1,33 @@
+Integrate your app to create the best app experience
+
+Email not displaying correctly? View it ( https://cdn.mc-weblink.sg-mktg.com/weblink/MTYyNzc0NDk2NHxUeXhIVHdUQzlIM2pSUUNCSW5WeWxCQ2hYano4dUp5Q0tpTGhtME81NXE5OXpIOHVQaDZWV3ZQWnpfbm9FaWhwMjU1OVpFT3EtY2d3bU9paUQ5VUkwN205X2lad1lSWkZ3ZVI1MFZ2M0ZWanIzOTY1UHpVeEtWV3E1SHY4ZmdKbzJZU0RTNF9pY19jaEJNcWRBSzZZb2JqVG5CQ1dhTzlnN1Ffc2NzOVFXc2pKTUg5VU1aQTlrR1lRNEVtY3c3Tnc4ZDlRQkZmTzNsb1hfeGJMVjZ2UTlyWFp6Y3d0S0RwZkxJRHFPTkV0Z2NHUDNmb1ZCWnhDeTd3N3ZZRFZxR0dUNnBrMmpLVVdqYlpNUG9TZ1hSUGV6a3hXYkNWYjc1aVVHM0tmU3JVLTFqRjkxY0ZHaWZ4OFI5X21PRWhtRDNZV0VKY3pZSVJiX1Y4PXwxJqpxBqZHOYqs4NUerYB8jhePje0exVvnJ98VKTQgGQ== ) in your browser.
+
+*Add 3rd Party Power*
+*To Make Your App Awesome*
+
+An integrated app unlocks the power for your users to get the most from your app's experience. Easily integrate with backend systems to allow users to create personalized accounts, store users' variable data, pull in real-time external information, and more. Check out these tips & tricks to learn how you can integrate your app into 3rd party systems.
+
+*Tips & Tricks*
+
+*Read: Data Sources Docs*
+Data Source blocks allow you to perform a variety of CRUD (Create, Read, Update, Delete) operations. These simple operations unlock a vast amount of customization for your users by allowing personal sign-ins, data sharing, and more.
+
+Learn More ( https://docs.thunkable.com/data-sources/?utm_source=email&utm_medium=drip_email&utm_campaign=Ind_drip_third_datasources_doc )
+
+*Watch: Integrate Web APIs*
+Great data is an essential part of many apps. The Web API component allows your app to retrieve data from any public or private API service on the web. Check out this video to learn more about pulling in 3rd party data via APIs.
+
+Watch Now ( https://youtu.be/FxrXdZPRTLw )
+
+*Check Out: 4 Tips To Speed Up Your App Development*
+Building an app can be a complex process but thanks to Thunkable, complexity doesn't mean it has to take a long time. If you feel like your app build is taking too long, check out this blog to the 4 keys to speeding up your process.
+
+Read More ( https://blog.thunkable.com/4-tips-to-speed-up-building-your-app-b7d83de28c8a/?utm_source=email&utm_medium=drip_email&utm_campaign=Ind_drip_third_speedup_blog )
+
+( https://www.facebook.com/thunkable ) ( https://twitter.com/thunkable ) ( https://www.instagram.com/thunkable ) ( https://www.linkedin.com/company/thunkable )
+
+Billy Beaver
+
+PO Box 22162 , San Francisco , CA 94122
+
+Unsubscribe ( https://u6512343.ct.sendgrid.net/asm/unsubscribe/?user_id=6512343&data=rjtsbVy6OL3T3ww4Wy0SETe3UJ4e0PLlCLJdA1LTrriqMSyrwY3e5W2fSR-FitNv9EC7WXnGuxKUN8Ei7nbb03m9XtlKKnPWAhgQX_mEL1J0NowhAdgT8-vlatyNhdAG4C2xpCwAtnKxjX-eCoC7ha8XOIO1X2YZ_jRKvzLtUBir8OE-B69V6zdfSIiIJGeblhw9kEGm0LSVR1PkzCnXeMpBDNpUZgIifhY79dbJ6nsJi_v7JClbqfuNbN_yuY2kxTiQwQBHciyFCamBiEg3W8GgPykFSVElkmeR9Aw3bcFvo_LJh4QhFgMgRWCwxnJ75ghV2VBedgHGCBziDmbdDM86YAc5A1muha_wUgiFGcCb8Y4dWlO4s4MoET6BevPurylxjARIsRnh60etzLaLwKpGFDZOqM1Ex3xiM1KwCbdetfg-zmG5dmr75TkYmC0qIKcZFoYSugOLyZ2DIHOzJSOSGz_v4olPMy7oxyPV6fkFFcgcmk4bZxR1b_OC8BRkh2s1DTYPzYD2BmhVco7_1UXuneNKe8XjgqW1gQuwhZGSZljcr2jqZ4EIGfmeJOOCdPlP85vX1xiYobCAtEZHqdcMhGeVF_2q8RbWu_RbPG6IH4doSudekn4f6t1r38rWjh4M_Bt0LNO1U_aTKWUM4MlusGpg6F2abBRtkc8vYYT5wLHmXmcWbRYwZRPWshBVf4dOPdZastkO_yMnpCcpfqzh24s0C05CwaqdgzCgabxHxtl1K1xVoOro3WM2LyNxwg5AUV_V2b2IuuN99A3NMiyMEJfJL4QUCmRAzdtb7tyeXiRO1d47ha6ysFv2Yfj39bY4IUXdIh4q_2yymTcZYKi4-P7fjO9qs8h-eGFosk1jOSJ6wiuunK6Hq1JKsCw-ysk09gy6xmUyXshzQ-SnqQa6KMNqDC8TbmG4HDCqqdBA3HDWGlRwAFtvUIogGhllXJyUzDS5kKGM1UFqM-jc62-setROHK1oYGZk2ZpleVQ0Ohq_Pued0AhY-Qiz5DAfFXj2S2OmyACV0p_VEgORQbuB9WMZMT7YfMqpWJ2cPKnAkO_Kg2F9jmip-Z4zLI7qeYMEYu8Pmj28HVTPrVgASYLi-iBt6anjVwDTMniXGjTFZpx3rHO8q7UI2i-GUXjmGSxNnT_hXkmn1Bd4-Fmuq11URtJdFqjMqRCAqwkfFDfca3PrpC7VZ2MsUdRLyOsc0d2q4Zokge-NuUxhuycs-FGpAMfv37igoj550CLtcpqusn42QnvlyZxVZIUHNMA6 ) - Unsubscribe Preferences ( https://u6512343.ct.sendgrid.net/asm/?user_id=6512343&data=_h3E-Xz2S9ODaIp8ZAn9cdxsiqlxJdV_tAwHCQtdiB2lDpueqeDsAXb6N6ZDxNGYlmJ1tzYAHyB0_OMxS_gRSTc4SEBwChAE3n6FgctNKn0uNGuPTZfdZZrH5uw0xHcWFI4rp5-af6wtcepA9QBBEcK5j7n55b1LS1R71I2oLA00ZoUxrcJng0RVUtyRyIDb1VwbmtwdZSLAY6opCPgPyZNgSuuixq-vNGvagnkP4n0UtkIcVfhES3apfMhgOPzm6Nm6uCrqeUI2wMUp3gM0liMq9bPv1A33GNh-jPOU_3XlNzEmd-G5EVchftvyV4EW72XeEbd-ZvaoWjJefKCtEujk3dcKYSWdRfHy5B9YtznF_nYnSOFhRa5L8zHmIMEyWOBhDqZxcyXUe0M5ZM69dVzo_CwD8aAYm34Z57Q68oGFcyrZQwyCtXuW7IFhue-Dxg-fAXl33F-LJSewrQ_94P7Z3CmSITpJ0H9C_3Yk0U0TyeVqPSa6812nt4V3RpjcQuq7edI-v1iZ15Mtsj6_w12_IrtjbOnoeuuki3lOL_HMbW3xKujhBc9VEMRsJ7qbPyUIIYT-bH3R6muYH84uWw62IXfOp7nWnjoK7rk3FVC9x-PqRbdLGo13_rq-2rc_hhIhuBl5n3zMqpwSKI-a13xGbU-zHHGfiNoyzXqe7b12hnAzQmP64h-ye4Jdt6SQjBJ8RjbnsbI40cxEounTgacxc6XgifxBysuCHOphr3vHxAlwcOMlTcealm8f15qF43lrPkUa7egxm7cHofj56pRyY6w09usolYoCwQ1tbX4tVqXzC-3LWSeklniWHiEg3L2nPkTHrZr-c-HLgbI5nbjcX578ijsdUCZgJOUEZw6PGjOL5ON_aqom3Ps3mxRaYg5ji9K-49WFDfnvUtjKRKA6tq19SVWQb-dcmYPpvWsmvwj48Ng8pXr8CF33ipQu4aVUFPeZN3dHbrX8z6nWtX0F5eELoPzOObOPJefOtMWWWeTL12jA7X3KYygtQsBXCQ7zlMESEeSk9VicWWqNHT4jqBDXk98Px6i67t4nMPfbAdod2dWPtU7cczAhkGMy7QJr1dNnW6q_fSMNhCV28YKWbNs5_xEJ_lRZs2Ud2SNrm8WwmrBAiqt7n_SUz17mBHtkc88BRTddHamH7J8z8SPKQm637x2KjaBuRpd8eQN-jI5WFa8mjJchPTJZIGH6PWVvrOGTvcgGmlMXxgnN65J9hx9hKZbOPJp7Z_khyAofDR0mWbEgPCygBie1bbXc )

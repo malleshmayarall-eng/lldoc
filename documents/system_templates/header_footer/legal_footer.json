@@ -1,0 +1,26 @@
+{
+  "name": "Legal/Technical - Footer",
+  "description": "Footer for legal documents with revision tracking and page numbers.",
+  "template_type": "footer",
+  "category": "Legal",
+  "tags": ["legal", "contract", "nda", "technical", "confidential"],
+  "config": {
+    "icons": [],
+    "text": {
+      "left": "{company_name}",
+      "center": "Page {page} of {total}",
+      "right": "Rev {version}"
+    },
+    "style": {
+      "height": "44px",
+      "background_color": "#f0f0f0",
+      "border_top": "2px solid #000000",
+      "font_family": "Arial, sans-serif",
+      "font_size": "7pt",
+      "padding": "10px 20px",
+      "color": "#333333"
+    },
+    "show_on_first_page": true,
+    "show_on_all_pages": true
+  }
+}

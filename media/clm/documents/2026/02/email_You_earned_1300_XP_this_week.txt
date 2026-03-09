@@ -1,0 +1,151 @@
+Learn about data science and how you can use it to strengthen your organization. Plus, learn 25 interesting facts about data science in our latest blog post. ‌ ‌ ‌ ‌ ‌ ‌ ‌ ‌ ‌ ‌ ‌ ‌ ‌  ‌ ‌ ‌ ‌ ‌ ‌ ‌ ‌ ‌ ‌ ‌ ‌ ‌  ‌ ‌ ‌ ‌ ‌ ‌ ‌ ‌ ‌ ‌ ‌ ‌ ‌ ‌ ‌ ‌ ‌ ‌ ‌ ‌ ‌  ‌ ‌ ‌ ‌ ‌ ‌ ‌ ‌ ‌ ‌ ‌ ‌ ‌  ‌ ‌ ‌ ‌ ‌ ‌ ‌ ‌ ‌ ‌ ‌ ‌ ‌
+ ‌ ‌ ‌ ‌ ‌ ‌ ‌ ‌  ‌ ‌ ‌ ‌ ‌ ‌ ‌ ‌ ‌ ‌ ‌ ‌ ‌  ‌ ‌ ‌ ‌ ‌ ‌ ‌ ‌ ‌ ‌ ‌ ‌ ‌ ‌ ‌ ‌ ‌ ‌ ‌ ‌ ‌  ‌ ‌ ‌ ‌ ‌ ‌ ‌ ‌ ‌ ‌ ‌ ‌ ‌  ‌ ‌ ‌ ‌ ‌ ‌ ‌ ‌ ‌ ‌ ‌ ‌ ‌ ‌ ‌ ‌ ‌ ‌ ‌ ‌ ‌  ‌ ‌ ‌ ‌
+ ‌ ‌ ‌ ‌ ‌ ‌ ‌ ‌ ‌ ‌ ‌ ‌ ‌  ‌ ‌ ‌ ‌ ‌ ‌ ‌ ‌ ‌ ‌ ‌ ‌ ‌  ‌ ‌ ‌ ‌ ‌ ‌ ‌ ‌ ‌ ‌ ‌ ‌ ‌ ‌ ‌ ‌ ‌ ‌ ‌ ‌ ‌  ‌ ‌ ‌ ‌
+
+DataCamp ( https://learn.datacamp.com?utm_medium=email&utm_source=customerio&utm_id=10007927&utm_campaign=dc_insights&utm_term=logo )
+
+***************
+Weekly Progress
+***************
+
+NOV 29 - DEC 05
+
+Great progress last week, don't give up!
+
+------------
+Productivity
+------------
+
+You earned more XP than 58% of learners!
+
+XP earned
+
+1300 XP
+
+Weekly learning streak
+
+2 weeks
+
+-------
+Mastery
+-------
+
+Correct submissions
+
+13
+
+Learn Now
+( https://www.datacamp.com/courses/58/continue?utm_medium=email&utm_source=customerio&utm_id=10007927&utm_campaign=dc_insights&utm_term=startnow )
+
+Schedule Time to Learn
+( https://calendly.com/data-camp/datacamp-learning-session?name=Mallesh&email=mayaramallesh12@gmail.com )
+
+----------------
+Course Spotlight
+----------------
+
+-------------------------
+Data Science for Business
+-------------------------
+
+( https://www.datacamp.com/courses/data-science-for-business?utm_medium=email&utm_source=customerio&utm_id=10007927&utm_campaign=dc_insights&utm_term=spotlight )
+courses
+
+Learn about data science and how can you use it to strengthen your organization. ( https://www.datacamp.com/courses/data-science-for-business?utm_medium=email&utm_source=customerio&utm_id=10007927&utm_campaign=dc_insights&utm_term=spotlight )
+
+Learn More →
+( https://www.datacamp.com/courses/data-science-for-business?utm_medium=email&utm_source=customerio&utm_id=10007927&utm_campaign=dc_insights&utm_term=spotlight )
+
+-------------
+Certification
+-------------
+
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+Learn How To Get Certified in Data Science ( https://www.datacamp.com/community/blog/how-can-i-get-certified?utm_medium=email&utm_source=customerio&utm_id=10007927&utm_campaign=dc_insights&utm_term=certification )
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+> ( https://www.datacamp.com/community/blog/how-can-i-get-certified?utm_medium=email&utm_source=customerio&utm_id=10007927&utm_campaign=dc_insights&utm_term=certification )
+
+Data science certifications come in various forms, which range in time, content, and cost. To learn which one is best for you, read our latest blog post.
+
+( https://www.datacamp.com/community/blog/how-can-i-get-certified?utm_medium=email&utm_source=customerio&utm_id=10007927&utm_campaign=dc_insights&utm_term=certification )
+
+------------
+Competitions
+------------
+
+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+Looking for Ways To Apply Your Knowledge? ( https://app.datacamp.com/learn/competitions/bitcoin-stock-portfolio?utm_medium=email&utm_source=customerio&utm_id=10007927&utm_campaign=dc_insights&utm_term=competitions )
+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+> ( https://app.datacamp.com/learn/competitions/bitcoin-stock-portfolio?utm_medium=email&utm_source=customerio&utm_id=10007927&utm_campaign=dc_insights&utm_term=competitions )
+
+Practice analyzing real-world datasets and creating data visualizations to tell the story in our latest data science competition.
+
+( https://app.datacamp.com/learn/competitions/bitcoin-stock-portfolio?utm_medium=email&utm_source=customerio&utm_id=10007927&utm_campaign=dc_insights&utm_term=competitions )
+
+---------
+Workspace
+---------
+
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+Start Building a Data
+Science Portfolio ( https://app.datacamp.com/workspace/dashboard?utm_medium=email&utm_source=customerio&utm_id=10007927&utm_campaign=dc_insights&utm_term=workspace )
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+> ( https://app.datacamp.com/workspace/dashboard?utm_medium=email&utm_source=customerio&utm_id=10007927&utm_campaign=dc_insights&utm_term=workspace )
+
+With Workspace, you can get hands-on coding experience and gain job-ready data skills—without ever leaving your browser.
+
+( https://app.datacamp.com/workspace/dashboard?utm_medium=email&utm_source=customerio&utm_id=10007927&utm_campaign=dc_insights&utm_term=workspace )
+
+--------
+Webinars
+--------
+
+-------------------------------------------------------------------------------------------------------------------------------------
+Measuring the ROI of Data Literacy Programs ( https://www.datacamp.com/webinars/roi-data-literacy-programs?source=newsletterb2c1207 )
+-------------------------------------------------------------------------------------------------------------------------------------
+
+> ( https://www.datacamp.com/webinars/roi-data-literacy-programs?source=newsletterb2c1207 )
+
+-------------------
+Top Community Posts
+-------------------
+
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+25 Interesting Facts About Data Science ( https://www.datacamp.com/community/blog/interesting-facts-about-data-science?utm_medium=email&utm_source=customerio&utm_id=10007927&utm_campaign=dc_insights&utm_term=blog )
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+> ( https://www.datacamp.com/community/blog/interesting-facts-about-data-science?utm_medium=email&utm_source=customerio&utm_id=10007927&utm_campaign=dc_insights&utm_term=blog )
+
+Did you know there are three times as many data scientist job posts on LinkedIn as there are data scientists in the world? Read this and other interesting data science facts here!
+
+( https://www.datacamp.com/community/blog/interesting-facts-about-data-science?utm_medium=email&utm_source=customerio&utm_id=10007927&utm_campaign=dc_insights&utm_term=blog )
+
+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+5 Obstacles Standing in the Way of AI Adoption in Financial Services ( https://www.datacamp.com/community/blog/5-obstacles-standing-in-the-way-of-ai-adoption-in-financial-services?utm_medium=email&utm_source=customerio&utm_id=10007927&utm_campaign=dc_insights&utm_term=blog )
+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+> ( https://www.datacamp.com/community/blog/5-obstacles-standing-in-the-way-of-ai-adoption-in-financial-services?utm_medium=email&utm_source=customerio&utm_id=10007927&utm_campaign=dc_insights&utm_term=blog )
+
+Learn how to accelerate the development of trusted AI within the industry and beyond.
+
+( https://www.datacamp.com/community/blog/5-obstacles-standing-in-the-way-of-ai-adoption-in-financial-services?utm_medium=email&utm_source=customerio&utm_id=10007927&utm_campaign=dc_insights&utm_term=blog )
+
+claer as data ( https://learn.datacamp.com/?utm_medium=email&utm_source=customerio&utm_id=10007927&utm_campaign=dc_insights&utm_term=logo )
+
+We're Hiring! ( https://www.datacamp.com/jobs )
+
+DataCamp, Inc. | 350 5th Ave. | Suite 7720 | New York, NY 10118
+
+Facebook ( https://www.facebook.com/datacampinc/ )
+Twitter ( https://twitter.com/datacamp )
+LinkedIn ( https://www.linkedin.com/company/datacampinc/ )
+Youtube ( https://www.youtube.com/channel/UC79Gv3mYp6zKiSwYemEik9A )
+Instagram ( https://www.instagram.com/datacamp/?hl=en )
+
+Apple Store ( https://apps.apple.com/us/app/datacamp-learn-data-science/id1263413087 )
+Google Play ( https://play.google.com/store/apps/details?id=com.datacamp&hl=en_CA )
+
+Unsubscribe ( https://www.datacamp.com/mail_preferences/bb890f91-f494-45ed-bbee-e8a240a7607b )     Privacy Policy ( https://www.datacamp.com/privacy-policy/ )

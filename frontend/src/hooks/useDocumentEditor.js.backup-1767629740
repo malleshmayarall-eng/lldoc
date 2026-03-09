@@ -1,0 +1,804 @@
+import { useCallback, useEffect, useState } from 'react';
+import documentService from '../services/documentService';
+import sectionService from '../services/sectionService';
+import paragraphService from '../services/paragraphService';
+import inlineImageService from '../services/inlineImageService';
+import imageService from '../services/imageService';
+
+/**
+ * useDocumentEditor
+ * Encapsulates document load/save, section/paragraph CRUD, autosave, and inline image handlers.
+ * Keeps UI concerns outside so the editor page stays lean.
+ */
+export function useDocumentEditor(documentId) {
+  const [completeDocument, setCompleteDocument] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState(null);
+  const [hasChanges, setHasChanges] = useState(false);
+  const [lastSavedAt, setLastSavedAt] = useState(null);
+  const [lastSaveStatus, setLastSaveStatus] = useState('idle'); // idle | saving | ok | error
+  const [lastSaveError, setLastSaveError] = useState(null);
+
+  // ---------------------------
+  // Load full document
+  // ---------------------------
+  // Helper to build hierarchical tree from flat section list
+  const buildSectionTree = (sections) => {
+    if (!sections || sections.length === 0) return [];
+    
+    // Create a map for quick lookup
+    const sectionMap = new Map();
+    sections.forEach(section => {
+      sectionMap.set(section.id, { ...section, children: [] });
+    });
+    
+    // Build tree by linking children to parents
+    const rootSections = [];
+    sectionMap.forEach(section => {
+      const parentId = section.parent || section.parent_id;
+      if (parentId && sectionMap.has(parentId)) {
+        // This is a child section
+        const parent = sectionMap.get(parentId);
+        parent.children.push(section);
+      } else {
+        // This is a root section
+        rootSections.push(section);
+      }
+    });
+    
+    // Sort children by order
+    const sortChildren = (section) => {
+      if (section.children && section.children.length > 0) {
+        section.children.sort((a, b) => (a.order || 0) - (b.order || 0));
+        section.children.forEach(sortChildren);
+      }
+    };
+    
+    rootSections.forEach(sortChildren);
+    rootSections.sort((a, b) => (a.order || 0) - (b.order || 0));
+    
+    return rootSections;
+  };
+
+  const loadCompleteDocument = useCallback(async () => {
+    // Skip load when creating a new document (no server ID yet)
+    if (!documentId || documentId === 'new') return;
+    setLoading(true);
+    setError(null);
+    try {
+      const response = await documentService.getCompleteDocument(documentId);
+      
+      // Build hierarchical tree if backend returns flat list
+      if (response.sections && Array.isArray(response.sections)) {
+        response.sections = buildSectionTree(response.sections);
+      }
+      
+      setCompleteDocument(response);
+    } catch (err) {
+      setError(err.response?.data?.detail || 'Failed to load document');
+    } finally {
+      setLoading(false);
+    }
+  }, [documentId]);
+
+  useEffect(() => {
+    loadCompleteDocument();
+  }, [loadCompleteDocument]);
+
+  // ---------------------------
+  // Save (document-level only)
+  // ---------------------------
+  const saveDocument = useCallback(
+    async (isAuto = false) => {
+      console.log('📞 saveDocument called', { hasChanges, saving, hasDoc: !!completeDocument });
+      
+      if (!hasChanges || saving) return;
+      
+      if (!completeDocument) {
+        console.error('❌ Cannot save: no document loaded');
+        return;
+      }
+      
+      console.log('✅ Proceeding with save...');
+      setSaving(true);
+      setError(null);
+      setLastSaveStatus('saving');
+      setLastSaveError(null);
+      
+      try {
+        // 1. Save document metadata (title, etc.)
+        await documentService.updateDocument(documentId, {
+          title: completeDocument.title || 'Untitled Document',
+          change_summary: isAuto ? 'Auto-save' : 'Document saved from drafter',
+        });
+        
+        // 2. Save all sections (create or update)
+        const sections = completeDocument.sections || [];
+        console.log(`📦 Processing ${sections.length} sections...`);
+        
+        for (let idx = 0; idx < sections.length; idx++) {
+          const section = sections[idx];
+          const isTemporaryId = !uuidRegex.test(String(section.id));
+          
+          console.log(`📝 Section ${idx + 1}: "${section.title}" (ID: ${section.id}, temp: ${isTemporaryId})`);
+          
+          if (isTemporaryId) {
+            // Create new section
+            console.log(`  ➡️ Creating new section...`);
+            const created = await sectionService.createSection(documentId, {
+              title: section.title || '',
+              content: section.content || '',
+              order: section.order_index ?? idx,
+              depth_level: section.depth_level || 1,
+              parent_id: section.parent_id || null,
+            });
+            const newSectionId = created.section_id || created.id;
+            console.log(`  ✅ Section created with ID: ${newSectionId}`);
+            // Update local section with real ID
+            section.id = newSectionId;
+          } else {
+            // Update existing section
+            console.log(`📝 Updating section ${idx + 1}/${sections.length}:`, section.title);
+            await sectionService.updateSection(documentId, section.id, {
+              title: section.title || '',
+              content: section.content || '',
+              order: section.order_index ?? idx,
+              depth_level: section.depth_level || 1,
+            });
+          }
+          
+          // 3. Save all paragraphs in this section
+          const paragraphs = section.paragraphs || [];
+          for (let pIdx = 0; pIdx < paragraphs.length; pIdx++) {
+            const para = paragraphs[pIdx];
+            const isTemporaryParaId = !uuidRegex.test(String(para.id));
+            
+            if (isTemporaryParaId) {
+              // Create new paragraph
+              const paraContent = para.text || para.content || para.content_text || '';
+              console.log(`  📝 Creating paragraph ${pIdx + 1}/${paragraphs.length} in section "${section.title}"`, {
+                sectionId: section.id,
+                isRealSectionId: uuidRegex.test(String(section.id)),
+                paraText: paraContent.substring(0, 50),
+                paraLength: paraContent.length
+              });
+              
+              try {
+                const createdPara = await paragraphService.createParagraph(section.id, {
+                  content: paraContent,
+                  content_text: paraContent,
+                  paragraph_type: para.paragraph_type || 'standard',
+                  order: para.order_index ?? pIdx,
+                });
+                console.log(`  ✅ Paragraph created:`, createdPara);
+                // Update local paragraph with real ID
+                para.id = createdPara.id || createdPara.paragraph_id;
+              } catch (paraError) {
+                console.error(`  ❌ Failed to create paragraph:`, paraError.response?.data || paraError.message);
+                throw paraError;
+              }
+            } else {
+              // Update existing paragraph
+              console.log(`  📝 Updating paragraph ${pIdx + 1}/${paragraphs.length} in section "${section.title}"`);
+              try {
+                const updated = await paragraphService.updateParagraph(documentId, para.id, {
+                  content: para.text || para.content || para.content_text || '',
+                  content_text: para.text || para.content || para.content_text || '',
+                  order: para.order_index ?? pIdx,
+                });
+                console.log(`  ✅ Paragraph updated:`, updated);
+              } catch (paraError) {
+                console.error(`  ❌ Failed to update paragraph:`, paraError.response?.data || paraError.message);
+                throw paraError;
+              }
+            }
+          }
+        }
+        
+        // 4. Reload complete document to get fresh data with real UUIDs
+        console.log('🔄 Reloading document...');
+        await loadCompleteDocument();
+        
+        setHasChanges(false);
+        setLastSavedAt(new Date());
+        setLastSaveStatus('ok');
+        console.log('✅ Document saved successfully');
+      } catch (err) {
+        const message = err.response?.data?.detail || err.response?.data?.error || err.message || 'Failed to save document';
+        console.error('❌ Save failed:', message, err.response?.data);
+        setError(message);
+        setLastSaveError(message);
+        setLastSaveStatus('error');
+      } finally {
+        setSaving(false);
+      }
+    },
+    [hasChanges, saving, completeDocument, documentId, loadCompleteDocument]
+  );
+
+  // Autosave every minute
+  useEffect(() => {
+    const interval = setInterval(() => {
+      if (hasChanges && !saving) {
+        saveDocument(true);
+      }
+    }, 60_000);
+    return () => clearInterval(interval);
+  }, [hasChanges, saving, saveDocument]);
+
+  // ---------------------------
+  // Helpers
+  // ---------------------------
+  const findSectionById = useCallback((sections, sectionId) => {
+    for (const section of sections || []) {
+      if (section.id === sectionId) return section;
+      if (section.children?.length) {
+        const found = findSectionById(section.children, sectionId);
+        if (found) return found;
+      }
+    }
+    return null;
+  }, []);
+
+  const removeSectionFromTree = useCallback((sections, sectionId) => {
+    return (sections || [])
+      .filter(section => section.id !== sectionId)
+      .map(section => ({
+        ...section,
+        children: section.children ? removeSectionFromTree(section.children, sectionId) : []
+      }));
+  }, []);
+
+  const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+  const findParagraphInSections = useCallback((sections, paragraphId) => {
+    for (const section of sections || []) {
+      for (const para of section.paragraphs || []) {
+        if (String(para.id) === String(paragraphId)) {
+          return { paragraph: para, sectionId: section.id };
+        }
+      }
+      if (section.children?.length) {
+        const found = findParagraphInSections(section.children, paragraphId);
+        if (found) return found;
+      }
+    }
+    return null;
+  }, []);
+
+  const replaceParagraphInSection = (sections, sectionId, oldParagraphId, newParagraph) => {
+    return (sections || []).map(section => {
+      if (section.id === sectionId) {
+        const paragraphs = [...(section.paragraphs || [])];
+        const idx = paragraphs.findIndex(p => String(p.id) === String(oldParagraphId));
+
+        if (idx >= 0) {
+          paragraphs[idx] = { ...paragraphs[idx], ...newParagraph };
+        } else {
+          paragraphs.push(newParagraph);
+        }
+
+        return { ...section, paragraphs };
+      }
+
+      if (section.children?.length) {
+        return {
+          ...section,
+          children: replaceParagraphInSection(section.children, sectionId, oldParagraphId, newParagraph)
+        };
+      }
+
+      return section;
+    });
+  };
+
+  // ---------------------------
+  // Section operations
+  // ---------------------------
+  const addSection = useCallback(
+    async (type = 'clause', insertIndex = -1, parentId = null, depthLevelOverride = null) => {
+      if (!completeDocument?.id) return;
+
+      const parentSection = parentId ? findSectionById(completeDocument.sections, parentId) : null;
+      const targetList = parentSection ? (parentSection.children || []) : (completeDocument.sections || []);
+      const order = insertIndex >= 0 ? insertIndex : targetList.length;
+      const parentDepth = parentSection ? (parentSection.depth_level || 1) : 0;
+      const depth_level = depthLevelOverride || (parentSection ? parentDepth + 1 : 1);
+
+      const payload = {
+        title: type === 'clause' ? 'New Section' : `New ${type.charAt(0).toUpperCase() + type.slice(1)}`,
+        content: '',
+        order,
+        depth_level,
+        parent_id: parentId
+      };
+
+      try {
+        const result = await sectionService.createSection(completeDocument.id, payload);
+        
+        // Reload full document to get updated structure from backend
+        await loadCompleteDocument();
+        
+        setHasChanges(false);
+        setLastSavedAt(new Date());
+        setLastSaveStatus('ok');
+        
+        return result;
+      } catch (err) {
+        setError(err.response?.data?.detail || 'Failed to add section');
+        setLastSaveStatus('error');
+        setLastSaveError(err.response?.data?.detail || 'Failed to add section');
+      }
+    },
+    [completeDocument, findSectionById]
+  );
+
+  const updateSection = useCallback(
+    async (sectionId, updates) => {
+      setCompleteDocument(prev => ({
+        ...prev,
+        sections: updateSectionRecursive(prev.sections, sectionId, updates)
+      }));
+      setHasChanges(true);
+
+      try {
+        await sectionService.updateSection(completeDocument.id, sectionId, updates);
+        setHasChanges(false);
+        setLastSavedAt(new Date());
+        setLastSaveStatus('ok');
+      } catch (err) {
+        setError(err.response?.data?.detail || 'Failed to update section');
+        setLastSaveStatus('error');
+        setLastSaveError(err.response?.data?.detail || 'Failed to update section');
+      }
+    },
+    [completeDocument?.id]
+  );
+
+  const updateSectionRecursive = (sections, sectionId, updates) => {
+    return (sections || []).map(section => {
+      if (section.id === sectionId) {
+        return { ...section, ...updates, has_edits: true };
+      }
+      if (section.children && section.children.length > 0) {
+        return {
+          ...section,
+          children: updateSectionRecursive(section.children, sectionId, updates)
+        };
+      }
+      return section;
+    });
+  };
+
+  const deleteSection = useCallback(
+    async (sectionId) => {
+      if (!confirm('Delete this section and all its content?')) return;
+      try {
+        await sectionService.deleteSection(completeDocument.id, sectionId);
+        setCompleteDocument(prev => ({
+          ...prev,
+          sections: removeSectionFromTree(prev.sections, sectionId)
+        }));
+        setLastSavedAt(new Date());
+        setLastSaveStatus('ok');
+      } catch (err) {
+        setError('Failed to delete section');
+        setLastSaveStatus('error');
+        setLastSaveError('Failed to delete section');
+        await loadCompleteDocument();
+      }
+    },
+    [completeDocument?.id, loadCompleteDocument, removeSectionFromTree]
+  );
+
+  // ---------------------------
+  // Paragraph operations
+  // ---------------------------
+  const addParagraph = useCallback(
+    async (sectionId, type = 'standard') => {
+      const targetSection = findSectionById(completeDocument?.sections, sectionId);
+      const order = targetSection?.paragraphs?.length || 0;
+
+      try {
+        const created = await paragraphService.createParagraph(sectionId, {
+          content_text: '',
+          paragraph_type: type,
+          order
+        });
+
+        // Reload full document to get updated structure
+        await loadCompleteDocument();
+
+        setHasChanges(false);
+        setLastSavedAt(new Date());
+        setLastSaveStatus('ok');
+        
+        return created;
+      } catch (err) {
+        setError(err.response?.data?.detail || 'Failed to add paragraph');
+        setLastSaveStatus('error');
+        setLastSaveError(err.response?.data?.detail || 'Failed to add paragraph');
+      }
+    },
+    [completeDocument?.sections, findSectionById, loadCompleteDocument]
+  );
+
+  const ensureParagraphSaved = useCallback(
+    async ({ sectionId, paragraphId, paragraph, updates }) => {
+      const targetSectionId = sectionId || paragraph?.section_id || paragraph?.section?.id;
+
+      if (!targetSectionId) {
+        throw new Error('Section ID is required');
+      }
+
+      // Check if section has a real UUID (required for backend operations)
+      const hasRealSectionId = uuidRegex.test(String(targetSectionId));
+      
+      // If section doesn't have real UUID, save document first
+      if (!hasRealSectionId) {
+        throw new Error('Paragraph has not been saved to the database yet. Please save the document first.');
+      }
+
+      // Already a valid UUID, nothing to do
+      if (paragraphId && uuidRegex.test(String(paragraphId))) {
+        return paragraph || { id: paragraphId, section_id: targetSectionId };
+      }
+
+      // Paragraph has temp ID but section has real UUID - create it in backend
+      const section = findSectionById(completeDocument?.sections, targetSectionId);
+      const existingParagraph = section?.paragraphs?.find(p => String(p.id) === String(paragraphId));
+      const order = existingParagraph?.order ?? section?.paragraphs?.length ?? 0;
+      const paragraph_type = existingParagraph?.paragraph_type || 'standard';
+      const content_text = updates?.content_text
+        ?? existingParagraph?.edited_text
+        ?? existingParagraph?.content_text
+        ?? existingParagraph?.content
+        ?? paragraph?.edited_text
+        ?? paragraph?.content_text
+        ?? paragraph?.content
+        ?? '';
+
+      const payload = {
+        content_text,
+        paragraph_type,
+        order,
+      };
+
+      const created = await paragraphService.createParagraph(targetSectionId, payload);
+      const createdId = created?.id || created?.paragraph?.id || created?.paragraph_id;
+
+      if (!createdId || !uuidRegex.test(String(createdId))) {
+        throw new Error('Create paragraph did not return a valid UUID');
+      }
+
+      const mergedParagraph = {
+        ...existingParagraph,
+        ...paragraph,
+        ...payload,
+        ...created,
+        id: createdId,
+        section_id: targetSectionId,
+      };
+
+      // Update local state with the new ID to prevent duplication
+      setCompleteDocument(prev => ({
+        ...prev,
+        sections: replaceParagraphInSection(prev.sections, targetSectionId, paragraphId, mergedParagraph)
+      }));
+
+      setHasChanges(false);
+      setLastSavedAt(new Date());
+      setLastSaveStatus('ok');
+
+      return mergedParagraph;
+    },
+    [completeDocument?.sections, findSectionById]
+  );
+
+  const updateParagraph = useCallback(
+    async (sectionId, paragraphId, updates) => {
+      // Resolve sectionId: prefer provided, otherwise locate by paragraph
+      let resolvedSectionId = sectionId;
+      if (!resolvedSectionId) {
+        const located = findParagraphInSections(completeDocument?.sections, paragraphId);
+        if (located?.sectionId) {
+          resolvedSectionId = located.sectionId;
+        }
+      }
+
+      // Check if we have any section ID (temp or real UUID)
+      if (!resolvedSectionId) {
+        console.error('❌ Cannot update paragraph: section not found');
+        throw new Error('Cannot update paragraph: section not found. Please save the document.');
+      }
+
+      // Check if section needs to be created on backend (has temp ID)
+      const sectionNeedsCreate = !uuidRegex.test(String(resolvedSectionId));
+      
+      // Check if paragraph needs to be created on backend (has temp ID or missing)
+      const paragraphNeedsCreate = !paragraphId || !uuidRegex.test(String(paragraphId));
+
+      // If section has temp ID, we can't create paragraph on backend yet
+      // Just update local state and wait for document save
+      if (sectionNeedsCreate) {
+        setCompleteDocument(prev => ({
+          ...prev,
+          sections: updateParagraphInSection(prev.sections, resolvedSectionId, paragraphId, updates)
+        }));
+        setHasChanges(true);
+        
+        // Return the paragraph with updates applied locally
+        const located = findParagraphInSections(completeDocument?.sections, paragraphId);
+        return { ...located?.paragraph, ...updates, id: paragraphId };
+      }
+
+      // Section has real UUID, we can persist paragraph changes
+      if (paragraphNeedsCreate) {
+        try {
+          const created = await ensureParagraphSaved({ sectionId: resolvedSectionId, paragraphId, paragraph: updates, updates });
+          return created;
+        } catch (err) {
+          const detail = err?.response?.data?.detail;
+          const message = detail || err?.message || 'Failed to create paragraph';
+          setError(detail || 'Failed to create paragraph');
+          setLastSaveStatus('error');
+          setLastSaveError(detail || 'Failed to create paragraph');
+          // Surface clearer guidance when backend returns 404/400
+          if (err?.response?.status === 404) {
+            throw new Error('Section is not saved yet on the server. Please save the document/section, then insert the image.');
+          }
+          throw new Error(message);
+        }
+      }
+
+      setCompleteDocument(prev => ({
+        ...prev,
+        sections: updateParagraphInSection(prev.sections, resolvedSectionId, paragraphId, updates)
+      }));
+      setHasChanges(true);
+
+      try {
+        const savedParagraph = await paragraphService.updateParagraph(completeDocument.id, paragraphId, updates);
+        setHasChanges(false);
+        setLastSavedAt(new Date());
+        setLastSaveStatus('ok');
+        return savedParagraph;
+      } catch (err) {
+        console.error('❌ Failed to save paragraph:', err.response?.data?.detail || err.message);
+        setError(err.response?.data?.detail || 'Failed to update paragraph');
+        setLastSaveStatus('error');
+        setLastSaveError(err.response?.data?.detail || 'Failed to update paragraph');
+        throw err; // Re-throw so caller knows it failed
+      }
+    },
+    [completeDocument?.id, completeDocument?.sections, findSectionById, findParagraphInSections, loadCompleteDocument, ensureParagraphSaved]
+  );
+
+  const updateParagraphInSection = (sections, sectionId, paragraphId, updates) => {
+    return (sections || []).map(section => {
+      if (section.id === sectionId) {
+        return {
+          ...section,
+          paragraphs: (section.paragraphs || []).map(p =>
+            String(p.id) === String(paragraphId) ? { ...p, ...updates, has_edits: true } : p
+          )
+        };
+      }
+      if (section.children && section.children.length > 0) {
+        return {
+          ...section,
+          children: updateParagraphInSection(section.children, sectionId, paragraphId, updates)
+        };
+      }
+      return section;
+    });
+  };
+
+  const deleteParagraph = useCallback(
+    async (sectionId, paragraphId) => {
+      if (!confirm('Delete this paragraph?')) return;
+
+      setCompleteDocument(prev => ({
+        ...prev,
+        sections: deleteParagraphFromSection(prev.sections, sectionId, paragraphId)
+      }));
+      setHasChanges(true);
+
+      if (String(paragraphId).startsWith('temp_')) return;
+
+      try {
+        await paragraphService.deleteParagraph(paragraphId);
+        setHasChanges(false);
+        setLastSavedAt(new Date());
+        setLastSaveStatus('ok');
+      } catch (err) {
+        setError(err.response?.data?.detail || 'Failed to delete paragraph');
+        setLastSaveStatus('error');
+        setLastSaveError(err.response?.data?.detail || 'Failed to delete paragraph');
+        await loadCompleteDocument();
+      }
+    },
+    [loadCompleteDocument]
+  );
+
+  const deleteParagraphFromSection = (sections, sectionId, paragraphId) => {
+    return (sections || []).map(section => {
+      if (section.id === sectionId) {
+        return {
+          ...section,
+          paragraphs: (section.paragraphs || []).filter(p => p.id !== paragraphId)
+        };
+      }
+      if (section.children && section.children.length > 0) {
+        return {
+          ...section,
+          children: deleteParagraphFromSection(section.children, sectionId, paragraphId)
+        };
+      }
+      return section;
+    });
+  };
+
+  // ---------------------------
+  // Robust inline image insertion handler
+  // ---------------------------
+  const handleImageDrop = useCallback(
+    async ({ imageData, file, position = 0, paragraphId, sectionId }) => {
+      const DEBUG = localStorage.getItem('DEBUG_INLINE_IMAGES') === 'true';
+
+      const log = (...args) => {
+        if (DEBUG) console.log('[inline-image]', ...args);
+      };
+
+      try {
+        log('🖼️ Inserting image marker request', {
+          paragraphId,
+          sectionId,
+          imageData,
+          file: file ? { name: file.name, size: file.size } : null,
+          userDocument: documentId,
+        });
+
+        if (!paragraphId) {
+          throw new Error('paragraphId is required for image insertion');
+        }
+
+        // Locate paragraph + section info from current document
+        const found = findParagraphInSections(completeDocument?.sections, paragraphId) || {};
+        const targetSectionId = sectionId || found.sectionId || found.paragraph?.section_id || found.paragraph?.section?.id;
+
+        if (!targetSectionId) {
+          throw new Error('Cannot insert image: section not found. Please save the document first.');
+        }
+
+        // Check if section has temporary ID
+        const sectionHasTempId = !uuidRegex.test(String(targetSectionId));
+        
+        if (sectionHasTempId) {
+          throw new Error('Section is not saved yet. Please save the document (Ctrl+S or Cmd+S) before inserting images.');
+        }
+
+        // Persist paragraph if it still has a temporary ID
+        const savedParagraph = await ensureParagraphSaved({
+          sectionId: targetSectionId,
+          paragraphId,
+          paragraph: found.paragraph || { id: paragraphId, section_id: targetSectionId },
+          updates: found.paragraph
+        });
+
+        const resolvedParagraphId = savedParagraph.id;
+
+        let imageRefId = imageData?.id || imageData?.image_ref_id || imageData?.image_reference;
+        let uploadedImage = null;
+
+        // Support dropping raw files or existing library images
+        if (!imageRefId && file) {
+          log('📤 Uploading dropped image file');
+          uploadedImage = await imageService.uploadImage(file, {
+            name: file.name,
+            imageType: 'inline_image',
+            documentId,
+            uploadScope: 'document',
+          });
+          imageRefId = uploadedImage?.id;
+        }
+
+        if (!imageRefId || !uuidRegex.test(String(imageRefId))) {
+          throw new Error('Image reference is missing or invalid after upload.');
+        }
+
+        const alt_text = imageData?.title
+          || imageData?.alt_text
+          || imageData?.name
+          || file?.name?.replace(/\.[^/.]+$/, '')
+          || 'Image';
+
+        const payload = {
+          paragraph_id: resolvedParagraphId,
+          image_ref_id: imageRefId,
+          alt_text,
+          insert_position: position || 0,
+          alignment: 'center',
+          size_mode: 'max-width',
+          max_width_pixels: 800,
+        };
+
+        log('📌 Calling insertImageMarker with payload', payload);
+        const insertResponse = await inlineImageService.insertImageMarker(payload);
+        log('✅ Image marker inserted', insertResponse);
+
+        const { updated_content, inline_image, marker, paragraph_id } = insertResponse || {};
+
+        // Update paragraph content locally to avoid refetch flicker and duplication
+        setCompleteDocument(prev => ({
+          ...prev,
+          sections: updateParagraphInSection(prev.sections, targetSectionId, paragraph_id || resolvedParagraphId, {
+            edited_text: updated_content,
+            content_text: updated_content,
+            content: updated_content,
+            inline_images: inline_image
+              ? [...((found.paragraph?.inline_images || []).filter(img => img.id !== inline_image.id)), inline_image]
+              : found.paragraph?.inline_images,
+            has_edits: false,
+          }),
+        }));
+
+        setHasChanges(false);
+        setLastSavedAt(new Date());
+        setLastSaveStatus('ok');
+
+        return {
+          paragraph_id: paragraph_id || resolvedParagraphId,
+          marker,
+          inline_image,
+          updated_content,
+          uploaded_image: uploadedImage,
+        };
+      } catch (error) {
+        console.error('❌ Failed to insert image:', error);
+        console.error('Error response:', error?.response?.data);
+
+        const errorMessage = error.response?.data?.error
+          || error.response?.data?.detail
+          || error.message
+          || 'Failed to insert image';
+
+        alert(`Error inserting image: ${errorMessage}`);
+
+        throw error;
+      }
+    },
+    [completeDocument?.sections, documentId, ensureParagraphSaved, findParagraphInSections]
+  );
+
+  return {
+    // data
+    completeDocument,
+    setCompleteDocument,
+    loading,
+    error,
+    setError,
+    saving,
+    hasChanges,
+    setHasChanges,
+    lastSavedAt,
+    lastSaveStatus,
+    lastSaveError,
+
+    // operations
+    loadCompleteDocument,
+    saveDocument,
+    addSection,
+    updateSection,
+    deleteSection,
+    addParagraph,
+    updateParagraph,
+    deleteParagraph,
+
+    // helpers
+    handleImageDrop,
+  };
+}
+
+export default useDocumentEditor;

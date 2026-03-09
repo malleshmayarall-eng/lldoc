@@ -1,0 +1,33 @@
+{
+  "name": "Legal/Technical - Header",
+  "description": "Strict header for contracts, NDAs, and technical documents.",
+  "template_type": "header",
+  "category": "Legal",
+  "tags": ["legal", "contract", "nda", "technical", "confidential"],
+  "config": {
+    "icons": [],
+    "text": {
+      "left": "{company_name}\n{company_address}\n{document_title}\nCONFIDENTIAL\nDoc ID {reference_number}",
+      "center": "",
+      "right": ""
+    },
+    "style": {
+      "height": "110px",
+      "background_color": "#fafafa",
+      "border_bottom": "2px solid #000000",
+      "font_family": "Arial, sans-serif",
+      "font_size": "9pt",
+      "padding": "12px 20px",
+      "text_align": {
+        "left": "left",
+        "center": "center",
+        "right": "right"
+      }
+    },
+    "show_on_first_page": true,
+    "show_on_all_pages": true,
+    "logo_position": "left",
+    "logo_size": "medium",
+    "logo_first_page_only": true
+  }
+}

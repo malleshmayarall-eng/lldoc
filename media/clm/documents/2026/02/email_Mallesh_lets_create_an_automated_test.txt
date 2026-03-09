@@ -1,0 +1,8 @@
+Mallesh, ready to start creating amazing automated tests? 
+ My name is Amit and I’m your TestProject onboarding champion, 
+ I wanted to check-in and see if you need any help creating your first test. I created for you a great step-by-step tutorial, you can watch and try it out yourself. 
+ Interested? Awesome! Please choose which type of test you would like to start with? 
+Web TestMobile Test API Test Not sure how to get the most out of TestProject? 
+ Join us for our live demo sessions here or reach out directly to our support team at support@testproject.io 
+ If you have already created tests and know how to use our platform, feel free to ignore this email. 
+ Happy Testing! Amit

@@ -1,0 +1,58 @@
+
+
+Dear <>!
+
+A new TestProject Agent version is available - Version 3.3.0 🎉 Packed with a bunch of new features, improvements and fixes! Explore it all by signing up for a free TestProject account (or actively login (https://app.testproject.io/)  if you already have one).
+
+Explore v3.3.0 Today (https://app.testproject.io/signup/)
+
+
+** New Features & Improvements
+------------------------------------------------------------
+1. Test re-run and Job healing is here!
++ You can now re-run failed tests in Jobs in order to automatically heal the Job.
++ Each re-run acts as an additional iteration in case the test fails.
++ In case one of the additional re-runs passes, the Job will be healed and marked as passed (with the healing icon in the report).
+https://app.testproject.io/
+
+2. Optimized execution reporting and Job initialization to better reflect Agent tasks when executing tests. The Agent now reports execution progress in the Monitor section, such as Downloading App, Data sources, Tests, and more.
+
+3. New Agent overlay - On the top right corner, you will now have access to everything you need to know about your local Agent: from managing workers, viewing all connected devices, and monitoring local test executions - all in one click!
+https://app.testproject.io/
+
+4. Android 12 is supported - Before everyone else, we've added support for Recording and Mirroring Android 12 devices! Stay ahead of the game and make sure your Android apps are ready for the official Android release (Psst! We hear they are going to release it on October 4th 🤫).
+
+5. iOS 15 is closer than ever - Apple just had their official annual event, announcing among others that iOS 15 will be released on September 20th. Don't worry, we'll be ready just in time to have you kick-off your iOS testing to its fullest power with a new Agent version coming up in just a couple of days!
+
+The full release notes are available at the TestProject documentation portal (https://docs.testproject.io/releases) .
+
+Explore v3.3.0 Today (https://app.testproject.io/signup/)
+
+Excited about the new features?
+
+Share your feedback with us! Drop us a message (https://testproject.io/contact-us/) , write about it on our Forum (https://forum.testproject.io/) , or share it on LinkedIn with the hashtag #TestProject. More surprises are coming up soon, stay tuned!
+
+
+Have a wonderful weekend 🌻
+TestProject Team
+
+============================================================
+
+** Twitter (https://twitter.com/TestProject_io)
+** Twitter (https://twitter.com/TestProject_io)
+** Website (https://testproject.io/)
+** Website (https://testproject.io/)
+** YouTube (https://www.youtube.com/testproject)
+** YouTube (https://www.youtube.com/testproject)
+** LinkedIn (https://www.linkedin.com/company/testproject/)
+** LinkedIn (https://www.linkedin.com/company/testproject/)
+Copyright © 2021 TestProject, All rights reserved.
+
+Want to change how you receive these emails?
+You can ** update your preferences (https://testproject.us13.list-manage.com/profile?u=f2113e577457963e5e54e100c&id=3474bc7678&e=f81301e545&c=26655b2186)
+or ** unsubscribe from this list (https://testproject.us13.list-manage.com/unsubscribe?u=f2113e577457963e5e54e100c&id=3474bc7678&e=f81301e545&c=26655b2186)
+.
+
+This email was sent to mayaramallesh12@gmail.com (mailto:mayaramallesh12@gmail.com)
+why did I get this? (https://testproject.us13.list-manage.com/about?u=f2113e577457963e5e54e100c&id=3474bc7678&e=8b98c8d7f2&c=ad7f5b1731)     unsubscribe from this list (https://testproject.us13.list-manage.com/unsubscribe?u=f2113e577457963e5e54e100c&id=3474bc7678&e=8b98c8d7f2&c=ad7f5b1731)     update subscription preferences (https://testproject.us13.list-manage.com/profile?u=f2113e577457963e5e54e100c&id=3474bc7678&e=8b98c8d7f2&c=ad7f5b1731)
+TestProject . Yegia Hakapim 21 . PTK 49130 . Israel

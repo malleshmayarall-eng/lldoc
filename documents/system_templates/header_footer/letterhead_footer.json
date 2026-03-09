@@ -1,0 +1,26 @@
+{
+  "name": "Letterhead - Professional Footer",
+  "description": "Minimal, clean footer for letterhead documents with contact info.",
+  "template_type": "footer",
+  "category": "Letterhead",
+  "tags": ["official", "correspondence", "professional", "external"],
+  "config": {
+    "icons": [],
+    "text": {
+      "left": "{company_address}",
+      "center": "{company_email}",
+      "right": "{company_website}"
+    },
+    "style": {
+      "height": "42px",
+      "background_color": "#f9f9f9",
+      "border_top": "1px solid #cccccc",
+      "font_family": "Arial, sans-serif",
+      "font_size": "8pt",
+      "padding": "10px 20px",
+      "color": "#666666"
+    },
+    "show_on_first_page": true,
+    "show_on_all_pages": true
+  }
+}

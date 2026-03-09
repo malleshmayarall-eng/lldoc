@@ -1,0 +1,528 @@
+{% load static %}
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Template Designer – Headers & Footers</title>
+    <style>
+        :root {
+            --bg: #0b1120;
+            --panel: #0f172a;
+            --panel-2: #111827;
+            --accent: #38bdf8;
+            --accent-2: #6366f1;
+            --text: #f8fafc;
+            --muted: #94a3b8;
+            --border: #1f2937;
+            --success: #34d399;
+            --danger: #f87171;
+            --card: #0b1220;
+        }
+        * { box-sizing: border-box; }
+        body {
+            margin: 0;
+            font-family: "Inter", system-ui, -apple-system, sans-serif;
+            background: var(--bg);
+            color: var(--text);
+        }
+        header {
+            position: sticky;
+            top: 0;
+            z-index: 20;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 18px 28px;
+            border-bottom: 1px solid var(--border);
+            background: linear-gradient(135deg, #0f172a 0%, #0b1120 100%);
+        }
+        header h1 {
+            margin: 0;
+            font-size: 20px;
+            font-weight: 600;
+        }
+        header .sub {
+            color: var(--muted);
+            font-size: 13px;
+        }
+        .layout {
+            display: grid;
+            grid-template-columns: minmax(0, 1fr) 360px;
+            min-height: calc(100vh - 72px);
+        }
+        .content { padding: 24px; }
+        .settings {
+            background: var(--panel-2);
+            padding: 22px;
+            border-left: 1px solid var(--border);
+        }
+        .panel-card {
+            background: var(--card);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            padding: 16px;
+            margin-bottom: 16px;
+        }
+        .panel-card h3 {
+            margin: 0 0 8px;
+            font-size: 14px;
+        }
+        label {
+            display: block;
+            margin-top: 12px;
+            font-size: 13px;
+            color: var(--muted);
+        }
+        input, textarea, select {
+            width: 100%;
+            padding: 10px 12px;
+            margin-top: 6px;
+            background: #0b1220;
+            color: var(--text);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            font-size: 13px;
+        }
+        textarea {
+            min-height: 120px;
+            resize: vertical;
+            font-family: "SFMono-Regular", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+        }
+        .btn {
+            padding: 10px 14px;
+            border-radius: 8px;
+            border: 1px solid transparent;
+            font-size: 13px;
+            font-weight: 600;
+            cursor: pointer;
+        }
+        .btn-primary {
+            background: var(--accent);
+            color: #0f172a;
+        }
+        .btn-secondary {
+            background: rgba(99, 102, 241, 0.15);
+            color: #c7d2fe;
+            border-color: rgba(99, 102, 241, 0.4);
+        }
+        .btn-ghost {
+            background: transparent;
+            color: var(--muted);
+            border-color: var(--border);
+        }
+        .row {
+            display: flex;
+            gap: 12px;
+            flex-wrap: wrap;
+        }
+        .row .btn {
+            flex: 1 1 auto;
+        }
+        .status {
+            margin-top: 12px;
+            font-size: 12px;
+            color: var(--muted);
+        }
+        .status.ok { color: var(--success); }
+        .status.error { color: var(--danger); }
+        .chip {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            padding: 6px 10px;
+            border-radius: 999px;
+            font-size: 12px;
+            background: rgba(56, 189, 248, 0.15);
+            color: var(--accent);
+            border: 1px solid rgba(56, 189, 248, 0.35);
+            cursor: grab;
+        }
+        .chip:active { cursor: grabbing; }
+        .canvas {
+            background: #ffffff;
+            border-radius: 14px;
+            border: 1px solid #e2e8f0;
+            padding: 18px;
+            color: #0f172a;
+            min-height: 220px;
+        }
+        .canvas-title {
+            font-weight: 600;
+            color: #1f2933;
+            margin-bottom: 10px;
+        }
+        .canvas-grid {
+            display: grid;
+            grid-template-columns: repeat(3, minmax(0, 1fr));
+            gap: 12px;
+        }
+        .canvas-grid.single {
+            grid-template-columns: minmax(0, 1fr);
+        }
+        .drop-zone {
+            border: 1px dashed #94a3b8;
+            border-radius: 10px;
+            padding: 12px;
+            min-height: 120px;
+            font-size: 12px;
+            color: #334155;
+            background: #f8fafc;
+        }
+        .drop-zone.active {
+            border-color: #38bdf8;
+            box-shadow: 0 0 0 1px rgba(56, 189, 248, 0.3);
+        }
+        .hint { font-size: 12px; color: var(--muted); margin-top: 6px; }
+    </style>
+</head>
+<body>
+<header>
+    <div>
+        <h1>Header/Footer Template Designer</h1>
+        <div class="sub">Drag placeholders onto the canvas and save a reusable template.</div>
+    </div>
+    <div class="row">
+        <a class="btn btn-ghost" href="/documents/">Documents</a>
+    </div>
+</header>
+
+<div class="layout">
+    <main class="content">
+        <div class="panel-card">
+            <div class="canvas-title">Template Canvas Preview</div>
+            <div id="canvas" class="canvas">
+                <div id="canvasGrid" class="canvas-grid">
+                    <div class="drop-zone" data-zone="left">Drop placeholders here (Left)</div>
+                    <div class="drop-zone" data-zone="center">Drop placeholders here (Center)</div>
+                    <div class="drop-zone" data-zone="right">Drop placeholders here (Right)</div>
+                </div>
+            </div>
+            <div class="hint">Tip: Toggle to single-block layout for letterhead-style headers.</div>
+        </div>
+
+        <div class="panel-card">
+            <h3>Template Text</h3>
+            <label for="leftText">Left Block</label>
+            <textarea id="leftText" placeholder="{company_name}\n{company_address}"></textarea>
+            <label for="centerText">Center Block</label>
+            <textarea id="centerText" placeholder="{document_title}"></textarea>
+            <label for="rightText">Right Block</label>
+            <textarea id="rightText" placeholder="{company_phone} | {company_email}"></textarea>
+        </div>
+    </main>
+
+    <aside class="settings">
+        <div class="panel-card">
+            <h3>Template Details</h3>
+            <label for="templateSelect">Existing Template</label>
+            <select id="templateSelect">
+                <option value="">Create new template</option>
+            </select>
+
+            <label for="templateName">Template Name</label>
+            <input id="templateName" placeholder="Letterhead - Custom" />
+
+            <label for="templateType">Template Type</label>
+            <select id="templateType">
+                <option value="header">Header</option>
+                <option value="footer">Footer</option>
+            </select>
+
+            <label for="templateCategory">Category</label>
+            <input id="templateCategory" placeholder="Letterhead" />
+
+            <label for="templateTags">Tags (comma-separated)</label>
+            <input id="templateTags" placeholder="letterhead, professional" />
+
+            <label for="layoutMode">Layout</label>
+            <select id="layoutMode">
+                <option value="three">Three Columns</option>
+                <option value="single">Single Block</option>
+            </select>
+        </div>
+
+        <div class="panel-card">
+            <h3>Style</h3>
+            <label for="height">Height (px)</label>
+            <input id="height" value="84" />
+            <label for="fontSize">Font Size (pt)</label>
+            <input id="fontSize" value="9" />
+            <label for="borderColor">Border Color</label>
+            <input id="borderColor" value="#003366" />
+            <label for="backgroundColor">Background Color</label>
+            <input id="backgroundColor" value="#ffffff" />
+        </div>
+
+        <div class="panel-card">
+            <h3>Placeholders</h3>
+            <div id="placeholderChips" class="row"></div>
+            <div class="hint">Drag a chip onto the canvas to insert it.</div>
+        </div>
+
+        <div class="panel-card">
+            <div class="row">
+                <button class="btn btn-primary" id="saveTemplate">Save Template</button>
+                <button class="btn btn-secondary" id="clearTemplate">Clear</button>
+            </div>
+            <div class="status" id="saveStatus"></div>
+        </div>
+    </aside>
+</div>
+
+<script>
+    const placeholders = [
+        "{company_name}",
+        "{company_address}",
+        "{company_phone}",
+        "{company_email}",
+        "{company_website}",
+        "{document_title}",
+        "{document_type}",
+        "{status}",
+        "{version}",
+        "{reference_number}",
+        "{date}",
+        "{year}",
+        "{page}",
+        "{total}",
+        "{author}",
+        "{created_by}",
+    ];
+
+    const templateSelect = document.getElementById("templateSelect");
+    const templateName = document.getElementById("templateName");
+    const templateType = document.getElementById("templateType");
+    const templateCategory = document.getElementById("templateCategory");
+    const templateTags = document.getElementById("templateTags");
+    const layoutMode = document.getElementById("layoutMode");
+    const leftText = document.getElementById("leftText");
+    const centerText = document.getElementById("centerText");
+    const rightText = document.getElementById("rightText");
+    const heightInput = document.getElementById("height");
+    const fontSizeInput = document.getElementById("fontSize");
+    const borderColorInput = document.getElementById("borderColor");
+    const backgroundColorInput = document.getElementById("backgroundColor");
+    const saveStatus = document.getElementById("saveStatus");
+    const canvasGrid = document.getElementById("canvasGrid");
+
+    let activeZone = "left";
+    let templateIndex = {};
+
+    function setStatus(message, ok = true) {
+        saveStatus.textContent = message;
+        saveStatus.classList.toggle("ok", ok);
+        saveStatus.classList.toggle("error", !ok);
+    }
+
+    function updateCanvasLayout() {
+        if (layoutMode.value === "single") {
+            canvasGrid.classList.add("single");
+            [...canvasGrid.querySelectorAll(".drop-zone")].forEach((zone, index) => {
+                zone.style.display = index === 0 ? "block" : "none";
+            });
+        } else {
+            canvasGrid.classList.remove("single");
+            [...canvasGrid.querySelectorAll(".drop-zone")].forEach((zone) => {
+                zone.style.display = "block";
+            });
+        }
+    }
+
+    function refreshCanvasText() {
+        const zones = canvasGrid.querySelectorAll(".drop-zone");
+        zones.forEach((zone) => {
+            const key = zone.dataset.zone;
+            const value = key === "left" ? leftText.value : key === "center" ? centerText.value : rightText.value;
+            zone.textContent = value || `Drop placeholders here (${key})`;
+        });
+    }
+
+    function insertPlaceholder(target) {
+        const textArea = target === "left" ? leftText : target === "center" ? centerText : rightText;
+        textArea.value = `${textArea.value}${textArea.value ? "\n" : ""}${draggedPlaceholder}`;
+        refreshCanvasText();
+    }
+
+    let draggedPlaceholder = "";
+    function renderPlaceholderChips() {
+        const container = document.getElementById("placeholderChips");
+        container.innerHTML = "";
+        placeholders.forEach((placeholder) => {
+            const chip = document.createElement("div");
+            chip.className = "chip";
+            chip.textContent = placeholder;
+            chip.draggable = true;
+            chip.addEventListener("dragstart", () => {
+                draggedPlaceholder = placeholder;
+            });
+            chip.addEventListener("click", () => {
+                draggedPlaceholder = placeholder;
+                insertPlaceholder(activeZone);
+            });
+            container.appendChild(chip);
+        });
+    }
+
+    function setupDropZones() {
+        canvasGrid.querySelectorAll(".drop-zone").forEach((zone) => {
+            zone.addEventListener("dragover", (event) => {
+                event.preventDefault();
+                activeZone = zone.dataset.zone;
+                zone.classList.add("active");
+            });
+            zone.addEventListener("dragleave", () => zone.classList.remove("active"));
+            zone.addEventListener("drop", (event) => {
+                event.preventDefault();
+                zone.classList.remove("active");
+                activeZone = zone.dataset.zone;
+                if (draggedPlaceholder) {
+                    insertPlaceholder(activeZone);
+                }
+            });
+            zone.addEventListener("click", () => {
+                activeZone = zone.dataset.zone;
+            });
+        });
+    }
+
+    async function loadTemplates() {
+        const response = await fetch("/api/documents/header-footer-templates/", { credentials: "include" });
+        if (!response.ok) {
+            setStatus("Failed to load templates", false);
+            return;
+        }
+        const data = await response.json();
+        templateIndex = {};
+        templateSelect.innerHTML = '<option value="">Create new template</option>';
+        data.templates.forEach((template) => {
+            templateIndex[template.id] = template;
+            const option = document.createElement("option");
+            option.value = template.id;
+            option.textContent = `${template.name} (${template.template_type})`;
+            templateSelect.appendChild(option);
+        });
+    }
+
+    function loadTemplateIntoForm(template) {
+        templateName.value = template.name || "";
+        templateType.value = template.template_type || "header";
+        templateCategory.value = template.category || "";
+        templateTags.value = (template.tags || []).join(", ");
+
+        const config = template.config || {};
+        const text = config.text || {};
+        leftText.value = text.left || "";
+        centerText.value = text.center || "";
+        rightText.value = text.right || "";
+
+        const style = config.style || {};
+        heightInput.value = parseInt((style.height || "84px").replace("px", ""), 10) || 84;
+        fontSizeInput.value = parseInt((style.font_size || "9pt").replace("pt", ""), 10) || 9;
+        borderColorInput.value = (style.border_bottom || "#003366").replace("2px solid ", "");
+        backgroundColorInput.value = style.background_color || "#ffffff";
+
+        layoutMode.value = centerText.value || rightText.value ? "three" : "single";
+        updateCanvasLayout();
+        refreshCanvasText();
+    }
+
+    async function saveTemplate() {
+        const tags = templateTags.value.split(",").map((tag) => tag.trim()).filter(Boolean);
+        const config = {
+            icons: [],
+            text: {
+                left: leftText.value || "",
+                center: layoutMode.value === "single" ? "" : centerText.value || "",
+                right: layoutMode.value === "single" ? "" : rightText.value || "",
+            },
+            style: {
+                height: `${heightInput.value || 84}px`,
+                background_color: backgroundColorInput.value || "#ffffff",
+                border_bottom: `2px solid ${borderColorInput.value || "#003366"}`,
+                font_family: "Arial, sans-serif",
+                font_size: `${fontSizeInput.value || 9}pt`,
+                padding: "12px 20px",
+                text_align: {
+                    left: "left",
+                    center: "center",
+                    right: "right",
+                },
+            },
+            show_on_first_page: true,
+            show_on_all_pages: templateType.value === "header" ? false : true,
+        };
+
+        const payload = {
+            template_id: templateSelect.value || null,
+            name: templateName.value,
+            template_type: templateType.value,
+            description: "",
+            category: templateCategory.value,
+            tags,
+            config,
+            is_public: true,
+        };
+
+        if (!payload.name) {
+            setStatus("Template name is required.", false);
+            return;
+        }
+
+        const response = await fetch("/api/documents/header-footer-templates/", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            credentials: "include",
+            body: JSON.stringify(payload),
+        });
+        if (!response.ok) {
+            const data = await response.json();
+            setStatus(data.error || "Save failed", false);
+            return;
+        }
+        const saved = await response.json();
+        setStatus("Template saved.", true);
+        await loadTemplates();
+        templateSelect.value = saved.id;
+    }
+
+    function clearForm() {
+        templateSelect.value = "";
+        templateName.value = "";
+        templateCategory.value = "";
+        templateTags.value = "";
+        leftText.value = "";
+        centerText.value = "";
+        rightText.value = "";
+        layoutMode.value = "three";
+        updateCanvasLayout();
+        refreshCanvasText();
+    }
+
+    templateSelect.addEventListener("change", () => {
+        const template = templateIndex[templateSelect.value];
+        if (template) {
+            loadTemplateIntoForm(template);
+        }
+    });
+
+    [leftText, centerText, rightText].forEach((input) => {
+        input.addEventListener("input", refreshCanvasText);
+    });
+
+    layoutMode.addEventListener("change", () => {
+        updateCanvasLayout();
+        refreshCanvasText();
+    });
+
+    document.getElementById("saveTemplate").addEventListener("click", saveTemplate);
+    document.getElementById("clearTemplate").addEventListener("click", clearForm);
+
+    renderPlaceholderChips();
+    setupDropZones();
+    updateCanvasLayout();
+    refreshCanvasText();
+    loadTemplates();
+</script>
+</body>
+</html>

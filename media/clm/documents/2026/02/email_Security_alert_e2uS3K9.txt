@@ -1,0 +1,14 @@
+[image: Google]
+New device signed in to
+
+
+mayaramallesh12@gmail.com
+Your Google Account was just signed in to from a new Apple iPhone device.
+You're getting this email to make sure it was you.
+Check activity
+<https://accounts.google.com/AccountChooser?Email=mayaramallesh12@gmail.com&continue=https://myaccount.google.com/alert/nt/1629711940000?rfn%3D31%26rfnc%3D1%26eid%3D-3234151424514237470%26et%3D0%26anexp%3Dnret-fa>
+You can also see security activity at
+https://myaccount.google.com/notifications
+You received this email to let you know about important changes to your
+Google Account and services.
+© 2021 Google LLC, 1600 Amphitheatre Parkway, Mountain View, CA 94043, USA

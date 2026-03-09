@@ -1,0 +1,454 @@
+{
+  "info": {
+    "name": "Legal Document Drafter API",
+    "description": "Complete API collection for Legal Document Drafter backend",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
+    "_exporter_id": "legal-doc-drafter"
+  },
+  "variable": [
+    {
+      "key": "baseUrl",
+      "value": "http://localhost:8000/api",
+      "type": "string"
+    },
+    {
+      "key": "documentId",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "issueId",
+      "value": "",
+      "type": "string"
+    }
+  ],
+  "item": [
+    {
+      "name": "Authentication",
+      "item": [
+        {
+          "name": "Login",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"user@example.com\",\n  \"password\": \"password123\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/auth/login/",
+              "host": ["{{baseUrl}}"],
+              "path": ["auth", "login", ""]
+            }
+          }
+        },
+        {
+          "name": "Get Current User",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{baseUrl}}/auth/me/",
+              "host": ["{{baseUrl}}"],
+              "path": ["auth", "me", ""]
+            }
+          }
+        },
+        {
+          "name": "Verify Session",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{baseUrl}}/auth/verify/",
+              "host": ["{{baseUrl}}"],
+              "path": ["auth", "verify", ""]
+            }
+          }
+        },
+        {
+          "name": "Change Password",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"current_password\": \"oldpass\",\n  \"new_password\": \"newpass\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/auth/change-password/",
+              "host": ["{{baseUrl}}"],
+              "path": ["auth", "change-password", ""]
+            }
+          }
+        },
+        {
+          "name": "Logout",
+          "request": {
+            "method": "POST",
+            "url": {
+              "raw": "{{baseUrl}}/auth/logout/",
+              "host": ["{{baseUrl}}"],
+              "path": ["auth", "logout", ""]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Documents",
+      "item": [
+        {
+          "name": "List Documents",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{baseUrl}}/documents/",
+              "host": ["{{baseUrl}}"],
+              "path": ["documents", ""]
+            }
+          }
+        },
+        {
+          "name": "Get Document",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{baseUrl}}/documents/{{documentId}}/",
+              "host": ["{{baseUrl}}"],
+              "path": ["documents", "{{documentId}}", ""]
+            }
+          }
+        },
+        {
+          "name": "Create Document",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"title\": \"New Agreement\",\n  \"raw_text\": \"This is the agreement text...\",\n  \"document_type\": \"contract\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/documents/",
+              "host": ["{{baseUrl}}"],
+              "path": ["documents", ""]
+            }
+          }
+        },
+        {
+          "name": "Update Document",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"title\": \"Updated Title\",\n  \"status\": \"finalized\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/documents/{{documentId}}/",
+              "host": ["{{baseUrl}}"],
+              "path": ["documents", "{{documentId}}", ""]
+            }
+          }
+        },
+        {
+          "name": "Delete Document",
+          "request": {
+            "method": "DELETE",
+            "url": {
+              "raw": "{{baseUrl}}/documents/{{documentId}}/",
+              "host": ["{{baseUrl}}"],
+              "path": ["documents", "{{documentId}}", ""]
+            }
+          }
+        },
+        {
+          "name": "Import Document",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"content\": \"FULL DOCUMENT TEXT HERE...\",\n  \"title\": \"Imported Agreement\",\n  \"author\": \"John Doe\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/documents/import/",
+              "host": ["{{baseUrl}}"],
+              "path": ["documents", "import", ""]
+            }
+          }
+        },
+        {
+          "name": "Create Structured Document",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"title\": \"Custom Agreement\",\n  \"sections\": [\n    {\n      \"title\": \"Introduction\",\n      \"content\": \"This is the introduction...\"\n    },\n    {\n      \"title\": \"Terms\",\n      \"paragraphs\": [\n        \"First paragraph\",\n        \"Second paragraph\"\n      ]\n    }\n  ],\n  \"metadata\": {\n    \"document_type\": \"contract\"\n  }\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/documents/create-structured/",
+              "host": ["{{baseUrl}}"],
+              "path": ["documents", "create-structured", ""]
+            }
+          }
+        },
+        {
+          "name": "List Templates",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{baseUrl}}/documents/templates/",
+              "host": ["{{baseUrl}}"],
+              "path": ["documents", "templates", ""]
+            }
+          }
+        },
+        {
+          "name": "Get Template Details",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{baseUrl}}/documents/templates/nda/",
+              "host": ["{{baseUrl}}"],
+              "path": ["documents", "templates", "nda", ""]
+            }
+          }
+        },
+        {
+          "name": "Create from Template",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"template_name\": \"nda\",\n  \"title\": \"Mutual NDA\",\n  \"metadata\": {\n    \"effective_date\": \"2026-02-01\"\n  },\n  \"replacements\": {\n    \"PARTY_A\": \"Acme Corp\",\n    \"PARTY_B\": \"Tech LLC\",\n    \"EFFECTIVE_DATE\": \"February 1, 2026\",\n    \"CONFIDENTIALITY_PERIOD\": \"2 years\"\n  }\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/documents/create-from-template/",
+              "host": ["{{baseUrl}}"],
+              "path": ["documents", "create-from-template", ""]
+            }
+          }
+        },
+        {
+          "name": "Get My Documents",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{baseUrl}}/documents/my-documents/",
+              "host": ["{{baseUrl}}"],
+              "path": ["documents", "my-documents", ""]
+            }
+          }
+        },
+        {
+          "name": "Get Organization Documents",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{baseUrl}}/documents/organization-documents/",
+              "host": ["{{baseUrl}}"],
+              "path": ["documents", "organization-documents", ""]
+            }
+          }
+        },
+        {
+          "name": "Analyze Document",
+          "request": {
+            "method": "POST",
+            "url": {
+              "raw": "{{baseUrl}}/documents/{{documentId}}/analyze/",
+              "host": ["{{baseUrl}}"],
+              "path": ["documents", "{{documentId}}", "analyze", ""]
+            }
+          }
+        },
+        {
+          "name": "Apply Suggestion",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"issueId\": \"{{issueId}}\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/documents/{{documentId}}/apply-suggestion/",
+              "host": ["{{baseUrl}}"],
+              "path": ["documents", "{{documentId}}", "apply-suggestion", ""]
+            }
+          }
+        },
+        {
+          "name": "Rewrite Section",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"sectionId\": \"section-uuid\",\n  \"prompt\": \"Make this more formal\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/documents/{{documentId}}/rewrite/",
+              "host": ["{{baseUrl}}"],
+              "path": ["documents", "{{documentId}}", "rewrite", ""]
+            }
+          }
+        },
+        {
+          "name": "Export Document",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"format\": \"docx\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/documents/{{documentId}}/export/",
+              "host": ["{{baseUrl}}"],
+              "path": ["documents", "{{documentId}}", "export", ""]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Issues",
+      "item": [
+        {
+          "name": "List All Issues",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{baseUrl}}/documents/issues/",
+              "host": ["{{baseUrl}}"],
+              "path": ["documents", "issues", ""]
+            }
+          }
+        },
+        {
+          "name": "Get Issue",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{baseUrl}}/documents/issues/{{issueId}}/",
+              "host": ["{{baseUrl}}"],
+              "path": ["documents", "issues", "{{issueId}}", ""]
+            }
+          }
+        },
+        {
+          "name": "Update Issue",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"status\": \"resolved\",\n  \"resolution_note\": \"Fixed\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/documents/issues/{{issueId}}/",
+              "host": ["{{baseUrl}}"],
+              "path": ["documents", "issues", "{{issueId}}", ""]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "User Management",
+      "item": [
+        {
+          "name": "List Organizations",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{baseUrl}}/users/organizations/",
+              "host": ["{{baseUrl}}"],
+              "path": ["users", "organizations", ""]
+            }
+          }
+        },
+        {
+          "name": "List Roles",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{baseUrl}}/users/roles/",
+              "host": ["{{baseUrl}}"],
+              "path": ["users", "roles", ""]
+            }
+          }
+        },
+        {
+          "name": "List Users",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{baseUrl}}/users/users/",
+              "host": ["{{baseUrl}}"],
+              "path": ["users", "users", ""]
+            }
+          }
+        }
+      ]
+    }
+  ]
+}

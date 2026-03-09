@@ -1,0 +1,32 @@
+{
+  "name": "Standard Report - Header",
+  "description": "Versatile header for internal reports, policies, and white papers.",
+  "template_type": "header",
+  "category": "Report",
+  "tags": ["internal", "report", "policy", "white paper", "standard"],
+  "config": {
+    "icons": [],
+    "text": {
+      "left": "{company_name}",
+      "center": "{document_title}",
+      "right": "v{version}"
+    },
+    "style": {
+      "height": "60px",
+      "background_color": "#ffffff",
+      "border_bottom": "1px solid #cccccc",
+      "font_family": "Arial, sans-serif",
+      "font_size": "9pt",
+      "padding": "12px 20px",
+      "text_align": {
+        "left": "left",
+        "center": "center",
+        "right": "right"
+      }
+    },
+    "show_on_first_page": false,
+    "show_on_all_pages": true,
+    "logo_position": "left",
+    "logo_size": "small"
+  }
+}

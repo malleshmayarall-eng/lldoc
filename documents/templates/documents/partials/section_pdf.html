@@ -1,0 +1,196 @@
+{% load static %}
+{% load document_filters %}
+
+<div class="section" id="section-{{ section.id }}">
+    <!-- Section Header -->
+    <div class="section-header">
+        {% if level == 1 %}
+            <h2 class="section-title">{{ section.title }}</h2>
+        {% elif level == 2 %}
+            <h3 class="subsection-title">{{ section.title }}</h3>
+        {% else %}
+            <h4 class="sub-subsection-title">{{ section.title }}</h4>
+        {% endif %}
+    </div>
+
+    <!-- Section Content -->
+    <div class="{% if level > 1 %}subsection{% endif %}">
+        {% with section.paragraphs.all as paragraphs %}
+        {% with section.tables.all as tables %}
+        {% with section.image_components.all as images %}
+        {% with section.file_components.all as files %}
+        
+        {% if paragraphs or tables or images or files %}
+            {% for component in section.get_all_components %}
+                {% if component.type == 'paragraph' %}
+                    <div class="paragraph">
+                        {{ component.obj|render_paragraph }}
+                    </div>
+                    
+                {% elif component.type == 'table' %}
+                    <div class="table-container">
+                        {% if component.obj.title %}
+                        <div class="table-title">{{ component.obj.title }}</div>
+                        {% endif %}
+                        
+                        <table>
+                            <thead>
+                                <tr>
+                                    {% for header in component.obj.column_headers %}
+                                    <th>{{ header.label|default:header|safe }}</th>
+                                    {% endfor %}
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {% for row_cells in component.obj.get_formatted_rows %}
+                                <tr>
+                                    {% for cell in row_cells %}
+                                    <td>{{ cell|safe }}</td>
+                                    {% endfor %}
+                                </tr>
+                                {% endfor %}
+                            </tbody>
+                        </table>
+                    </div>
+                    
+                {% elif component.type == 'image' %}
+                    {% with image=component.obj %}
+                    <div class="image-container" style="{{ image|image_container_style }}">
+                        {% if image.image_reference %}
+                        <img src="{{ image.image_reference.image.url }}" alt="{{ image.caption|default:'Image' }}" style="{{ image|image_tag_style }}">
+                        {% endif %}
+                        {% if image.show_figure_number and image.figure_number %}
+                        <div class="image-figure-number">Figure {{ image.figure_number }}</div>
+                        {% endif %}
+                        {% if image.caption and image.show_caption %}
+                        <div class="image-caption">{{ image.caption }}</div>
+                        {% endif %}
+                    </div>
+                    {% endwith %}
+                    
+                {% elif component.type == 'file' %}
+                    <div class="file-reference">
+                        <div class="file-reference-title">
+                            📎 {{ component.obj.label|default:component.obj.file_reference.name|default:"Attached File" }}
+                        </div>
+                        {% if component.obj.description %}
+                        <div class="file-reference-info">{{ component.obj.description }}</div>
+                        {% endif %}
+                        {% if component.obj.file_reference %}
+                        <div class="file-reference-info">
+                            Size: {{ component.obj.file_reference.file.size|filesizeformat }}
+                        </div>
+                        {% if component.obj.file_reference.file %}
+                        <div class="file-embed">
+                            {% if component.obj.file_reference.file_type == 'pdf' %}
+                                {% with pdf_html=pdf_html_by_file_id|get_item:component.obj.id %}
+                                    {% if pdf_html %}
+                                    <div class="pdf-html">{{ pdf_html|safe }}</div>
+                                    {% else %}
+                                    <embed src="{{ component.obj.file_reference.file.url }}" type="application/pdf" width="100%" height="600px">
+                                    {% endif %}
+                                {% endwith %}
+                            {% else %}
+                            <iframe src="{{ component.obj.file_reference.file.url }}" width="100%" height="600px"></iframe>
+                            {% endif %}
+                        </div>
+                        {% endif %}
+                        {% endif %}
+                    </div>
+                {% endif %}
+            {% endfor %}
+        {% else %}
+            {% for paragraph in paragraphs %}
+                <div class="paragraph">
+                    {{ paragraph|render_paragraph }}
+                </div>
+            {% endfor %}
+            
+            {% for table in tables %}
+                <div class="table-container">
+                    {% if table.title %}
+                    <div class="table-title">{{ table.title }}</div>
+                    {% endif %}
+                    
+                    <table>
+                        <thead>
+                            <tr>
+                                {% for header in table.column_headers %}
+                                <th>{{ header.label|default:header|safe }}</th>
+                                {% endfor %}
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {% for row_cells in table.get_formatted_rows %}
+                            <tr>
+                                {% for cell in row_cells %}
+                                <td>{{ cell|safe }}</td>
+                                {% endfor %}
+                            </tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                </div>
+            {% endfor %}
+            
+            {% for image in images %}
+                <div class="image-container" style="{{ image|image_container_style }}">
+                    {% if image.image_reference %}
+                    <img src="{{ image.image_reference.image.url }}" alt="{{ image.caption|default:'Image' }}" style="{{ image|image_tag_style }}">
+                    {% endif %}
+                    {% if image.show_figure_number and image.figure_number %}
+                    <div class="image-figure-number">Figure {{ image.figure_number }}</div>
+                    {% endif %}
+                    {% if image.caption and image.show_caption %}
+                    <div class="image-caption">{{ image.caption }}</div>
+                    {% endif %}
+                </div>
+            {% endfor %}
+            
+            {% for file in files %}
+                <div class="file-reference">
+                    <div class="file-reference-title">
+                        📎 {{ file.label|default:file.file_reference.name|default:"Attached File" }}
+                    </div>
+                    {% if file.description %}
+                    <div class="file-reference-info">{{ file.description }}</div>
+                    {% endif %}
+                    {% if file.file_reference %}
+                    <div class="file-reference-info">
+                        Size: {{ file.file_reference.file.size|filesizeformat }}
+                    </div>
+                    {% if file.file_reference.file %}
+                    <div class="file-embed">
+                        {% if file.file_reference.file_type == 'pdf' %}
+                            {% with pdf_html=pdf_html_by_file_id|get_item:file.id %}
+                                {% if pdf_html %}
+                                <div class="pdf-html">{{ pdf_html|safe }}</div>
+                                {% else %}
+                                <embed src="{{ file.file_reference.file.url }}" type="application/pdf" width="100%" height="600px">
+                                {% endif %}
+                            {% endwith %}
+                        {% else %}
+                        <iframe src="{{ file.file_reference.file.url }}" width="100%" height="600px"></iframe>
+                        {% endif %}
+                    </div>
+                    {% endif %}
+                    {% endif %}
+                </div>
+            {% endfor %}
+        {% endif %}
+        
+        {% endwith %}
+        {% endwith %}
+        {% endwith %}
+        {% endwith %}
+
+        <!-- Nested Subsections -->
+        {% with section.children.all as children %}
+        {% if children %}
+            {% for child_section in children %}
+                {% include 'documents/partials/section_pdf.html' with section=child_section level=level|add:1 %}
+            {% endfor %}
+        {% endif %}
+        {% endwith %}
+    </div>
+</div>
