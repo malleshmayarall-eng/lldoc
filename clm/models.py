@@ -61,11 +61,61 @@ class Workflow(models.Model):
         help_text='Automatically execute the workflow when new documents are uploaded',
     )
 
+    # Live mode: when True, a periodic Celery Beat task continuously
+    # re-executes this workflow asynchronously (every 60 s by default).
+    # Each execution runs as an independent Celery task (function).
+    is_live = models.BooleanField(
+        default=False,
+        help_text='When True, the workflow auto-executes periodically via Celery Beat',
+    )
+    live_interval = models.PositiveIntegerField(
+        default=60,
+        help_text='Live execution interval in seconds (default 60)',
+    )
+
+    # Compilation status — set by compile_workflow()
+    compilation_status = models.CharField(
+        max_length=20,
+        choices=[
+            ('not_compiled', 'Not Compiled'),
+            ('compiled', 'Compiled'),
+            ('stale', 'Stale (nodes changed since last compile)'),
+            ('failed', 'Compilation Failed'),
+        ],
+        default='not_compiled',
+        help_text='Whether this workflow has been successfully compiled for live execution',
+    )
+    compiled_at = models.DateTimeField(
+        null=True, blank=True,
+        help_text='When the workflow was last successfully compiled',
+    )
+    compilation_errors = models.JSONField(
+        default=list, blank=True,
+        help_text='Errors from the last compilation attempt',
+    )
+
     # Smart execution: hash of all node configs + connections
     # When this changes, all documents need re-execution.
     nodes_config_hash = models.CharField(
         max_length=64, blank=True, default='',
         help_text='SHA-256 of all node configs + connections. Changes = re-execute all.',
+    )
+
+    # ── Persistent execution state (server-maintained for frontend) ────
+    class ExecutionState(models.TextChoices):
+        IDLE = 'idle', 'Idle'
+        COMPILING = 'compiling', 'Compiling DAG'
+        EXECUTING = 'executing', 'Executing nodes'
+        COMPLETED = 'completed', 'Completed'
+        FAILED = 'failed', 'Failed'
+
+    execution_state = models.CharField(
+        max_length=20, choices=ExecutionState.choices, default=ExecutionState.IDLE,
+        help_text='Current execution lifecycle state — maintained by executor, read by frontend.',
+    )
+    current_execution_id = models.UUIDField(
+        null=True, blank=True,
+        help_text='ID of the currently active WorkflowExecution (null when idle).',
     )
 
     created_at = models.DateTimeField(auto_now_add=True)
@@ -209,7 +259,7 @@ class Workflow(models.Model):
 
 class WorkflowNode(models.Model):
     """
-    A node in the workflow graph.  Ten types exist:
+    A node in the workflow graph.  Eleven types exist:
 
     - input:       Starting point — documents are uploaded here
     - rule:        Metadata filter node with conditions
@@ -220,6 +270,7 @@ class WorkflowNode(models.Model):
     - and_gate:    Logic gate — passes docs only when ALL upstream paths deliver them (intersection)
     - scraper:     Scrapes allowed websites for keywords, enriches doc metadata
     - doc_create:  Creates / duplicates editor documents from CLM metadata
+    - sheet:       Reads from or writes to a linked Sheet (input/storage mode)
     - output:      Terminal — shows the filtered document list
 
     Note: Regular nodes with multiple inputs already do a union (OR) of upstream
@@ -238,6 +289,7 @@ class WorkflowNode(models.Model):
         SCRAPER = 'scraper', 'Scraper'
         DOC_CREATE = 'doc_create', 'Document Creator'
         INFERENCE = 'inference', 'Inference'
+        SHEET = 'sheet', 'Sheet'
         OUTPUT = 'output', 'Output'
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
@@ -265,6 +317,29 @@ class WorkflowNode(models.Model):
     # Execution cache: {"count": N, "document_ids": ["uuid", ...]}
     last_result = models.JSONField(default=dict, blank=True)
 
+    # Per-node document state (primarily for input nodes).
+    # Tracks which documents belong to this node, their status, and
+    # readiness so the executor can read directly from node state
+    # rather than querying by source tags.
+    #
+    # Schema for input nodes:
+    # {
+    #   "document_ids": ["uuid", ...],         // all doc IDs owned by this node
+    #   "ready_ids":    ["uuid", ...],         // docs ready for execution (completed extraction)
+    #   "pending_ids":  ["uuid", ...],         // docs still extracting / pending
+    #   "failed_ids":   ["uuid", ...],         // docs that failed extraction
+    #   "total_count":  N,
+    #   "ready_count":  N,
+    #   "pending_count": N,
+    #   "failed_count": N,
+    #   "last_upload_at": "ISO datetime",
+    #   "last_refresh_at": "ISO datetime",
+    # }
+    document_state = models.JSONField(
+        default=dict, blank=True,
+        help_text='Per-node document ownership & readiness state',
+    )
+
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -273,6 +348,88 @@ class WorkflowNode(models.Model):
 
     def __str__(self):
         return f"{self.label or self.get_node_type_display()} ({self.workflow.name})"
+
+    def sync_document_state(self):
+        """
+        Rebuild document_state from the actual WorkflowDocument rows
+        that reference this node via input_node FK.  Call this after
+        uploads, deletes, or re-extractions to keep the JSON in sync.
+
+        For email_inbox nodes, also rebuilds the ``email_state`` sub-dict
+        which caches every seen RFC Message-ID so that subsequent IMAP
+        polls can skip already-processed emails without a DB query.
+
+        Uses ``refresh_from_db`` to get the latest persisted state before
+        merging, and wraps the write in ``transaction.atomic`` to prevent
+        concurrent callers from overwriting each other's email_state or
+        cumulative counters.
+        """
+        from django.db import transaction
+        from django.utils import timezone as _tz
+
+        is_email = (
+            self.node_type == 'input'
+            and (self.config or {}).get('source_type') == 'email_inbox'
+        )
+
+        if is_email:
+            docs = WorkflowDocument.objects.filter(
+                input_node=self,
+            ).values_list('id', 'extraction_status', 'email_message_id')
+        else:
+            docs = WorkflowDocument.objects.filter(
+                input_node=self,
+            ).values_list('id', 'extraction_status')
+
+        all_ids, ready, pending, failed = [], [], [], []
+        seen_message_ids = set()
+
+        for row in docs:
+            doc_id, ext_status = row[0], row[1]
+            sid = str(doc_id)
+            all_ids.append(sid)
+            if ext_status == 'completed':
+                ready.append(sid)
+            elif ext_status in ('pending', 'processing'):
+                pending.append(sid)
+            elif ext_status == 'failed':
+                failed.append(sid)
+            if is_email and len(row) > 2 and row[2]:
+                seen_message_ids.add(row[2])
+
+        with transaction.atomic():
+            # Re-read the latest persisted state inside the atomic block
+            # so we don't clobber concurrent writes (email polls, uploads).
+            self.refresh_from_db(fields=['document_state'])
+            prev = self.document_state or {}
+
+            self.document_state = {
+                'document_ids': all_ids,
+                'ready_ids': ready,
+                'pending_ids': pending,
+                'failed_ids': failed,
+                'total_count': len(all_ids),
+                'ready_count': len(ready),
+                'pending_count': len(pending),
+                'failed_count': len(failed),
+                'last_upload_at': prev.get('last_upload_at', ''),
+                'last_refresh_at': prev.get('last_refresh_at', ''),
+            }
+
+            if is_email:
+                prev_email = prev.get('email_state', {})
+                self.document_state['email_state'] = {
+                    'seen_message_ids': sorted(seen_message_ids),
+                    'seen_count': len(seen_message_ids),
+                    'total_emails_ingested': len(all_ids),
+                    'last_checked_at': prev_email.get('last_checked_at', ''),
+                    'last_found': prev_email.get('last_found', 0),
+                    'last_skipped': prev_email.get('last_skipped', 0),
+                    'cumulative_found': prev_email.get('cumulative_found', 0),
+                    'cumulative_skipped': prev_email.get('cumulative_skipped', 0),
+                }
+
+            self.save(update_fields=['document_state'])
 
 
 # ---------------------------------------------------------------------------
@@ -967,6 +1124,7 @@ class WorkflowExecution(models.Model):
     """
 
     class Status(models.TextChoices):
+        QUEUED = 'queued', 'Queued'
         RUNNING = 'running', 'Running'
         COMPLETED = 'completed', 'Completed'
         PARTIAL = 'partial', 'Partial'
@@ -1003,6 +1161,15 @@ class WorkflowExecution(models.Model):
     output_document_ids = models.JSONField(
         default=list, blank=True,
         help_text='Final output document UUIDs after all filtering',
+    )
+
+    # Trigger context — event payload that initiated this execution.
+    # For sheet-triggered executions this contains changed_row_ids,
+    # changed_row_orders, etc. so the executor can process only the
+    # rows that actually changed instead of re-reading every row.
+    trigger_context = models.JSONField(
+        default=dict, blank=True,
+        help_text='Event payload that triggered this execution (changed rows, source info, etc.)',
     )
 
     # Full execution result (the entire dict from execute_workflow)
@@ -1544,3 +1711,611 @@ class DocumentCreationResult(models.Model):
     def __str__(self):
         doc_title = self.created_document.title if self.created_document else '(none)'
         return f"{self.source_clm_document.title} → {doc_title} [{self.status}]"
+
+
+# ---------------------------------------------------------------------------
+# InputNodeHistory — tracks every input operation on an input node
+# ---------------------------------------------------------------------------
+
+class InputNodeHistory(models.Model):
+    """
+    Records each input operation (upload batch, folder import, sheet import,
+    bulk upload, DMS import, OCR re-run, etc.) performed on an input node.
+
+    The frontend uses this to:
+      - Show "Previous Inputs" panel on input nodes
+      - Allow re-running / refreshing specific input batches
+      - Track which documents came from which operation
+
+    source_type values:
+      • upload          — manual file upload (one or more files / ZIP)
+      • folder_upload   — import from DriveFolder (fileshare app)
+      • dms_import      — import from DMS documents
+      • bulk_upload     — bulk file upload (large batch)
+      • sheets          — import from a Sheet (sheets app)
+      • email_inbox     — auto-ingested from email
+      • google_drive    — fetched from Google Drive
+      • dropbox         — fetched from Dropbox
+      • onedrive        — fetched from OneDrive
+      • s3              — fetched from S3
+      • ftp             — fetched from FTP/SFTP
+      • url_scrape      — fetched from URLs
+      • table           — table/spreadsheet file parsed into row-documents
+
+    Only 'upload' and 'bulk_upload' types support "Manage Already Uploaded"
+    (re-OCR, re-extract). Folder/sheets/cloud sources support "Refresh"
+    (re-fetch from source).
+    """
+
+    class SourceType(models.TextChoices):
+        UPLOAD = 'upload', 'Upload'
+        FOLDER_UPLOAD = 'folder_upload', 'Folder Upload'
+        DMS_IMPORT = 'dms_import', 'DMS Import'
+        BULK_UPLOAD = 'bulk_upload', 'Bulk Upload'
+        SHEETS = 'sheets', 'Sheets Import'
+        EMAIL_INBOX = 'email_inbox', 'Email Inbox'
+        GOOGLE_DRIVE = 'google_drive', 'Google Drive'
+        DROPBOX = 'dropbox', 'Dropbox'
+        ONEDRIVE = 'onedrive', 'OneDrive'
+        S3 = 's3', 'S3'
+        FTP = 'ftp', 'FTP'
+        URL_SCRAPE = 'url_scrape', 'URL Scrape'
+        TABLE = 'table', 'Table/Spreadsheet'
+
+    class Status(models.TextChoices):
+        PENDING = 'pending', 'Pending'
+        PROCESSING = 'processing', 'Processing'
+        COMPLETED = 'completed', 'Completed'
+        PARTIAL = 'partial', 'Partial (some failed)'
+        FAILED = 'failed', 'Failed'
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    workflow = models.ForeignKey(
+        Workflow, on_delete=models.CASCADE, related_name='input_histories',
+    )
+    node = models.ForeignKey(
+        WorkflowNode, on_delete=models.CASCADE, related_name='input_histories',
+    )
+    organization = models.ForeignKey(
+        Organization, on_delete=models.CASCADE, related_name='clm_input_histories',
+    )
+
+    source_type = models.CharField(
+        max_length=20, choices=SourceType.choices, default=SourceType.UPLOAD,
+    )
+    status = models.CharField(
+        max_length=20, choices=Status.choices, default=Status.COMPLETED,
+    )
+
+    # Summary stats
+    document_count = models.PositiveIntegerField(default=0)
+    skipped_count = models.PositiveIntegerField(default=0)
+    failed_count = models.PositiveIntegerField(default=0)
+
+    # Documents created/imported in this operation
+    document_ids = models.JSONField(
+        default=list, blank=True,
+        help_text='List of WorkflowDocument UUIDs created in this input operation',
+    )
+
+    # Source reference — what was the source of this import?
+    source_reference = models.JSONField(
+        default=dict, blank=True,
+        help_text='Source details: folder_id, sheet_id, file_names, email_subject, etc.',
+    )
+
+    # Extra metadata about the operation
+    details = models.JSONField(
+        default=dict, blank=True,
+        help_text='Extra details: duplicates_skipped, zip_expanded, errors, etc.',
+    )
+
+    triggered_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL,
+        null=True, blank=True,
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['workflow', 'node']),
+            models.Index(fields=['node', 'source_type']),
+            models.Index(fields=['organization', '-created_at']),
+        ]
+
+    def __str__(self):
+        return (
+            f"{self.get_source_type_display()} → {self.node.label or 'Input'} "
+            f"({self.document_count} docs, {self.status})"
+        )
+
+    @property
+    def supports_refresh(self):
+        """Whether this source type supports re-fetching from source."""
+        return self.source_type in (
+            'folder_upload', 'dms_import', 'sheets', 'email_inbox',
+            'google_drive', 'dropbox', 'onedrive', 's3', 'ftp',
+            'url_scrape', 'table',
+        )
+
+    @property
+    def supports_manage_uploaded(self):
+        """Whether this source type supports re-OCR / re-extract on existing docs."""
+        return self.source_type in ('upload', 'bulk_upload')
+
+
+# ---------------------------------------------------------------------------
+# SheetNodeQuery — tracks row-level queries for sheet nodes (with cache)
+# ---------------------------------------------------------------------------
+
+class SheetNodeQuery(models.Model):
+    """
+    Tracks every row read/written by a sheet workflow node.
+
+    Each workflow execution that touches a sheet node records a query
+    per row processed.  This enables:
+      - Usage metering: row operations ≈ "queries"
+      - Cache-based dedup: if the same data is written to the same row
+        with matching content_hash, the write is skipped (cache hit).
+      - Audit trail: who wrote what, when, from which execution.
+
+    Cache system mirrors AIPromptCache:
+      - content_hash = SHA-256 of the row payload being written
+      - If a query with the same (node, sheet, row_order, content_hash)
+        exists and status=completed, the write is skipped → cache hit.
+    """
+
+    class Operation(models.TextChoices):
+        READ = 'read', 'Read'
+        WRITE = 'write', 'Write'
+        APPEND = 'append', 'Append'
+
+    class Status(models.TextChoices):
+        PENDING = 'pending', 'Pending'
+        COMPLETED = 'completed', 'Completed'
+        CACHED = 'cached', 'Cached (skipped — duplicate)'
+        FAILED = 'failed', 'Failed'
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    workflow = models.ForeignKey(
+        Workflow, on_delete=models.CASCADE, related_name='sheet_queries',
+    )
+    node = models.ForeignKey(
+        WorkflowNode, on_delete=models.CASCADE, related_name='sheet_queries',
+    )
+    execution = models.ForeignKey(
+        WorkflowExecution, on_delete=models.SET_NULL,
+        null=True, blank=True, related_name='sheet_queries',
+    )
+    sheet = models.ForeignKey(
+        'sheets.Sheet', on_delete=models.CASCADE, related_name='node_queries',
+    )
+
+    operation = models.CharField(
+        max_length=10, choices=Operation.choices, default=Operation.WRITE,
+    )
+    status = models.CharField(
+        max_length=10, choices=Status.choices, default=Status.PENDING,
+    )
+
+    # Which row was touched (null for append — new row created)
+    row_order = models.IntegerField(
+        null=True, blank=True,
+        help_text='Row order in the sheet (null for newly appended rows)',
+    )
+    row_id = models.UUIDField(
+        null=True, blank=True,
+        help_text='SheetRow UUID that was read/written',
+    )
+
+    # Source document (if write originated from a workflow document)
+    source_document = models.ForeignKey(
+        WorkflowDocument, on_delete=models.SET_NULL,
+        null=True, blank=True, related_name='sheet_queries',
+    )
+
+    # Content hash for cache dedup
+    content_hash = models.CharField(
+        max_length=64, blank=True, default='',
+        db_index=True,
+        help_text='SHA-256 of the row payload — used for write dedup cache',
+    )
+
+    # The actual data read or written
+    row_data = models.JSONField(
+        default=dict, blank=True,
+        help_text='Cell values: {"col_key": "value", ...}',
+    )
+
+    # Cache stats
+    hit_count = models.PositiveIntegerField(
+        default=0,
+        help_text='Number of times this exact write was deduplicated',
+    )
+    last_hit_at = models.DateTimeField(null=True, blank=True)
+
+    error_message = models.TextField(blank=True, default='')
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['node', 'sheet', 'content_hash']),
+            models.Index(fields=['workflow', 'execution']),
+            models.Index(fields=['sheet', 'operation']),
+        ]
+
+    def __str__(self):
+        return (
+            f"SheetQuery({self.operation}) row={self.row_order} "
+            f"sheet={self.sheet.id} [{self.status}]"
+        )
+
+
+# ---------------------------------------------------------------------------
+# EventSubscription — links input nodes to event sources for live workflows
+# ---------------------------------------------------------------------------
+
+class EventSubscription(models.Model):
+    """
+    An event subscription links a workflow's input node to an external
+    event source (sheet update, email, webhook, file upload, cloud sync).
+
+    When a workflow is compiled/goes live, the compiler scans all input
+    nodes and creates EventSubscription rows.  The event dispatcher
+    (Celery task) uses these subscriptions to route incoming events to
+    the correct workflow(s) for execution.
+
+    For time-based sources (email, cloud), the subscription also stores
+    the polling interval and last poll time.
+    """
+
+    class SourceType(models.TextChoices):
+        SHEET = 'sheet', 'Sheet Update'
+        EMAIL = 'email', 'Email Inbox'
+        WEBHOOK = 'webhook', 'Webhook'
+        UPLOAD = 'upload', 'File Upload'
+        GOOGLE_DRIVE = 'google_drive', 'Google Drive'
+        DROPBOX = 'dropbox', 'Dropbox'
+        ONEDRIVE = 'onedrive', 'OneDrive'
+        S3 = 's3', 'AWS S3'
+        FTP = 'ftp', 'FTP/SFTP'
+        URL_SCRAPE = 'url_scrape', 'URL Scrape'
+        FOLDER = 'folder', 'Folder Watch'
+        DMS = 'dms', 'DMS Import'
+
+    class Status(models.TextChoices):
+        ACTIVE = 'active', 'Active'
+        PAUSED = 'paused', 'Paused'
+        ERROR = 'error', 'Error'
+        DISABLED = 'disabled', 'Disabled'
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    workflow = models.ForeignKey(
+        Workflow, on_delete=models.CASCADE, related_name='event_subscriptions',
+    )
+    node = models.ForeignKey(
+        WorkflowNode, on_delete=models.CASCADE, related_name='event_subscriptions',
+    )
+    organization = models.ForeignKey(
+        Organization, on_delete=models.CASCADE, related_name='clm_event_subscriptions',
+    )
+
+    source_type = models.CharField(
+        max_length=20, choices=SourceType.choices,
+    )
+    status = models.CharField(
+        max_length=20, choices=Status.choices, default=Status.ACTIVE,
+    )
+
+    # Reference to the source object (sheet_id, folder_id, etc.)
+    source_id = models.CharField(
+        max_length=255, blank=True, default='',
+        db_index=True,
+        help_text='UUID or identifier of the source (sheet_id, folder_id, etc.)',
+    )
+
+    # Webhook-specific: unique token for inbound webhook URL
+    webhook_token = models.UUIDField(
+        null=True, blank=True, unique=True,
+        help_text='Unique token for webhook URL: /api/clm/webhooks/<token>/',
+    )
+    webhook_secret = models.CharField(
+        max_length=255, blank=True, default='',
+        help_text='HMAC secret for verifying webhook payloads',
+    )
+
+    # Polling configuration (for time-based sources)
+    poll_interval = models.PositiveIntegerField(
+        default=60,
+        help_text='Polling interval in seconds (for email, cloud, etc.)',
+    )
+    last_polled_at = models.DateTimeField(
+        null=True, blank=True,
+        help_text='Last time this subscription was polled/checked',
+    )
+    next_poll_at = models.DateTimeField(
+        null=True, blank=True,
+        help_text='Scheduled next poll time (for dispatcher efficiency)',
+    )
+
+    # Error tracking
+    consecutive_errors = models.PositiveIntegerField(default=0)
+    last_error = models.TextField(blank=True, default='')
+    last_error_at = models.DateTimeField(null=True, blank=True)
+
+    # Stats
+    total_events_received = models.PositiveIntegerField(default=0)
+    total_executions_triggered = models.PositiveIntegerField(default=0)
+
+    # Source configuration snapshot (from node.config at compile time)
+    config_snapshot = models.JSONField(
+        default=dict, blank=True,
+        help_text='Snapshot of relevant node.config at compilation time',
+    )
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['source_type', 'source_id', 'status']),
+            models.Index(fields=['workflow', 'status']),
+            models.Index(fields=['webhook_token']),
+            models.Index(fields=['status', 'next_poll_at']),
+        ]
+        unique_together = [('workflow', 'node', 'source_type')]
+
+    def __str__(self):
+        return (
+            f"EventSub({self.source_type}) node={self.node.label or str(self.node.pk)} "
+            f"→ {self.workflow.name} [{self.status}]"
+        )
+
+
+# ---------------------------------------------------------------------------
+# WebhookEvent — records every inbound webhook/event received
+# ---------------------------------------------------------------------------
+
+class WebhookEvent(models.Model):
+    """
+    Records every inbound event (webhook call, sheet update, email arrival,
+    scheduled poll result, etc.).  Provides a complete audit trail and
+    enables replay/retry of events.
+    """
+
+    class Status(models.TextChoices):
+        RECEIVED = 'received', 'Received'
+        PROCESSING = 'processing', 'Processing'
+        PROCESSED = 'processed', 'Processed'
+        FAILED = 'failed', 'Failed'
+        IGNORED = 'ignored', 'Ignored'
+        RETRYING = 'retrying', 'Retrying'
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    subscription = models.ForeignKey(
+        EventSubscription, on_delete=models.CASCADE, related_name='events',
+        null=True, blank=True,
+        help_text='The subscription that received this event (null for unmatched webhooks)',
+    )
+    workflow = models.ForeignKey(
+        Workflow, on_delete=models.CASCADE, related_name='webhook_events',
+        null=True, blank=True,
+    )
+    organization = models.ForeignKey(
+        Organization, on_delete=models.CASCADE, related_name='clm_webhook_events',
+        null=True, blank=True,
+    )
+
+    event_type = models.CharField(
+        max_length=50,
+        help_text='Event type: sheet_updated, email_received, webhook_call, poll_result, etc.',
+    )
+    status = models.CharField(
+        max_length=20, choices=Status.choices, default=Status.RECEIVED,
+    )
+
+    # Payload
+    payload = models.JSONField(
+        default=dict, blank=True,
+        help_text='Raw event payload (webhook body, sheet changes, email metadata)',
+    )
+    headers = models.JSONField(
+        default=dict, blank=True,
+        help_text='HTTP headers (for webhooks)',
+    )
+    source_ip = models.GenericIPAddressField(null=True, blank=True)
+
+    # Processing result
+    result = models.JSONField(
+        default=dict, blank=True,
+        help_text='Processing result: execution_id, documents_created, etc.',
+    )
+    error_message = models.TextField(blank=True, default='')
+
+    # Execution link
+    execution = models.ForeignKey(
+        'WorkflowExecution', on_delete=models.SET_NULL,
+        null=True, blank=True, related_name='source_events',
+    )
+
+    # Retry tracking
+    retry_count = models.PositiveIntegerField(default=0)
+    max_retries = models.PositiveIntegerField(default=3)
+
+    # Dedup
+    idempotency_key = models.CharField(
+        max_length=255, blank=True, default='', db_index=True,
+        help_text='For dedup — e.g. Message-ID for emails, delivery_id for webhooks',
+    )
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    processed_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['event_type', 'status']),
+            models.Index(fields=['workflow', 'status']),
+            models.Index(fields=['subscription', '-created_at']),
+            models.Index(fields=['idempotency_key']),
+        ]
+
+    def __str__(self):
+        return f"Event({self.event_type}) [{self.status}] @ {self.created_at}"
+
+
+# ---------------------------------------------------------------------------
+# NodeExecutionLog — per-node per-execution detailed log
+# ---------------------------------------------------------------------------
+
+class NodeExecutionLog(models.Model):
+    """
+    Tracks every execution of every node with full input/output data,
+    timing, errors, and status.  One row per (execution, node).
+
+    This is more granular than WorkflowExecution.node_summary — it stores
+    the actual document IDs flowing in/out, execution duration, error
+    traces, and retry state.
+    """
+
+    class Status(models.TextChoices):
+        PENDING = 'pending', 'Pending'
+        RUNNING = 'running', 'Running'
+        COMPLETED = 'completed', 'Completed'
+        FAILED = 'failed', 'Failed'
+        SKIPPED = 'skipped', 'Skipped'
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    execution = models.ForeignKey(
+        'WorkflowExecution', on_delete=models.CASCADE, related_name='node_logs',
+    )
+    workflow = models.ForeignKey(
+        Workflow, on_delete=models.CASCADE, related_name='node_execution_logs',
+    )
+    node = models.ForeignKey(
+        WorkflowNode, on_delete=models.CASCADE, related_name='execution_logs',
+    )
+
+    status = models.CharField(
+        max_length=20, choices=Status.choices, default=Status.PENDING,
+    )
+
+    # Input/output
+    input_document_ids = models.JSONField(
+        default=list, blank=True,
+        help_text='Document IDs that flowed into this node',
+    )
+    output_document_ids = models.JSONField(
+        default=list, blank=True,
+        help_text='Document IDs that flowed out of this node',
+    )
+    input_count = models.PositiveIntegerField(default=0)
+    output_count = models.PositiveIntegerField(default=0)
+
+    # Execution details
+    result_data = models.JSONField(
+        default=dict, blank=True,
+        help_text='Full node execution result (type-specific: action, AI, etc.)',
+    )
+    error_message = models.TextField(blank=True, default='')
+    error_traceback = models.TextField(blank=True, default='')
+
+    # Timing
+    started_at = models.DateTimeField(null=True, blank=True)
+    completed_at = models.DateTimeField(null=True, blank=True)
+    duration_ms = models.PositiveIntegerField(null=True, blank=True)
+
+    # Level in the DAG (for ordering in UI)
+    dag_level = models.PositiveIntegerField(default=0)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['dag_level', 'started_at']
+        indexes = [
+            models.Index(fields=['execution', 'node']),
+            models.Index(fields=['workflow', 'node']),
+            models.Index(fields=['execution', 'dag_level']),
+            models.Index(fields=['status']),
+        ]
+        unique_together = [('execution', 'node')]
+
+    def __str__(self):
+        return (
+            f"NodeLog({self.node.label or self.node.node_type}) "
+            f"[{self.status}] exec={str(self.execution.pk)}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# WorkflowCompilation — tracks DAG compilation / go-live results
+# ---------------------------------------------------------------------------
+
+class WorkflowCompilation(models.Model):
+    """
+    Records every compilation attempt of a workflow.
+
+    Compilation validates the DAG, checks input node configurations,
+    creates EventSubscriptions, and marks the workflow as live-ready.
+    Stores errors/warnings so the frontend can display them.
+    """
+
+    class Status(models.TextChoices):
+        SUCCESS = 'success', 'Success'
+        WARNING = 'warning', 'Success with Warnings'
+        FAILED = 'failed', 'Failed'
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    workflow = models.ForeignKey(
+        Workflow, on_delete=models.CASCADE, related_name='compilations',
+    )
+
+    status = models.CharField(
+        max_length=20, choices=Status.choices,
+    )
+
+    # DAG validation
+    node_count = models.PositiveIntegerField(default=0)
+    connection_count = models.PositiveIntegerField(default=0)
+    has_cycle = models.BooleanField(default=False)
+    has_input_node = models.BooleanField(default=True)
+    has_output_node = models.BooleanField(default=True)
+
+    # Subscriptions created
+    subscriptions_created = models.PositiveIntegerField(default=0)
+    subscription_details = models.JSONField(
+        default=list, blank=True,
+        help_text='[{node_id, source_type, source_id, poll_interval}, ...]',
+    )
+
+    # Errors & warnings
+    errors = models.JSONField(
+        default=list, blank=True,
+        help_text='[{node_id, message, severity}, ...]',
+    )
+    warnings = models.JSONField(
+        default=list, blank=True,
+        help_text='[{node_id, message}, ...]',
+    )
+
+    # Config hash at compile time
+    config_hash = models.CharField(max_length=64, blank=True, default='')
+
+    compiled_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL,
+        null=True, blank=True,
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['workflow', '-created_at']),
+        ]
+
+    def __str__(self):
+        return f"Compilation({self.workflow.name}) [{self.status}] @ {self.created_at}"

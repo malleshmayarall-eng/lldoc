@@ -66,6 +66,7 @@ INSTALLED_APPS = [
     'clm',  # Contract Lifecycle Management
     'viewer',  # Document viewer & commentator for external users
     'communications',  # Centralized communications, alerts & email system
+    'sheets',  # Spreadsheet / data tables app
 ]
 
 MIDDLEWARE = [
@@ -274,6 +275,14 @@ CELERY_BEAT_SCHEDULE = {
     'email-inbox-dispatcher': {
         'task': 'clm.tasks.dispatch_email_checks',
         'schedule': 30.0,  # every 30 seconds, lightweight dispatcher
+    },
+    'live-workflow-dispatcher': {
+        'task': 'clm.tasks.dispatch_live_workflows',
+        'schedule': 60.0,  # every 60 seconds, dispatches async exec for live workflows
+    },
+    'event-subscription-dispatcher': {
+        'task': 'clm.tasks.dispatch_event_subscriptions',
+        'schedule': 30.0,  # every 30 seconds, polls time-based subscriptions (email, cloud, etc.)
     },
 }
 

@@ -52,3 +52,5 @@ celerybeat.pid
 
 # OS
 Thumbs.db
+
+./frontend/node_modules/

@@ -10,13 +10,19 @@ from .models import (
     ActionPlugin,
     DerivedField,
     DocumentCreationResult,
+    EventSubscription,
     ExtractedField,
+    InputNodeHistory,
     ListenerEvent,
     NodeConnection,
+    NodeExecutionLog,
+    SheetNodeQuery,
     ValidatorUser,
     ValidationDecision,
+    WebhookEvent,
     Workflow,
     WorkflowChatMessage,
+    WorkflowCompilation,
     WorkflowDocument,
     WorkflowNode,
     WorkflowUploadLink,
@@ -33,9 +39,10 @@ class WorkflowNodeSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'workflow', 'node_type', 'label',
             'position_x', 'position_y', 'config',
-            'last_result', 'created_at', 'updated_at',
+            'last_result', 'document_state',
+            'created_at', 'updated_at',
         ]
-        read_only_fields = ['id', 'last_result', 'created_at', 'updated_at']
+        read_only_fields = ['id', 'last_result', 'document_state', 'created_at', 'updated_at']
 
     def validate_config(self, value):
         """Validate rule node and action node config structure."""
@@ -106,6 +113,24 @@ class WorkflowNodeSerializer(serializers.ModelSerializer):
                 raise serializers.ValidationError(
                     "sections list is required for structured mode."
                 )
+        elif node_type == 'sheet':
+            if not isinstance(value, dict):
+                raise serializers.ValidationError("Config must be a JSON object.")
+            valid_modes = {'input', 'storage'}
+            mode = value.get('mode', 'storage')
+            if mode not in valid_modes:
+                raise serializers.ValidationError(
+                    f"mode must be one of {valid_modes}."
+                )
+            if mode == 'storage':
+                valid_write_modes = {'append', 'overwrite'}
+                wm = value.get('write_mode', 'append')
+                if wm not in valid_write_modes:
+                    raise serializers.ValidationError(
+                        f"write_mode must be one of {valid_write_modes}."
+                    )
+            # sheet_id validated at execution time — user picks a sheet
+            # from the panel after creating the node.
         return value
 
 
@@ -142,13 +167,15 @@ class WorkflowSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'name', 'description', 'is_active',
             'extraction_template', 'canvas_state',
-            'auto_execute_on_upload',
+            'auto_execute_on_upload', 'is_live', 'live_interval',
+            'execution_state', 'current_execution_id',
             'nodes', 'connections', 'document_count',
             'derived_field_count',
             'last_executed_at', 'created_at', 'updated_at',
         ]
         read_only_fields = [
             'id', 'extraction_template', 'last_executed_at',
+            'execution_state', 'current_execution_id',
             'created_at', 'updated_at',
         ]
 
@@ -168,7 +195,8 @@ class WorkflowListSerializer(serializers.ModelSerializer):
         model = Workflow
         fields = [
             'id', 'name', 'description', 'is_active',
-            'auto_execute_on_upload',
+            'auto_execute_on_upload', 'is_live', 'live_interval',
+            'execution_state', 'current_execution_id',
             'node_count', 'document_count',
             'last_executed_at', 'created_at', 'updated_at',
         ]
@@ -822,3 +850,175 @@ class DocumentCreationResultSerializer(serializers.ModelSerializer):
 
     def get_created_document_title(self, obj):
         return obj.created_document.title if obj.created_document else None
+
+
+# ---------------------------------------------------------------------------
+# InputNodeHistory — tracks previous input operations per node
+# ---------------------------------------------------------------------------
+
+class InputNodeHistorySerializer(serializers.ModelSerializer):
+    triggered_by_name = serializers.SerializerMethodField()
+    supports_refresh = serializers.BooleanField(read_only=True)
+    supports_manage_uploaded = serializers.BooleanField(read_only=True)
+
+    class Meta:
+        model = InputNodeHistory
+        fields = [
+            'id', 'workflow', 'node', 'organization',
+            'source_type', 'status',
+            'document_count', 'skipped_count', 'failed_count',
+            'document_ids', 'source_reference', 'details',
+            'supports_refresh', 'supports_manage_uploaded',
+            'triggered_by', 'triggered_by_name',
+            'created_at', 'updated_at',
+        ]
+        read_only_fields = fields
+
+    def get_triggered_by_name(self, obj):
+        if obj.triggered_by:
+            return obj.triggered_by.get_full_name() or obj.triggered_by.username
+        return None
+
+
+# ---------------------------------------------------------------------------
+# SheetNodeQuery — tracks sheet node row-level queries with cache
+# ---------------------------------------------------------------------------
+
+class SheetNodeQuerySerializer(serializers.ModelSerializer):
+    sheet_title = serializers.SerializerMethodField()
+    source_document_title = serializers.SerializerMethodField()
+
+    class Meta:
+        model = SheetNodeQuery
+        fields = [
+            'id', 'workflow', 'node', 'execution',
+            'sheet', 'sheet_title',
+            'operation', 'status',
+            'row_order', 'row_id',
+            'source_document', 'source_document_title',
+            'content_hash', 'row_data',
+            'hit_count', 'last_hit_at',
+            'error_message', 'created_at',
+        ]
+        read_only_fields = fields
+
+    def get_sheet_title(self, obj):
+        return obj.sheet.title if obj.sheet else None
+
+    def get_source_document_title(self, obj):
+        return obj.source_document.title if obj.source_document else None
+
+
+# ---------------------------------------------------------------------------
+# EventSubscription — event source subscriptions for live workflows
+# ---------------------------------------------------------------------------
+
+class EventSubscriptionSerializer(serializers.ModelSerializer):
+    node_label = serializers.SerializerMethodField()
+    node_type = serializers.SerializerMethodField()
+
+    class Meta:
+        model = EventSubscription
+        fields = [
+            'id', 'workflow', 'node', 'node_label', 'node_type',
+            'source_type', 'status', 'source_id',
+            'webhook_token', 'poll_interval',
+            'last_polled_at', 'next_poll_at',
+            'consecutive_errors', 'last_error', 'last_error_at',
+            'total_events_received', 'total_executions_triggered',
+            'config_snapshot',
+            'created_at', 'updated_at',
+        ]
+        read_only_fields = fields
+
+    def get_node_label(self, obj):
+        return obj.node.label or obj.node.node_type if obj.node else None
+
+    def get_node_type(self, obj):
+        return obj.node.node_type if obj.node else None
+
+
+# ---------------------------------------------------------------------------
+# WebhookEvent — inbound event records
+# ---------------------------------------------------------------------------
+
+class WebhookEventSerializer(serializers.ModelSerializer):
+    subscription_source_type = serializers.SerializerMethodField()
+    execution_status = serializers.SerializerMethodField()
+
+    class Meta:
+        model = WebhookEvent
+        fields = [
+            'id', 'subscription', 'subscription_source_type',
+            'workflow', 'event_type', 'status',
+            'payload', 'headers', 'source_ip',
+            'result', 'error_message',
+            'execution', 'execution_status',
+            'retry_count', 'max_retries',
+            'idempotency_key',
+            'created_at', 'processed_at',
+        ]
+        read_only_fields = fields
+
+    def get_subscription_source_type(self, obj):
+        return obj.subscription.source_type if obj.subscription else None
+
+    def get_execution_status(self, obj):
+        return obj.execution.status if obj.execution else None
+
+
+# ---------------------------------------------------------------------------
+# NodeExecutionLog — per-node per-execution detailed log
+# ---------------------------------------------------------------------------
+
+class NodeExecutionLogSerializer(serializers.ModelSerializer):
+    node_label = serializers.SerializerMethodField()
+    node_type = serializers.SerializerMethodField()
+
+    class Meta:
+        model = NodeExecutionLog
+        fields = [
+            'id', 'execution', 'workflow', 'node',
+            'node_label', 'node_type',
+            'status',
+            'input_document_ids', 'output_document_ids',
+            'input_count', 'output_count',
+            'result_data', 'error_message', 'error_traceback',
+            'started_at', 'completed_at', 'duration_ms',
+            'dag_level',
+            'created_at',
+        ]
+        read_only_fields = fields
+
+    def get_node_label(self, obj):
+        return obj.node.label or obj.node.node_type if obj.node else None
+
+    def get_node_type(self, obj):
+        return obj.node.node_type if obj.node else None
+
+
+# ---------------------------------------------------------------------------
+# WorkflowCompilation — compilation history records
+# ---------------------------------------------------------------------------
+
+class WorkflowCompilationSerializer(serializers.ModelSerializer):
+    compiled_by_name = serializers.SerializerMethodField()
+
+    class Meta:
+        model = WorkflowCompilation
+        fields = [
+            'id', 'workflow', 'status',
+            'node_count', 'connection_count',
+            'has_cycle', 'has_input_node', 'has_output_node',
+            'subscriptions_created', 'subscription_details',
+            'errors', 'warnings',
+            'config_hash',
+            'compiled_by', 'compiled_by_name',
+            'created_at',
+        ]
+        read_only_fields = fields
+
+    def get_compiled_by_name(self, obj):
+        if obj.compiled_by:
+            return obj.compiled_by.get_full_name() or obj.compiled_by.username
+        return None

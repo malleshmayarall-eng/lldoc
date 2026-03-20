@@ -1,8 +1,8 @@
 """
-Workflow Executor — 10-Node System
+Workflow Executor — 11-Node System
 ===================================
 Executes a workflow DAG:
-  Input → Rule(s) → Listener(s) → Validator(s) → Action(s) → AI(s) → Scraper(s) → AND Gate(s) → Doc Creator(s) → Output
+  Input → Rule(s) → Listener(s) → Validator(s) → Action(s) → AI(s) → Scraper(s) → AND Gate(s) → Doc Creator(s) → Sheet(s) → Output
 
 Node types:
   • input      — supplies all (or single-doc) workflow documents
@@ -14,6 +14,7 @@ Node types:
   • scraper    — scrapes allowed websites for keywords, enriches doc metadata
   • and_gate   — logic gate: passes docs present in ALL upstream paths (intersection)
   • doc_create — creates/duplicates editor documents from CLM metadata
+  • sheet      — reads from or writes to a linked Sheet (input/storage mode)
   • output     — collects the final filtered list
 
 Regular nodes with multiple inputs automatically merge all upstream docs (union),
@@ -36,6 +37,13 @@ from django.utils import timezone
 from .models import Workflow, WorkflowDocument, WorkflowExecution, WorkflowNode
 
 logger = logging.getLogger(__name__)
+
+# Known file extensions for type detection (shared with views.py upload logic)
+_KNOWN_FILE_TYPES = frozenset({
+    'pdf', 'docx', 'doc', 'txt', 'csv', 'json', 'xml', 'html', 'md',
+    'xlsx', 'xls', 'png', 'jpg', 'jpeg', 'gif', 'bmp', 'tiff', 'tif',
+    'webp', 'svg', 'rtf', 'odt', 'pptx', 'ppt', 'htm',
+})
 
 
 # ---------------------------------------------------------------------------
@@ -514,7 +522,14 @@ def _execute_input_node(node: WorkflowNode, workflow: Workflow, triggered_by=Non
         if email_host and email_user:
             from .listener_executor import check_email_inbox
             try:
-                inbox_result = check_email_inbox(node=node, user=triggered_by)
+                # auto_execute=False: the outer execute_workflow() will
+                # process these docs through the DAG — we just need the
+                # inbox fetch, not a recursive single-doc execution.
+                inbox_result = check_email_inbox(
+                    node=node,
+                    user=triggered_by,
+                    auto_execute_override=False,
+                )
                 logger.info(
                     f"Input node email inbox: found {inbox_result.get('found', 0)} new docs, "
                     f"errors: {inbox_result.get('errors', [])}"
@@ -563,6 +578,173 @@ def _execute_input_node(node: WorkflowNode, workflow: Workflow, triggered_by=Non
             except Exception as e:
                 logger.error(f"Input node table Google Sheets fetch failed: {e}")
 
+    elif source_type == 'folder_upload':
+        # Folder upload: import files from a DriveFolder (fileshare app).
+        # Re-fetches on execution to pick up newly added folder files.
+        folder_id = config.get('folder_id', '')
+        if folder_id:
+            try:
+                from fileshare.models import DriveFile
+                drive_files = DriveFile.objects.filter(
+                    folder_id=folder_id, is_deleted=False,
+                    organization=organization,
+                )
+                for df in drive_files:
+                    if not df.file:
+                        continue
+                    # Dedup by checksum
+                    if df.checksum and WorkflowDocument.objects.filter(
+                        workflow=workflow, file_hash=df.checksum,
+                    ).exists():
+                        continue
+                    ext = df.name.rsplit('.', 1)[-1].lower() if '.' in df.name else 'other'
+                    doc = WorkflowDocument.objects.create(
+                        workflow=workflow,
+                        organization=organization,
+                        title=df.name,
+                        file=df.file,
+                        file_type=ext if ext in _KNOWN_FILE_TYPES else 'other',
+                        file_size=df.file_size or 0,
+                        file_hash=df.checksum or '',
+                        uploaded_by=triggered_by,
+                        input_node=node,
+                        global_metadata={'_source': 'folder_upload', '_folder_id': str(folder_id)},
+                    )
+                    # Run extraction
+                    if workflow.extraction_template:
+                        try:
+                            from .ai_inference import extract_document
+                            extract_document(doc, workflow.extraction_template,
+                                             document_type=workflow.document_type)
+                        except Exception as e:
+                            logger.error(f"Extraction failed for folder doc {doc.id}: {e}")
+                            doc.extraction_status = 'failed'
+                            doc.save(update_fields=['extraction_status'])
+                    else:
+                        doc.extraction_status = 'completed'
+                        doc.save(update_fields=['extraction_status'])
+                logger.info(f"Input node folder_upload: processed folder {folder_id}")
+            except Exception as e:
+                logger.error(f"Input node folder_upload failed: {e}")
+
+    elif source_type == 'dms_import':
+        # DMS import: import documents from the DMS system by document IDs or filters.
+        dms_doc_ids = config.get('dms_document_ids', [])
+        dms_category = config.get('dms_category', '')
+        if dms_doc_ids or dms_category:
+            try:
+                from dms.models import DmsDocument
+                dms_qs = DmsDocument.objects.all()
+                if dms_doc_ids:
+                    dms_qs = dms_qs.filter(id__in=dms_doc_ids)
+                elif dms_category:
+                    dms_qs = dms_qs.filter(category=dms_category)
+
+                for dms_doc in dms_qs:
+                    # Dedup by title + file_hash
+                    content_hash = ''
+                    if dms_doc.pdf_data:
+                        import hashlib
+                        content_hash = hashlib.sha256(dms_doc.pdf_data).hexdigest()
+                    if content_hash and WorkflowDocument.objects.filter(
+                        workflow=workflow, file_hash=content_hash,
+                    ).exists():
+                        continue
+                    # Create a WorkflowDocument from DMS content
+                    from django.core.files.base import ContentFile
+                    cf = ContentFile(dms_doc.pdf_data, name=f"{dms_doc.title or 'dms_doc'}.pdf")
+                    doc = WorkflowDocument.objects.create(
+                        workflow=workflow,
+                        organization=organization,
+                        title=dms_doc.title or dms_doc.original_filename or str(dms_doc.id),
+                        file=cf,
+                        file_type='pdf',
+                        file_size=dms_doc.file_size or len(dms_doc.pdf_data or b''),
+                        file_hash=content_hash,
+                        uploaded_by=triggered_by,
+                        input_node=node,
+                        original_text=dms_doc.extracted_text or '',
+                        text_source='direct' if dms_doc.extracted_text else 'none',
+                        global_metadata={
+                            '_source': 'dms_import',
+                            '_dms_document_id': str(dms_doc.id),
+                        },
+                    )
+                    if workflow.extraction_template:
+                        try:
+                            from .ai_inference import extract_document
+                            extract_document(doc, workflow.extraction_template,
+                                             document_type=workflow.document_type)
+                        except Exception as e:
+                            logger.error(f"Extraction failed for DMS doc {doc.id}: {e}")
+                            doc.extraction_status = 'failed'
+                            doc.save(update_fields=['extraction_status'])
+                    else:
+                        doc.extraction_status = 'completed'
+                        doc.save(update_fields=['extraction_status'])
+                logger.info(f"Input node dms_import: imported from DMS")
+            except Exception as e:
+                logger.error(f"Input node dms_import failed: {e}")
+
+    elif source_type == 'sheets':
+        # Sheets import: import rows from a Sheet (sheets app) as documents.
+        sheet_id = config.get('sheet_id', '')
+        if sheet_id:
+            try:
+                from sheets.models import Sheet
+                sheet = Sheet.objects.get(id=sheet_id, organization=organization)
+                rows = sheet.rows.prefetch_related('cells').order_by('order')
+                for row in rows:
+                    # Build metadata from cells
+                    row_meta = {}
+                    for cell in row.cells.all():
+                        col_def = next(
+                            (c for c in (sheet.columns or []) if c.get('key') == cell.column_key),
+                            None,
+                        )
+                        label = col_def.get('label', cell.column_key) if col_def else cell.column_key
+                        row_meta[label] = cell.computed_value or cell.raw_value or ''
+
+                    # Title from first column value or row order
+                    title_val = list(row_meta.values())[0] if row_meta else ''
+                    title = str(title_val)[:200] or f"Sheet Row {row.order + 1}"
+
+                    # Dedup by hash of row content
+                    import hashlib, json as _json
+                    row_hash = hashlib.sha256(
+                        _json.dumps(row_meta, sort_keys=True, default=str).encode()
+                    ).hexdigest()
+                    if WorkflowDocument.objects.filter(
+                        workflow=workflow, file_hash=row_hash,
+                    ).exists():
+                        continue
+
+                    doc = WorkflowDocument.objects.create(
+                        workflow=workflow,
+                        organization=organization,
+                        title=title,
+                        file_type='other',
+                        file_hash=row_hash,
+                        uploaded_by=triggered_by,
+                        input_node=node,
+                        extracted_metadata=row_meta,
+                        global_metadata={
+                            '_source': 'sheets',
+                            '_sheet_id': str(sheet_id),
+                            '_row_order': row.order,
+                            **row_meta,
+                        },
+                        extraction_status='completed',
+                    )
+                logger.info(
+                    f"Input node sheets: imported {rows.count()} rows from sheet {sheet_id}"
+                )
+            except Exception as e:
+                logger.error(f"Input node sheets import failed: {e}")
+
+    # source_type == 'bulk_upload' and 'upload' — docs are pre-uploaded
+    # via the upload/bulk-upload endpoint, nothing to fetch at execution time.
+
     # ------------------------------------------------------------------
     # Un-archive docs that match the *current* source (in case the user
     # switched away and then switched back — their cached extraction is
@@ -588,8 +770,19 @@ def _execute_input_node(node: WorkflowNode, workflow: Workflow, triggered_by=Non
         logger.info(f"Restored {restored} cached docs for source {source_type}")
 
     # ------------------------------------------------------------------
-    # Return only documents that belong to the CURRENT source
+    # Sync document_state on the node and return ready_ids.
+    # This is the primary return mechanism — the node's document_state
+    # tracks which docs are ready for execution.
     # ------------------------------------------------------------------
+    node.sync_document_state()
+    state = node.document_state or {}
+    ready_ids = state.get('ready_ids', [])
+
+    if ready_ids:
+        return ready_ids
+
+    # Fallback: if document_state is empty (e.g. legacy docs not linked to
+    # a node), query by source tags as before.
     qs = WorkflowDocument.objects.filter(
         workflow=workflow,
         extraction_status='completed',
@@ -603,7 +796,17 @@ def _execute_input_node(node: WorkflowNode, workflow: Workflow, triggered_by=Non
             global_metadata___source__in=_ALL_NON_UPLOAD_SOURCES
         )
 
-    return [str(uid) for uid in qs.values_list('id', flat=True)]
+    fallback_ids = [str(uid) for uid in qs.values_list('id', flat=True)]
+
+    # If we got fallback docs, adopt them onto this node so future runs
+    # use document_state directly.
+    if fallback_ids:
+        WorkflowDocument.objects.filter(
+            id__in=fallback_ids, input_node__isnull=True,
+        ).update(input_node=node)
+        node.sync_document_state()
+
+    return fallback_ids
 
 
 def _source_tags_for(source_type: str) -> list[str]:
@@ -613,16 +816,20 @@ def _source_tags_for(source_type: str) -> list[str]:
     Upload returns an empty list (legacy docs may have no _source).
     """
     _SOURCE_MAP = {
-        'email_inbox':  ['email_inbox'],
-        'webhook':      ['webhook'],
-        'google_drive': ['google_drive'],
-        'dropbox':      ['dropbox'],
-        'onedrive':     ['onedrive'],
-        's3':           ['s3'],
-        'ftp':          ['ftp', 'sftp'],
-        'url_scrape':   ['url_scrape'],
-        'table':        ['table'],
-        'upload':       [],          # upload docs may have no _source or 'upload'
+        'email_inbox':    ['email_inbox'],
+        'webhook':        ['webhook'],
+        'google_drive':   ['google_drive'],
+        'dropbox':        ['dropbox'],
+        'onedrive':       ['onedrive'],
+        's3':             ['s3'],
+        'ftp':            ['ftp', 'sftp'],
+        'url_scrape':     ['url_scrape'],
+        'table':          ['table'],
+        'folder_upload':  ['folder_upload'],
+        'dms_import':     ['dms_import'],
+        'bulk_upload':    ['bulk_upload'],
+        'sheets':         ['sheets'],
+        'upload':         [],          # upload docs may have no _source or 'upload'
     }
     return _SOURCE_MAP.get(source_type, [])
 
@@ -631,6 +838,7 @@ def _source_tags_for(source_type: str) -> list[str]:
 _ALL_NON_UPLOAD_SOURCES = [
     'email_inbox', 'webhook', 'google_drive', 'dropbox',
     'onedrive', 's3', 'ftp', 'sftp', 'url_scrape', 'table',
+    'folder_upload', 'dms_import', 'bulk_upload', 'sheets',
 ]
 
 
@@ -838,9 +1046,10 @@ def execute_workflow(
     excluded_document_ids: list[str] | None = None,
     mode: str = 'full',
     smart: bool = False,
+    execution: 'WorkflowExecution | None' = None,
 ) -> dict:
     """
-    Execute the full workflow DAG.
+    Execute the full workflow DAG with **parallel level-based execution**.
 
     Args:
         workflow: Workflow instance to execute.
@@ -849,13 +1058,16 @@ def execute_workflow(
             DAG (used by listener inbox/folder watchers for single-doc mode).
         excluded_document_ids: Document IDs to EXCLUDE from execution.
         mode: 'full' | 'batch' | 'single' | 'auto'
+        execution: Pre-created WorkflowExecution (from async dispatch).
+            If None, one is created internally.
 
     Algorithm:
       1. Build adjacency list from connections
-      2. Topological sort (Kahn's algorithm)
-      3. Execute each node in order
+      2. Topological sort (Kahn's algorithm) — grouped into **levels**
+      3. Execute each level; independent nodes within a level run in
+         parallel via ``ThreadPoolExecutor``
       4. Cache results in each node's last_result field
-      5. Save to WorkflowExecution history
+      5. Save to WorkflowExecution history (incrementally after each node)
 
     Returns:
       {
@@ -874,6 +1086,7 @@ def execute_workflow(
       }
     """
     import time
+    from concurrent.futures import ThreadPoolExecutor, as_completed
     start_time = time.time()
 
     from .action_executor import execute_action_node
@@ -881,6 +1094,10 @@ def execute_workflow(
     from .document_creator_executor import execute_doc_create_node
     from .gate_executor import execute_and_gate
     from .models import DocumentExecutionRecord
+
+    # ── Lifecycle: compiling ───────────────────────────────────────────
+    workflow.execution_state = 'compiling'
+    workflow.save(update_fields=['execution_state', 'updated_at'])
 
     # ── Smart execution: hash-based dedup ──────────────────────────────
     smart_meta = {
@@ -964,6 +1181,9 @@ def execute_workflow(
                     last_validator_results = last_exec.result_data.get('validator_results', {})
 
                 duration_ms = int((time.time() - start_time) * 1000)
+                # Reset lifecycle state (no actual execution happened)
+                workflow.execution_state = 'idle'
+                workflow.save(update_fields=['execution_state', 'updated_at'])
                 return _make_json_safe({
                     'workflow_id': str(workflow.id),
                     'workflow_name': workflow.name,
@@ -999,17 +1219,80 @@ def execute_workflow(
                 f'({last_record_hash[:12]}… → {current_hash[:12]}…) — full re-exec'
             )
 
-    # Create execution record
-    execution = WorkflowExecution.objects.create(
-        workflow=workflow,
-        status='running',
-        mode=mode,
-        triggered_by=triggered_by if triggered_by and hasattr(triggered_by, 'pk') and triggered_by.pk else None,
-        excluded_document_ids=[str(d) for d in (excluded_document_ids or [])],
-    )
+    # Create execution record (or re-use pre-created async record)
+    if execution is None:
+        execution = WorkflowExecution.objects.create(
+            workflow=workflow,
+            status='running',
+            mode=mode,
+            triggered_by=triggered_by if triggered_by and hasattr(triggered_by, 'pk') and triggered_by.pk else None,
+            excluded_document_ids=[str(d) for d in (excluded_document_ids or [])],
+        )
+    else:
+        # Async: pre-created record — mark running
+        execution.status = 'running'
+        execution.save(update_fields=['status'])
+
+    # Update workflow execution state → compiling is already set above
+    workflow.current_execution_id = execution.id
+    workflow.save(update_fields=['current_execution_id', 'updated_at'])
+
+    try:  # ── MASTER try/finally — guarantees lifecycle reset on any crash ──
+        return _execute_workflow_body(
+            workflow=workflow,
+            execution=execution,
+            mode=mode,
+            smart=smart,
+            smart_meta=smart_meta,
+            single_document_ids=single_document_ids,
+            excluded_document_ids=excluded_document_ids,
+            start_time=start_time,
+            triggered_by=triggered_by,
+        )
+    except Exception:
+        # Mark execution failed if it hasn't been finalised already
+        if execution.status in ('queued', 'running'):
+            execution.status = 'failed'
+            execution.result_data = execution.result_data or {}
+            execution.result_data['error'] = 'Execution crashed unexpectedly'
+            execution.completed_at = timezone.now()
+            execution.duration_ms = int((time.time() - start_time) * 1000)
+            execution.save()
+        raise
+    finally:
+        # ALWAYS reset lifecycle state so the workflow never stays stuck
+        workflow.refresh_from_db(fields=['execution_state', 'current_execution_id'])
+        if str(workflow.current_execution_id) == str(execution.id):
+            workflow.execution_state = 'idle'
+            workflow.current_execution_id = None
+            workflow.save(update_fields=['execution_state', 'current_execution_id', 'updated_at'])
+
+
+def _execute_workflow_body(
+    workflow,
+    execution,
+    mode,
+    smart,
+    smart_meta,
+    single_document_ids,
+    excluded_document_ids,
+    start_time,
+    triggered_by=None,
+):
+    """Inner execution body — extracted so the caller can wrap in try/finally."""
+    import time
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    from .action_executor import execute_action_node
+    from .ai_node_executor import execute_ai_node
+    from .document_creator_executor import execute_doc_create_node
+    from .gate_executor import execute_and_gate
+    from .models import DocumentExecutionRecord
 
     # Build a typed field registry for condition evaluation
     field_type_registry = _build_field_type_registry(workflow)
+
+    organization = workflow.organization
 
     nodes = {n.id: n for n in workflow.nodes.all()}
     connections = list(workflow.connections.all())
@@ -1027,17 +1310,26 @@ def execute_workflow(
         in_degree[conn.target_node_id] += 1
         incoming_map[conn.target_node_id].append(conn.source_node_id)
 
-    # Kahn's topological sort
-    queue = deque(nid for nid, deg in in_degree.items() if deg == 0)
-    topo_order = []
+    # Kahn's topological sort — grouped into **parallel levels**
+    # Each level contains nodes whose in-degree is 0 at that stage.
+    # Nodes within the same level have no inter-dependencies and can
+    # run concurrently via ThreadPoolExecutor.
+    in_degree_copy = dict(in_degree)
+    queue = deque(nid for nid, deg in in_degree_copy.items() if deg == 0)
+    topo_levels = []       # list of lists: [[level0_nodes], [level1_nodes], ...]
+    topo_order = []        # flat list (for backward compat assertions)
 
     while queue:
-        nid = queue.popleft()
-        topo_order.append(nid)
-        for neighbor in adj[nid]:
-            in_degree[neighbor] -= 1
-            if in_degree[neighbor] == 0:
-                queue.append(neighbor)
+        level = list(queue)
+        topo_levels.append(level)
+        topo_order.extend(level)
+        next_queue = deque()
+        for nid in level:
+            for neighbor in adj[nid]:
+                in_degree_copy[neighbor] -= 1
+                if in_degree_copy[neighbor] == 0:
+                    next_queue.append(neighbor)
+        queue = next_queue
 
     if len(topo_order) != len(nodes):
         raise ValueError("Workflow contains a cycle — cannot execute.")
@@ -1054,428 +1346,634 @@ def execute_workflow(
     scraper_results = {}
     doc_create_results = {}
     inference_results = {}
+    sheet_results = {}
 
     # Build exclusion set
     exclude_set = set(str(d) for d in (excluded_document_ids or []))
 
-    for node_id in topo_order:
-        node = nodes[node_id]
+    # ── Lifecycle: executing ───────────────────────────────────────────
+    workflow.execution_state = 'executing'
+    workflow.save(update_fields=['execution_state', 'updated_at'])
 
-        if node.node_type == 'input':
-            if single_document_ids:
-                # Single-doc mode: only specified documents
-                output_ids = [
-                    did for did in single_document_ids
-                    if str(did) not in exclude_set
-                    and WorkflowDocument.objects.filter(id=did, workflow=workflow).exists()
-                ]
+    # ── Rule merging optimisation ──────────────────────────────────────
+    # When multiple rule nodes at the same level share identical parent
+    # sets (i.e., receive exactly the same incoming_ids), we can merge
+    # their conditions into a single evaluation pass per document to
+    # avoid redundant metadata lookups.
+    #
+    # _merged_rules maps a "merged leader" node_id → list of follower
+    # node_ids whose conditions are evaluated together.  Followers are
+    # skipped during execution; the leader evaluates all conditions and
+    # outputs the intersection of documents matching ALL merged rules.
+    _merged_rules = {}   # leader_id → [follower_ids]
+    _merged_into = {}    # follower_id → leader_id
+    for level in topo_levels:
+        rule_nodes_in_level = [
+            nid for nid in level
+            if nodes[nid].node_type == 'rule'
+        ]
+        if len(rule_nodes_in_level) < 2:
+            continue
+        # Group by frozenset of parent node IDs
+        parent_groups = defaultdict(list)
+        for nid in rule_nodes_in_level:
+            pset = frozenset(incoming_map.get(nid, []))
+            parent_groups[pset].append(nid)
+        for pset, group in parent_groups.items():
+            if len(group) < 2:
+                continue
+            leader = group[0]
+            followers = group[1:]
+            _merged_rules[leader] = followers
+            for fid in followers:
+                _merged_into[fid] = leader
+
+    # ── Helper: save incremental progress to execution record ─────────
+    def _save_progress():
+        """Persist current node_summary so polling endpoint can read it."""
+        execution.node_summary = [
+            {
+                'node_id': r['node_id'],
+                'node_type': r['node_type'],
+                'label': r['label'],
+                'count': r['count'],
+                'status': 'done',
+            }
+            for r in results
+        ]
+        execution.save(update_fields=['node_summary'])
+
+    # ── Level-based execution with parallel independent nodes ─────────
+    for level_idx, level in enumerate(topo_levels):
+        # Separate nodes that can run in parallel from those that can't.
+        # Input nodes must run first (they seed the DAG). Within a level,
+        # nodes that have no inter-dependency can run concurrently.
+        # We serialise nodes whose types are inherently sequential
+        # (input, output, and_gate — they depend on merged upstream state).
+        parallel_eligible = []
+        sequential_nodes = []
+        for node_id in level:
+            node = nodes[node_id]
+            # Skip merged-away followers (handled by their leader)
+            if node_id in _merged_into:
+                continue
+            if node.node_type in ('input', 'output', 'and_gate'):
+                sequential_nodes.append(node_id)
             else:
-                output_ids = _execute_input_node(node, workflow, triggered_by=triggered_by)
-                # Apply exclusions
-                if exclude_set:
-                    output_ids = [did for did in output_ids if str(did) not in exclude_set]
-        else:
-            # Union of all upstream outputs, respecting source_handle for branching nodes
-            parent_ids = incoming_map.get(node_id, [])
-            seen = set()
-            incoming_ids = []
-            for pid in parent_ids:
-                parent_output = node_outputs.get(pid, [])
-                # Find the connection(s) from this parent → current node
-                conn_handles = [
-                    c.source_handle for c in connections
-                    if c.source_node_id == pid and c.target_node_id == node_id
-                ]
-                handle = conn_handles[0] if conn_handles else ''
-                # If parent output is a dict (branching node like validator),
-                # pick the handle-specific list; fall back to 'approved' for
-                # backward compat when no handle is specified.
-                if isinstance(parent_output, dict):
-                    if handle and handle in parent_output:
-                        doc_list = parent_output[handle]
-                    else:
-                        # Legacy connections without a handle get the 'approved' set
-                        doc_list = parent_output.get('approved', [])
+                parallel_eligible.append(node_id)
+
+        # ── Execute a single node (can be called from thread) ─────
+        def _run_one_node(node_id):
+            """Execute one node and return (node_id, output_ids, type_results)."""
+            node = nodes[node_id]
+            local_type_results = {}  # {result_bucket_key: value}
+            _node_start = timezone.now()
+
+            if node.node_type == 'input':
+                if single_document_ids:
+                    output_ids = [
+                        did for did in single_document_ids
+                        if str(did) not in exclude_set
+                        and WorkflowDocument.objects.filter(id=did, workflow=workflow).exists()
+                    ]
                 else:
-                    doc_list = parent_output
-
-                for did in doc_list:
-                    if did not in seen:
-                        seen.add(did)
-                        incoming_ids.append(did)
-
-            if node.node_type == 'rule':
-                # Auto-extract missing fields before evaluating conditions
-                upstream_fields = _get_upstream_produced_fields(node_id, incoming_map, nodes)
-                auto_result = _auto_extract_missing_fields(
-                    node=node,
-                    incoming_ids=incoming_ids,
-                    upstream_fields=upstream_fields,
-                    field_type_registry=field_type_registry,
-                    triggered_by=triggered_by,
-                )
-                if auto_result:
-                    ai_results[f'auto_extract_{node_id}'] = auto_result
-                output_ids = _execute_rule_node(node, incoming_ids, field_type_registry=field_type_registry)
-            elif node.node_type == 'listener':
-                # Listener nodes: evaluate trigger, gate or pass
-                from .listener_executor import evaluate_listener_node
-                try:
-                    lr = evaluate_listener_node(
-                        node=node,
-                        incoming_document_ids=incoming_ids,
-                        triggered_by=triggered_by,
-                    )
-                    listener_results[str(node_id)] = lr
-                    output_ids = lr.get('passed_document_ids', [])
-                except Exception as e:
-                    logger.error(f"Listener node {node_id} failed: {e}")
-                    listener_results[str(node_id)] = {
-                        'status': 'error',
-                        'message': str(e),
-                    }
-                    output_ids = []
-            elif node.node_type == 'action':
-                # Action nodes: run plugin per-document, pass documents through
-                output_ids = incoming_ids  # action nodes pass-through document list
-                if node.config and node.config.get('plugin'):
-                    try:
-                        action_result = execute_action_node(
-                            node=node,
-                            incoming_document_ids=incoming_ids,
-                            triggered_by=triggered_by,
-                        )
-                        action_results[str(node_id)] = action_result
-                    except Exception as e:
-                        logger.error(f"Action node {node_id} failed: {e}")
-                        action_results[str(node_id)] = {
-                            'error': str(e),
-                            'status': 'failed',
-                        }
-            elif node.node_type == 'validator':
-                # Validator nodes: multi-level human approval
-                # Output is a dict with 'approved' and 'rejected' lists
-                # so downstream nodes connected via source_handle can branch.
-                from .validation_executor import evaluate_validator_node
-                try:
-                    vr = evaluate_validator_node(
-                        node=node,
-                        incoming_document_ids=incoming_ids,
-                        triggered_by=triggered_by,
-                    )
-                    validator_results[str(node_id)] = vr
-                    approved_ids = vr.get('passed_document_ids', [])
-                    rejected_ids = vr.get('rejected_document_ids', [])
-                    # Store as branching dict — downstream routing reads the handle
-                    output_ids = {
-                        'approved': approved_ids,
-                        'rejected': rejected_ids,
-                    }
-                except Exception as e:
-                    logger.error(f"Validator node {node_id} failed: {e}")
-                    validator_results[str(node_id)] = {
-                        'status': 'error',
-                        'message': str(e),
-                    }
-                    output_ids = {'approved': [], 'rejected': []}
-            elif node.node_type == 'ai':
-                # AI nodes: send each document to LLM, enrich metadata, pass-through
-                output_ids = incoming_ids  # AI nodes pass-through document list
-                if node.config and node.config.get('system_prompt'):
-                    try:
-                        ai_result = execute_ai_node(
-                            node=node,
-                            incoming_document_ids=incoming_ids,
-                            triggered_by=triggered_by,
-                        )
-                        ai_results[str(node_id)] = ai_result
-                    except Exception as e:
-                        logger.error(f"AI node {node_id} failed: {e}")
-                        ai_results[str(node_id)] = {
-                            'error': str(e),
-                            'status': 'failed',
-                        }
-            elif node.node_type == 'and_gate':
-                # AND gate needs per-parent doc ID lists (not the union)
-                # Resolve branching outputs (validator dicts) via source_handle
-                per_parent = {}
+                    output_ids = _execute_input_node(node, workflow, triggered_by=triggered_by)
+                    if exclude_set:
+                        output_ids = [did for did in output_ids if str(did) not in exclude_set]
+            else:
+                # Union of all upstream outputs
+                parent_ids = incoming_map.get(node_id, [])
+                seen = set()
+                incoming_ids = []
                 for pid in parent_ids:
-                    parent_out = node_outputs.get(pid, [])
-                    if isinstance(parent_out, dict):
-                        conn_handles = [
-                            c.source_handle for c in connections
-                            if c.source_node_id == pid and c.target_node_id == node_id
-                        ]
-                        h = conn_handles[0] if conn_handles else ''
-                        per_parent[str(pid)] = parent_out.get(h, parent_out.get('approved', []))
+                    parent_output = node_outputs.get(pid, [])
+                    conn_handles = [
+                        c.source_handle for c in connections
+                        if c.source_node_id == pid and c.target_node_id == node_id
+                    ]
+                    handle = conn_handles[0] if conn_handles else ''
+                    if isinstance(parent_output, dict):
+                        if handle and handle in parent_output:
+                            doc_list = parent_output[handle]
+                        else:
+                            doc_list = parent_output.get('approved', [])
                     else:
-                        per_parent[str(pid)] = parent_out
-                try:
-                    gr = execute_and_gate(node=node, per_parent_ids=per_parent)
-                    gate_results[str(node_id)] = gr
-                    output_ids = gr.get('passed_document_ids', [])
-                except Exception as e:
-                    logger.error(f"AND gate node {node_id} failed: {e}")
-                    gate_results[str(node_id)] = {
-                        'status': 'error',
-                        'gate_type': 'and',
-                        'message': str(e),
-                    }
-                    output_ids = []
-            elif node.node_type == 'scraper':
-                # Scraper nodes: scrape URLs, search keywords, enrich docs, pass-through
-                output_ids = incoming_ids  # scraper nodes pass-through document list
-                if node.config and node.config.get('urls'):
-                    from .scraper_executor import execute_scraper_node
+                        doc_list = parent_output
+                    for did in doc_list:
+                        if did not in seen:
+                            seen.add(did)
+                            incoming_ids.append(did)
+
+                if node.node_type == 'rule':
+                    upstream_fields = _get_upstream_produced_fields(node_id, incoming_map, nodes)
+                    auto_result = _auto_extract_missing_fields(
+                        node=node, incoming_ids=incoming_ids,
+                        upstream_fields=upstream_fields,
+                        field_type_registry=field_type_registry,
+                        triggered_by=triggered_by,
+                    )
+                    if auto_result:
+                        local_type_results[f'ai:auto_extract_{node_id}'] = auto_result
+
+                    # If this is a merged leader, evaluate follower conditions too
+                    if node_id in _merged_rules:
+                        # Start with leader's filtered output
+                        output_ids = _execute_rule_node(node, incoming_ids, field_type_registry=field_type_registry)
+                        # Intersect with each follower's filter
+                        for fid in _merged_rules[node_id]:
+                            follower = nodes[fid]
+                            follower_ids = _execute_rule_node(follower, output_ids, field_type_registry=field_type_registry)
+                            output_ids = follower_ids
+                            # Save follower result too
+                            follower_result_data = {
+                                'count': len(follower_ids),
+                                'document_ids': [str(d) for d in follower_ids],
+                            }
+                            follower.last_result = follower_result_data
+                            follower.save(update_fields=['last_result', 'updated_at'])
+                    else:
+                        output_ids = _execute_rule_node(node, incoming_ids, field_type_registry=field_type_registry)
+                elif node.node_type == 'listener':
+                    from .listener_executor import evaluate_listener_node
                     try:
-                        scraper_result = execute_scraper_node(
-                            node=node,
-                            incoming_document_ids=incoming_ids,
-                            triggered_by=triggered_by,
-                        )
-                        scraper_results[str(node_id)] = scraper_result
+                        lr = evaluate_listener_node(node=node, incoming_document_ids=incoming_ids, triggered_by=triggered_by)
+                        local_type_results[f'listener:{node_id}'] = lr
+                        output_ids = lr.get('passed_document_ids', [])
                     except Exception as e:
-                        logger.error(f"Scraper node {node_id} failed: {e}")
-                        scraper_results[str(node_id)] = {
-                            'error': str(e),
-                            'status': 'failed',
-                        }
-            elif node.node_type == 'doc_create':
-                # Document creator: create/duplicate editor documents, pass-through
-                output_ids = incoming_ids  # doc_create nodes pass-through document list
-                try:
-                    dc_result = execute_doc_create_node(
-                        node=node,
-                        incoming_document_ids=incoming_ids,
-                        triggered_by=triggered_by,
-                    )
-                    doc_create_results[str(node_id)] = dc_result
-                except Exception as e:
-                    logger.error(f"doc_create node {node_id} failed: {e}")
-                    doc_create_results[str(node_id)] = {
-                        'error': str(e),
-                        'status': 'failed',
-                    }
-            elif node.node_type == 'inference':
-                # Inference node: hierarchical tree inference, pass-through
-                output_ids = incoming_ids
-                try:
-                    from .inference_node_executor import execute_inference_node
-                    inf_result = execute_inference_node(
-                        node=node,
-                        incoming_document_ids=incoming_ids,
-                        triggered_by=triggered_by,
-                    )
-                    inference_results[str(node_id)] = inf_result
-                except Exception as e:
-                    logger.error(f"Inference node {node_id} failed: {e}")
-                    inference_results[str(node_id)] = {
-                        'error': str(e),
-                        'status': 'failed',
-                    }
-            else:  # output
-                output_ids = _execute_output_node(node, incoming_ids)
+                        logger.error(f"Listener node {node_id} failed: {e}")
+                        local_type_results[f'listener:{node_id}'] = {'status': 'error', 'message': str(e)}
+                        output_ids = []
+                elif node.node_type == 'action':
+                    output_ids = incoming_ids
+                    if node.config and node.config.get('plugin'):
+                        try:
+                            action_result = execute_action_node(node=node, incoming_document_ids=incoming_ids, triggered_by=triggered_by)
+                            local_type_results[f'action:{node_id}'] = action_result
+                        except Exception as e:
+                            logger.error(f"Action node {node_id} failed: {e}")
+                            local_type_results[f'action:{node_id}'] = {'error': str(e), 'status': 'failed'}
+                elif node.node_type == 'validator':
+                    from .validation_executor import evaluate_validator_node
+                    try:
+                        vr = evaluate_validator_node(node=node, incoming_document_ids=incoming_ids, triggered_by=triggered_by)
+                        local_type_results[f'validator:{node_id}'] = vr
+                        output_ids = {'approved': vr.get('passed_document_ids', []), 'rejected': vr.get('rejected_document_ids', [])}
+                    except Exception as e:
+                        logger.error(f"Validator node {node_id} failed: {e}")
+                        local_type_results[f'validator:{node_id}'] = {'status': 'error', 'message': str(e)}
+                        output_ids = {'approved': [], 'rejected': []}
+                elif node.node_type == 'ai':
+                    output_ids = incoming_ids
+                    if node.config and node.config.get('system_prompt'):
+                        try:
+                            ai_result = execute_ai_node(node=node, incoming_document_ids=incoming_ids, triggered_by=triggered_by)
+                            local_type_results[f'ai:{node_id}'] = ai_result
+                        except Exception as e:
+                            logger.error(f"AI node {node_id} failed: {e}")
+                            local_type_results[f'ai:{node_id}'] = {'error': str(e), 'status': 'failed'}
+                elif node.node_type == 'and_gate':
+                    per_parent = {}
+                    for pid in parent_ids:
+                        parent_out = node_outputs.get(pid, [])
+                        if isinstance(parent_out, dict):
+                            conn_handles = [
+                                c.source_handle for c in connections
+                                if c.source_node_id == pid and c.target_node_id == node_id
+                            ]
+                            h = conn_handles[0] if conn_handles else ''
+                            per_parent[str(pid)] = parent_out.get(h, parent_out.get('approved', []))
+                        else:
+                            per_parent[str(pid)] = parent_out
+                    try:
+                        gr = execute_and_gate(node=node, per_parent_ids=per_parent)
+                        local_type_results[f'gate:{node_id}'] = gr
+                        output_ids = gr.get('passed_document_ids', [])
+                    except Exception as e:
+                        logger.error(f"AND gate node {node_id} failed: {e}")
+                        local_type_results[f'gate:{node_id}'] = {'status': 'error', 'gate_type': 'and', 'message': str(e)}
+                        output_ids = []
+                elif node.node_type == 'scraper':
+                    output_ids = incoming_ids
+                    if node.config and node.config.get('urls'):
+                        from .scraper_executor import execute_scraper_node
+                        try:
+                            scraper_result = execute_scraper_node(node=node, incoming_document_ids=incoming_ids, triggered_by=triggered_by)
+                            local_type_results[f'scraper:{node_id}'] = scraper_result
+                        except Exception as e:
+                            logger.error(f"Scraper node {node_id} failed: {e}")
+                            local_type_results[f'scraper:{node_id}'] = {'error': str(e), 'status': 'failed'}
+                elif node.node_type == 'doc_create':
+                    output_ids = incoming_ids
+                    try:
+                        dc_result = execute_doc_create_node(node=node, incoming_document_ids=incoming_ids, triggered_by=triggered_by)
+                        local_type_results[f'doc_create:{node_id}'] = dc_result
+                    except Exception as e:
+                        logger.error(f"doc_create node {node_id} failed: {e}")
+                        local_type_results[f'doc_create:{node_id}'] = {'error': str(e), 'status': 'failed'}
+                elif node.node_type == 'inference':
+                    output_ids = incoming_ids
+                    try:
+                        from .inference_node_executor import execute_inference_node
+                        inf_result = execute_inference_node(node=node, incoming_document_ids=incoming_ids, triggered_by=triggered_by)
+                        local_type_results[f'inference:{node_id}'] = inf_result
+                    except Exception as e:
+                        logger.error(f"Inference node {node_id} failed: {e}")
+                        local_type_results[f'inference:{node_id}'] = {'error': str(e), 'status': 'failed'}
+                elif node.node_type == 'sheet':
+                    try:
+                        from .sheet_node_executor import execute_sheet_node
 
-        node_outputs[node_id] = output_ids
+                        # Extract changed-row hints from the trigger context
+                        # so event-triggered executions only process the rows
+                        # that actually changed (detected via row hashing).
+                        _trigger_ctx = getattr(execution, 'trigger_context', None) or {}
+                        _changed_row_ids = _trigger_ctx.get('changed_row_ids') or None
+                        _changed_row_orders = _trigger_ctx.get('changed_row_orders') or None
 
-        # Cache — handle branching nodes whose output_ids is a dict
-        if isinstance(output_ids, dict):
-            # Validator branching output: flatten for count/doc_ids display
-            flat_ids = []
-            for v in output_ids.values():
-                flat_ids.extend(v)
-            result_data = {
-                'count': len(flat_ids),
-                'document_ids': [str(did) for did in flat_ids],
+                        # Only apply the filter if this sheet node's sheet
+                        # matches the sheet that fired the event.
+                        _ctx_sheet_id = _trigger_ctx.get('sheet_id', '')
+                        _node_sheet_id = str((node.config or {}).get('sheet_id', ''))
+                        if _ctx_sheet_id and _node_sheet_id and str(_ctx_sheet_id) != _node_sheet_id:
+                            _changed_row_ids = None
+                            _changed_row_orders = None
+
+                        sheet_result = execute_sheet_node(
+                            node=node, incoming_document_ids=incoming_ids,
+                            execution=execution, triggered_by=triggered_by,
+                            changed_row_ids=_changed_row_ids,
+                            changed_row_orders=_changed_row_orders,
+                        )
+                        local_type_results[f'sheet:{node_id}'] = sheet_result
+                        sheet_mode = (node.config or {}).get('mode', 'storage')
+                        if sheet_mode == 'input' and sheet_result.get('status') == 'completed':
+                            import hashlib as _hl, json as _js
+                            row_doc_ids = []
+                            for row_entry in sheet_result.get('rows', []):
+                                row_meta = row_entry.get('metadata', {})
+                                if not row_meta:
+                                    continue
+                                row_hash = _hl.sha256(
+                                    _js.dumps(row_meta, sort_keys=True, default=str).encode()
+                                ).hexdigest()
+                                existing = WorkflowDocument.objects.filter(
+                                    workflow=workflow, file_hash=row_hash,
+                                ).first()
+                                if existing:
+                                    row_doc_ids.append(existing.id)
+                                    existing.extracted_metadata = row_meta
+                                    existing.global_metadata = {
+                                        '_source': 'sheet_node',
+                                        '_sheet_id': sheet_result.get('sheet_id', ''),
+                                        '_row_order': row_entry.get('row_order', 0),
+                                        **row_meta,
+                                    }
+                                    existing.save(update_fields=['extracted_metadata', 'global_metadata', 'updated_at'])
+                                    continue
+                                title_val = list(row_meta.values())[0] if row_meta else ''
+                                title = str(title_val)[:200] or f"Sheet Row {row_entry.get('row_order', 0) + 1}"
+                                doc = WorkflowDocument.objects.create(
+                                    workflow=workflow, organization=organization,
+                                    title=title, file_type='other', file_hash=row_hash,
+                                    uploaded_by=triggered_by, input_node=node,
+                                    extracted_metadata=row_meta,
+                                    global_metadata={
+                                        '_source': 'sheet_node',
+                                        '_sheet_id': sheet_result.get('sheet_id', ''),
+                                        '_row_order': row_entry.get('row_order', 0),
+                                        **row_meta,
+                                    },
+                                    extraction_status='completed',
+                                )
+                                row_doc_ids.append(doc.id)
+                            output_ids = row_doc_ids
+                        else:
+                            output_ids = incoming_ids
+                    except Exception as e:
+                        logger.error(f"Sheet node {node_id} failed: {e}")
+                        local_type_results[f'sheet:{node_id}'] = {'error': str(e), 'status': 'failed'}
+                        output_ids = incoming_ids
+                else:  # output
+                    output_ids = _execute_output_node(node, incoming_ids)
+
+            _node_end = timezone.now()
+            return node_id, output_ids, local_type_results, _node_start, _node_end
+
+        # ── Process results from one node and integrate into shared state ─
+        def _integrate_node_result(node_id, output_ids, local_type_results, node_started=None, node_ended=None):
+            """Merge a single node's execution result into the shared accumulators."""
+            node = nodes[node_id]
+            node_outputs[node_id] = output_ids
+
+            # Distribute type-specific results into the shared dicts
+            for key, val in local_type_results.items():
+                bucket, nid_str = key.split(':', 1)
+                if bucket == 'action':
+                    action_results[nid_str] = val
+                elif bucket == 'ai':
+                    ai_results[nid_str] = val
+                elif bucket == 'listener':
+                    listener_results[nid_str] = val
+                elif bucket == 'validator':
+                    validator_results[nid_str] = val
+                elif bucket == 'gate':
+                    gate_results[nid_str] = val
+                elif bucket == 'scraper':
+                    scraper_results[nid_str] = val
+                elif bucket == 'doc_create':
+                    doc_create_results[nid_str] = val
+                elif bucket == 'inference':
+                    inference_results[nid_str] = val
+                elif bucket == 'sheet':
+                    sheet_results[nid_str] = val
+
+            # Build result_data for node.last_result
+            if isinstance(output_ids, dict):
+                flat_ids = []
+                for v in output_ids.values():
+                    flat_ids.extend(v)
+                result_data = {'count': len(flat_ids), 'document_ids': [str(did) for did in flat_ids]}
+            else:
+                result_data = {'count': len(output_ids), 'document_ids': [str(did) for did in output_ids]}
+
+            # Enrich result_data with type-specific stats
+            if node.node_type == 'action' and str(node_id) in action_results:
+                ar = action_results[str(node_id)]
+                result_data.update({
+                    'sent': ar.get('sent', 0), 'skipped': ar.get('skipped', 0),
+                    'failed': ar.get('failed', 0), 'action_status': ar.get('status', ''),
+                    'execution_id': ar.get('execution_id', ''),
+                })
+            if node.node_type == 'listener' and str(node_id) in listener_results:
+                lr = listener_results[str(node_id)]
+                result_data.update({
+                    'listener_status': lr.get('status', ''), 'event_id': lr.get('event_id', ''),
+                    'listener_message': lr.get('message', ''),
+                })
+            if node.node_type == 'validator' and str(node_id) in validator_results:
+                vr = validator_results[str(node_id)]
+                result_data.update({
+                    'validator_status': vr.get('status', ''),
+                    'approved': len(vr.get('passed_document_ids', [])),
+                    'pending': len(vr.get('pending_document_ids', [])),
+                    'rejected': len(vr.get('rejected_document_ids', [])),
+                })
+            if node.node_type == 'ai' and str(node_id) in ai_results:
+                air = ai_results[str(node_id)]
+                result_data.update({
+                    'ai_status': air.get('status', ''), 'ai_model': air.get('model', ''),
+                    'output_format': air.get('output_format', 'text'),
+                    'processed': air.get('processed', 0), 'failed': air.get('failed', 0),
+                    'cache_hits': air.get('cache_hits', 0), 'output_key': air.get('output_key', ''),
+                    'json_fields': air.get('json_fields', []),
+                })
+            if node.node_type == 'and_gate' and str(node_id) in gate_results:
+                gr = gate_results[str(node_id)]
+                result_data.update({
+                    'gate_type': gr.get('gate_type', ''), 'gate_status': gr.get('status', ''),
+                    'parent_count': gr.get('parent_count', 0),
+                    'total_upstream': gr.get('total_upstream', 0),
+                    'blocked': len(gr.get('blocked_document_ids', [])),
+                    'gate_message': gr.get('message', ''),
+                })
+            if node.node_type == 'scraper' and str(node_id) in scraper_results:
+                sr = scraper_results[str(node_id)]
+                result_data.update({
+                    'scraper_status': sr.get('status', ''), 'urls_scraped': sr.get('urls_scraped', 0),
+                    'urls_blocked': sr.get('urls_blocked', 0), 'urls_failed': sr.get('urls_failed', 0),
+                    'total_snippets': sr.get('total_snippets', 0), 'keywords': sr.get('keywords', []),
+                })
+            if node.node_type == 'doc_create' and str(node_id) in doc_create_results:
+                dcr = doc_create_results[str(node_id)]
+                result_data.update({
+                    'doc_create_status': dcr.get('status', ''), 'creation_mode': dcr.get('creation_mode', ''),
+                    'created': dcr.get('created', 0), 'skipped': dcr.get('skipped', 0),
+                    'failed': dcr.get('failed', 0), 'created_document_ids': dcr.get('created_document_ids', []),
+                })
+            if node.node_type == 'inference' and str(node_id) in inference_results:
+                ir = inference_results[str(node_id)]
+                result_data.update({
+                    'inference_status': ir.get('status', ''), 'inference_scope': ir.get('inference_scope', ''),
+                    'inference_model': ir.get('model', ''), 'processed': ir.get('processed', 0),
+                    'failed': ir.get('failed', 0), 'inference_hits': ir.get('inference_hits', 0),
+                    'output_key': ir.get('output_key', ''),
+                })
+            if node.node_type == 'sheet' and str(node_id) in sheet_results:
+                shr = sheet_results[str(node_id)]
+                result_data.update({
+                    'sheet_status': shr.get('status', ''), 'sheet_mode': shr.get('mode', ''),
+                    'sheet_id': shr.get('sheet_id', ''), 'sheet_title': shr.get('sheet_title', ''),
+                    'rows_written': shr.get('rows_written', 0), 'rows_overwritten': shr.get('rows_overwritten', 0),
+                    'row_count': shr.get('row_count', 0),
+                    'query_count': shr.get('query_count', 0), 'cache_hits': shr.get('cache_hits', 0),
+                    'write_mode': shr.get('write_mode', ''),
+                })
+
+            node.last_result = result_data
+            save_fields = ['last_result', 'updated_at']
+            if node.node_type == 'input':
+                node.sync_document_state()
+            node.save(update_fields=save_fields)
+
+            # Build the rich node_result_entry
+            node_result_entry = {
+                'node_id': str(node_id), 'node_type': node.node_type,
+                'label': node.label or node.node_type.title(),
+                'count': result_data['count'], 'document_ids': result_data['document_ids'],
             }
+            if node.node_type == 'action' and str(node_id) in action_results:
+                ar = action_results[str(node_id)]
+                node_result_entry['action'] = {
+                    'execution_id': ar.get('execution_id', ''), 'plugin': ar.get('plugin', ''),
+                    'status': ar.get('status', ''), 'sent': ar.get('sent', 0),
+                    'skipped': ar.get('skipped', 0), 'failed': ar.get('failed', 0),
+                    'results': ar.get('results', []),
+                }
+            if node.node_type == 'listener' and str(node_id) in listener_results:
+                lr = listener_results[str(node_id)]
+                node_result_entry['listener'] = {
+                    'status': lr.get('status', ''), 'event_id': lr.get('event_id'),
+                    'message': lr.get('message', ''),
+                    'passed_count': len(lr.get('passed_document_ids', [])),
+                }
+            if node.node_type == 'validator' and str(node_id) in validator_results:
+                vr = validator_results[str(node_id)]
+                node_result_entry['validator'] = {
+                    'status': vr.get('status', ''),
+                    'approved': len(vr.get('passed_document_ids', [])),
+                    'pending': len(vr.get('pending_document_ids', [])),
+                    'rejected': len(vr.get('rejected_document_ids', [])),
+                    'message': vr.get('message', ''),
+                    'approved_document_ids': [str(d) for d in vr.get('passed_document_ids', [])],
+                    'rejected_document_ids': [str(d) for d in vr.get('rejected_document_ids', [])],
+                }
+            if node.node_type == 'ai' and str(node_id) in ai_results:
+                air = ai_results[str(node_id)]
+                node_result_entry['ai'] = {
+                    'model': air.get('model', ''), 'status': air.get('status', ''),
+                    'output_format': air.get('output_format', 'text'),
+                    'processed': air.get('processed', 0), 'failed': air.get('failed', 0),
+                    'cache_hits': air.get('cache_hits', 0), 'total': air.get('total', 0),
+                    'output_key': air.get('output_key', ''), 'json_fields': air.get('json_fields', []),
+                    'results': air.get('results', []),
+                }
+            if node.node_type == 'and_gate' and str(node_id) in gate_results:
+                gr = gate_results[str(node_id)]
+                node_result_entry['gate'] = {
+                    'gate_type': gr.get('gate_type', ''), 'status': gr.get('status', ''),
+                    'passed': len(gr.get('passed_document_ids', [])),
+                    'blocked': len(gr.get('blocked_document_ids', [])),
+                    'total_upstream': gr.get('total_upstream', 0),
+                    'parent_count': gr.get('parent_count', 0),
+                    'parent_details': gr.get('parent_details', {}),
+                    'message': gr.get('message', ''),
+                }
+            if node.node_type == 'scraper' and str(node_id) in scraper_results:
+                sr = scraper_results[str(node_id)]
+                node_result_entry['scraper'] = {
+                    'status': sr.get('status', ''), 'urls_scraped': sr.get('urls_scraped', 0),
+                    'urls_blocked': sr.get('urls_blocked', 0), 'urls_failed': sr.get('urls_failed', 0),
+                    'total_snippets': sr.get('total_snippets', 0), 'keywords': sr.get('keywords', []),
+                    'results': sr.get('results', []), 'url_results': sr.get('url_results', []),
+                }
+            if node.node_type == 'doc_create' and str(node_id) in doc_create_results:
+                dcr = doc_create_results[str(node_id)]
+                node_result_entry['doc_create'] = {
+                    'status': dcr.get('status', ''), 'creation_mode': dcr.get('creation_mode', ''),
+                    'created': dcr.get('created', 0), 'skipped': dcr.get('skipped', 0),
+                    'failed': dcr.get('failed', 0), 'total': dcr.get('total', 0),
+                    'created_document_ids': dcr.get('created_document_ids', []),
+                    'results': dcr.get('results', []),
+                }
+            if node.node_type == 'inference' and str(node_id) in inference_results:
+                ir = inference_results[str(node_id)]
+                node_result_entry['inference'] = {
+                    'status': ir.get('status', ''), 'inference_scope': ir.get('inference_scope', ''),
+                    'model': ir.get('model', ''), 'output_key': ir.get('output_key', ''),
+                    'processed': ir.get('processed', 0), 'failed': ir.get('failed', 0),
+                    'inference_hits': ir.get('inference_hits', 0), 'results': ir.get('results', []),
+                }
+            if node.node_type == 'sheet' and str(node_id) in sheet_results:
+                shr = sheet_results[str(node_id)]
+                node_result_entry['sheet'] = {
+                    'status': shr.get('status', ''), 'mode': shr.get('mode', ''),
+                    'sheet_id': shr.get('sheet_id', ''), 'sheet_title': shr.get('sheet_title', ''),
+                    'rows_written': shr.get('rows_written', 0), 'row_count': shr.get('row_count', 0),
+                    'query_count': shr.get('query_count', 0), 'cache_hits': shr.get('cache_hits', 0),
+                    'results': shr.get('results', []),
+                }
+
+            results.append(node_result_entry)
+
+            if node.node_type == 'output':
+                output_doc_ids.extend(output_ids)
+
+            # Also handle merged followers — create placeholder results so
+            # they appear in the execution history
+            for fid in _merged_rules.get(node_id, []):
+                follower = nodes[fid]
+                f_result_data = follower.last_result or result_data
+                node_outputs[fid] = output_ids  # same output as leader
+                follower_entry = {
+                    'node_id': str(fid), 'node_type': 'rule',
+                    'label': follower.label or 'Rule',
+                    'count': f_result_data.get('count', result_data['count']),
+                    'document_ids': f_result_data.get('document_ids', result_data['document_ids']),
+                    'merged_with': str(node_id),
+                }
+                results.append(follower_entry)
+
+            # ── Log node execution for per-node tracking ──────────────
+            try:
+                from .event_system import log_node_execution
+                _log_input_ids = []
+                if node.node_type != 'input':
+                    for pid in incoming_map.get(node_id, []):
+                        pout = node_outputs.get(pid, [])
+                        if isinstance(pout, dict):
+                            for v in pout.values():
+                                _log_input_ids.extend(v if isinstance(v, list) else [v])
+                        elif isinstance(pout, list):
+                            _log_input_ids.extend(pout)
+
+                _log_status = 'completed'
+                _err_msg = ''
+                if result_data.get('error'):
+                    _log_status = 'failed'
+                    _err_msg = str(result_data['error'])[:2000]
+
+                log_node_execution(
+                    execution=execution,
+                    node=node,
+                    workflow=workflow,
+                    status=_log_status,
+                    input_ids=_log_input_ids,
+                    output_ids=output_ids,
+                    result_data=result_data,
+                    error_message=_err_msg,
+                    started_at=node_started,
+                    completed_at=node_ended,
+                    dag_level=level_idx,
+                )
+            except Exception as _log_err:
+                logger.debug(f"Failed to log node execution: {_log_err}")
+
+            # ── Incremental progress save ─────────────────────────────
+            _save_progress()
+
+        # ── Run sequential nodes first (within this level) ────────────
+        for node_id in sequential_nodes:
+            nid, output_ids, type_results, ns, ne = _run_one_node(node_id)
+            _integrate_node_result(nid, output_ids, type_results, ns, ne)
+
+        # ── Run parallel-eligible nodes concurrently ──────────────────
+        if len(parallel_eligible) <= 1:
+            # Single node or empty — no thread overhead
+            for node_id in parallel_eligible:
+                nid, output_ids, type_results, ns, ne = _run_one_node(node_id)
+                _integrate_node_result(nid, output_ids, type_results, ns, ne)
         else:
-            result_data = {
-                'count': len(output_ids),
-                'document_ids': [str(did) for did in output_ids],
-            }
-        # For action nodes, also include action stats
-        if node.node_type == 'action' and str(node_id) in action_results:
-            ar = action_results[str(node_id)]
-            result_data['sent'] = ar.get('sent', 0)
-            result_data['skipped'] = ar.get('skipped', 0)
-            result_data['failed'] = ar.get('failed', 0)
-            result_data['action_status'] = ar.get('status', '')
-            result_data['execution_id'] = ar.get('execution_id', '')
-        # For listener nodes, include listener status
-        if node.node_type == 'listener' and str(node_id) in listener_results:
-            lr = listener_results[str(node_id)]
-            result_data['listener_status'] = lr.get('status', '')
-            result_data['event_id'] = lr.get('event_id', '')
-            result_data['listener_message'] = lr.get('message', '')
-        # For validator nodes, include validation status
-        if node.node_type == 'validator' and str(node_id) in validator_results:
-            vr = validator_results[str(node_id)]
-            result_data['validator_status'] = vr.get('status', '')
-            result_data['approved'] = len(vr.get('passed_document_ids', []))
-            result_data['pending'] = len(vr.get('pending_document_ids', []))
-            result_data['rejected'] = len(vr.get('rejected_document_ids', []))
-        # For AI nodes, include AI processing stats
-        if node.node_type == 'ai' and str(node_id) in ai_results:
-            air = ai_results[str(node_id)]
-            result_data['ai_status'] = air.get('status', '')
-            result_data['ai_model'] = air.get('model', '')
-            result_data['output_format'] = air.get('output_format', 'text')
-            result_data['processed'] = air.get('processed', 0)
-            result_data['failed'] = air.get('failed', 0)
-            result_data['cache_hits'] = air.get('cache_hits', 0)
-            result_data['output_key'] = air.get('output_key', '')
-            result_data['json_fields'] = air.get('json_fields', [])
-        # For gate nodes, include gate stats
-        if node.node_type == 'and_gate' and str(node_id) in gate_results:
-            gr = gate_results[str(node_id)]
-            result_data['gate_type'] = gr.get('gate_type', '')
-            result_data['gate_status'] = gr.get('status', '')
-            result_data['parent_count'] = gr.get('parent_count', 0)
-            result_data['total_upstream'] = gr.get('total_upstream', 0)
-            result_data['blocked'] = len(gr.get('blocked_document_ids', []))
-            result_data['gate_message'] = gr.get('message', '')
-
-        # For scraper nodes, include scraper stats
-        if node.node_type == 'scraper' and str(node_id) in scraper_results:
-            sr = scraper_results[str(node_id)]
-            result_data['scraper_status'] = sr.get('status', '')
-            result_data['urls_scraped'] = sr.get('urls_scraped', 0)
-            result_data['urls_blocked'] = sr.get('urls_blocked', 0)
-            result_data['urls_failed'] = sr.get('urls_failed', 0)
-            result_data['total_snippets'] = sr.get('total_snippets', 0)
-            result_data['keywords'] = sr.get('keywords', [])
-
-        # For doc_create nodes, include creation stats
-        if node.node_type == 'doc_create' and str(node_id) in doc_create_results:
-            dcr = doc_create_results[str(node_id)]
-            result_data['doc_create_status'] = dcr.get('status', '')
-            result_data['creation_mode'] = dcr.get('creation_mode', '')
-            result_data['created'] = dcr.get('created', 0)
-            result_data['skipped'] = dcr.get('skipped', 0)
-            result_data['failed'] = dcr.get('failed', 0)
-            result_data['created_document_ids'] = dcr.get('created_document_ids', [])
-
-        # For inference nodes, include inference stats
-        if node.node_type == 'inference' and str(node_id) in inference_results:
-            ir = inference_results[str(node_id)]
-            result_data['inference_status'] = ir.get('status', '')
-            result_data['inference_scope'] = ir.get('inference_scope', '')
-            result_data['inference_model'] = ir.get('model', '')
-            result_data['processed'] = ir.get('processed', 0)
-            result_data['failed'] = ir.get('failed', 0)
-            result_data['inference_hits'] = ir.get('inference_hits', 0)
-            result_data['output_key'] = ir.get('output_key', '')
-
-        node.last_result = result_data
-        node.save(update_fields=['last_result', 'updated_at'])
-
-        node_result_entry = {
-            'node_id': str(node_id),
-            'node_type': node.node_type,
-            'label': node.label or node.node_type.title(),
-            'count': result_data['count'],
-            'document_ids': result_data['document_ids'],
-        }
-        if node.node_type == 'action' and str(node_id) in action_results:
-            ar = action_results[str(node_id)]
-            node_result_entry['action'] = {
-                'execution_id': ar.get('execution_id', ''),
-                'plugin': ar.get('plugin', ''),
-                'status': ar.get('status', ''),
-                'sent': ar.get('sent', 0),
-                'skipped': ar.get('skipped', 0),
-                'failed': ar.get('failed', 0),
-                'results': ar.get('results', []),
-            }
-        if node.node_type == 'listener' and str(node_id) in listener_results:
-            lr = listener_results[str(node_id)]
-            node_result_entry['listener'] = {
-                'status': lr.get('status', ''),
-                'event_id': lr.get('event_id'),
-                'message': lr.get('message', ''),
-                'passed_count': len(lr.get('passed_document_ids', [])),
-            }
-        if node.node_type == 'validator' and str(node_id) in validator_results:
-            vr = validator_results[str(node_id)]
-            node_result_entry['validator'] = {
-                'status': vr.get('status', ''),
-                'approved': len(vr.get('passed_document_ids', [])),
-                'pending': len(vr.get('pending_document_ids', [])),
-                'rejected': len(vr.get('rejected_document_ids', [])),
-                'message': vr.get('message', ''),
-                'approved_document_ids': [str(d) for d in vr.get('passed_document_ids', [])],
-                'rejected_document_ids': [str(d) for d in vr.get('rejected_document_ids', [])],
-            }
-        if node.node_type == 'ai' and str(node_id) in ai_results:
-            air = ai_results[str(node_id)]
-            node_result_entry['ai'] = {
-                'model': air.get('model', ''),
-                'status': air.get('status', ''),
-                'output_format': air.get('output_format', 'text'),
-                'processed': air.get('processed', 0),
-                'failed': air.get('failed', 0),
-                'cache_hits': air.get('cache_hits', 0),
-                'total': air.get('total', 0),
-                'output_key': air.get('output_key', ''),
-                'json_fields': air.get('json_fields', []),
-                'results': air.get('results', []),
-            }
-        if node.node_type == 'and_gate' and str(node_id) in gate_results:
-            gr = gate_results[str(node_id)]
-            node_result_entry['gate'] = {
-                'gate_type': gr.get('gate_type', ''),
-                'status': gr.get('status', ''),
-                'passed': len(gr.get('passed_document_ids', [])),
-                'blocked': len(gr.get('blocked_document_ids', [])),
-                'total_upstream': gr.get('total_upstream', 0),
-                'parent_count': gr.get('parent_count', 0),
-                'parent_details': gr.get('parent_details', {}),
-                'message': gr.get('message', ''),
-            }
-        if node.node_type == 'scraper' and str(node_id) in scraper_results:
-            sr = scraper_results[str(node_id)]
-            node_result_entry['scraper'] = {
-                'status': sr.get('status', ''),
-                'urls_scraped': sr.get('urls_scraped', 0),
-                'urls_blocked': sr.get('urls_blocked', 0),
-                'urls_failed': sr.get('urls_failed', 0),
-                'total_snippets': sr.get('total_snippets', 0),
-                'keywords': sr.get('keywords', []),
-                'results': sr.get('results', []),
-                'url_results': sr.get('url_results', []),
-            }
-        if node.node_type == 'doc_create' and str(node_id) in doc_create_results:
-            dcr = doc_create_results[str(node_id)]
-            node_result_entry['doc_create'] = {
-                'status': dcr.get('status', ''),
-                'creation_mode': dcr.get('creation_mode', ''),
-                'created': dcr.get('created', 0),
-                'skipped': dcr.get('skipped', 0),
-                'failed': dcr.get('failed', 0),
-                'total': dcr.get('total', 0),
-                'created_document_ids': dcr.get('created_document_ids', []),
-                'results': dcr.get('results', []),
-            }
-        if node.node_type == 'inference' and str(node_id) in inference_results:
-            ir = inference_results[str(node_id)]
-            node_result_entry['inference'] = {
-                'status': ir.get('status', ''),
-                'inference_scope': ir.get('inference_scope', ''),
-                'model': ir.get('model', ''),
-                'output_key': ir.get('output_key', ''),
-                'processed': ir.get('processed', 0),
-                'failed': ir.get('failed', 0),
-                'inference_hits': ir.get('inference_hits', 0),
-                'results': ir.get('results', []),
-            }
-
-        results.append(node_result_entry)
-
-        if node.node_type == 'output':
-            output_doc_ids.extend(output_ids)
+            # Parallel execution via ThreadPoolExecutor
+            max_workers = min(len(parallel_eligible), 4)  # cap at 4 threads
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                import django.db
+                django.db.connections.close_all()  # close DB conns before forking threads
+                futures = {
+                    executor.submit(_run_one_node, nid): nid
+                    for nid in parallel_eligible
+                }
+                for future in as_completed(futures):
+                    try:
+                        nid, output_ids, type_results, ns, ne = future.result()
+                        _integrate_node_result(nid, output_ids, type_results, ns, ne)
+                    except Exception as e:
+                        failed_nid = futures[future]
+                        logger.error(f"Parallel node {failed_nid} failed: {e}")
+                        node = nodes[failed_nid]
+                        node_outputs[failed_nid] = []
+                        node.last_result = {'count': 0, 'document_ids': [], 'error': str(e)}
+                        node.save(update_fields=['last_result', 'updated_at'])
+                        results.append({
+                            'node_id': str(failed_nid),
+                            'node_type': node.node_type,
+                            'label': node.label or node.node_type.title(),
+                            'count': 0, 'document_ids': [], 'error': str(e),
+                        })
+                        # Log failed node execution
+                        try:
+                            from .event_system import log_node_execution
+                            log_node_execution(
+                                execution=execution, node=node, workflow=workflow,
+                                status='failed', error_message=str(e)[:2000],
+                                dag_level=level_idx,
+                            )
+                        except Exception:
+                            pass
+                        _save_progress()
 
     # Update workflow
     workflow.last_executed_at = timezone.now()
+    # (execution_state will be set to idle/completed/failed below)
     workflow.save(update_fields=['last_executed_at'])
 
     # Fetch final output documents for response
@@ -1521,10 +2019,23 @@ def execute_workflow(
         'validator_results': validator_results,
         'gate_results': gate_results,
         'scraper_results': scraper_results,
+        'sheet_results': sheet_results,
         'output_documents': output_doc_data,
         'duration_ms': duration_ms,
         'total_documents': execution.total_documents,
     })
+
+    # ── Final sync: refresh all input nodes' document_state ──────────
+    # During execution, extraction statuses may have changed (pending →
+    # completed/failed), or auto-execute may have run.  Sync once at the
+    # end so the cached state accurately reflects the DB.
+    for node_id in topo_order:
+        node = nodes[node_id]
+        if node.node_type == 'input':
+            try:
+                node.sync_document_state()
+            except Exception as e:
+                logger.warning(f"Post-execute sync_document_state failed for {node_id}: {e}")
 
     # Determine execution status
     has_failed = any(
@@ -1562,6 +2073,11 @@ def execute_workflow(
     execution.completed_at = timezone.now()
     execution.duration_ms = duration_ms
     execution.save()
+
+    # ── Lifecycle: completed / failed → idle ───────────────────────────
+    workflow.execution_state = 'idle'
+    workflow.current_execution_id = None
+    workflow.save(update_fields=['execution_state', 'current_execution_id', 'updated_at'])
 
     # ── Smart execution: record per-document execution results ─────────
     if smart:

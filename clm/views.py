@@ -24,6 +24,7 @@ from .models import (
     ActionPlugin,
     DerivedField,
     ExtractedField,
+    InputNodeHistory,
     ListenerEvent,
     NodeConnection,
     ValidatorUser,
@@ -42,6 +43,7 @@ from .serializers import (
     DocumentExtractionRequestSerializer,
     ExtractedFieldEditSerializer,
     ExtractedFieldSerializer,
+    InputNodeHistorySerializer,
     ListenerEventSerializer,
     ListenerResolveSerializer,
     ListenerTriggerSerializer,
@@ -320,6 +322,36 @@ class WorkflowViewSet(viewsets.ModelViewSet):
         if auto_result:
             result['auto_execution'] = auto_result
 
+        # Record input history for the upload operation
+        if created and input_node_obj:
+            from .models import InputNodeHistory
+            source_type = 'bulk_upload' if len(created) > 5 else 'upload'
+            InputNodeHistory.objects.create(
+                workflow=workflow,
+                node=input_node_obj,
+                organization=org,
+                source_type=source_type,
+                status='completed',
+                document_count=len(created),
+                skipped_count=len(skipped_dupes),
+                document_ids=[str(d.id) for d in created],
+                source_reference={
+                    'file_names': [name for name, _ in files],
+                },
+                details={
+                    'duplicates_skipped': skipped_dupes,
+                    'zip_expanded': {
+                        'archives': zip_count,
+                        'files_extracted': zip_file_count,
+                    } if zip_count else None,
+                },
+                triggered_by=request.user if request.user.is_authenticated else None,
+            )
+
+        # Sync document_state on the input node so executor reads from it
+        if input_node_obj:
+            input_node_obj.sync_document_state()
+
         return Response(result, status=status.HTTP_201_CREATED)
 
     # -- Table upload (spreadsheet → row documents) -------------------------
@@ -429,6 +461,25 @@ class WorkflowViewSet(viewsets.ModelViewSet):
             }
             input_node_obj.config = config
             input_node_obj.save(update_fields=['config'])
+
+        # Record input history for table upload
+        if docs and input_node_obj:
+            from .models import InputNodeHistory
+            InputNodeHistory.objects.create(
+                workflow=workflow,
+                node=input_node_obj,
+                organization=org,
+                source_type='table',
+                status='completed',
+                document_count=len(docs),
+                document_ids=[str(d.id) for d in docs],
+                source_reference={
+                    'file_name': uploaded_file.name if uploaded_file else google_url,
+                    'headers': parsed['headers'],
+                    'parse_method': parsed.get('parse_method', 'unknown'),
+                },
+                triggered_by=request.user if request.user.is_authenticated else None,
+            )
 
         return Response({
             'documents': WorkflowDocumentSerializer(docs, many=True).data,
@@ -802,6 +853,7 @@ class WorkflowViewSet(viewsets.ModelViewSet):
             )
 
         title = doc.title
+        input_node_obj = doc.input_node
         # Delete the physical file
         if doc.file:
             try:
@@ -810,6 +862,11 @@ class WorkflowViewSet(viewsets.ModelViewSet):
                 pass
 
         doc.delete()  # Cascade deletes ExtractedField rows
+
+        # Sync document_state on the owning input node
+        if input_node_obj:
+            input_node_obj.sync_document_state()
+
         return Response({
             'deleted': True,
             'document_id': str(doc_id),
@@ -854,6 +911,10 @@ class WorkflowViewSet(viewsets.ModelViewSet):
         result = run_extraction(doc, template, document_type=workflow.document_type)
         doc.refresh_from_db()
 
+        # Sync document_state on the owning input node
+        if doc.input_node:
+            doc.input_node.sync_document_state()
+
         return Response({
             'document': WorkflowDocumentSerializer(doc).data,
             'extraction': result,
@@ -886,7 +947,10 @@ class WorkflowViewSet(viewsets.ModelViewSet):
 
         doc_type = workflow.document_type
         results = []
+        affected_nodes = set()
         for doc in docs:
+            if doc.input_node_id:
+                affected_nodes.add(doc.input_node_id)
             try:
                 result = run_extraction(doc, template, document_type=doc_type)
                 results.append({
@@ -904,6 +968,14 @@ class WorkflowViewSet(viewsets.ModelViewSet):
                     'status': 'failed',
                     'error': str(e),
                 })
+
+        # Sync document_state on all affected input nodes
+        for nid in affected_nodes:
+            try:
+                node_obj = WorkflowNode.objects.get(id=nid)
+                node_obj.sync_document_state()
+            except WorkflowNode.DoesNotExist:
+                pass
 
         return Response({
             'processed': len(results),
@@ -1623,23 +1695,30 @@ class WorkflowViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=['post'], url_path='execute')
     def execute(self, request, pk=None):
         """
-        Execute the workflow pipeline.
+        Execute the workflow pipeline (sync or async).
         POST /api/clm/workflows/{id}/execute/
         Body (all optional):
           {
             "document_ids": ["uuid", ...],       // specific docs only (batch/single mode)
             "excluded_ids": ["uuid", ...],        // docs to exclude
             "mode": "full" | "batch" | "single",  // default: auto-detected
-            "smart": true                          // skip already-executed docs (hash dedup)
+            "smart": true,                         // skip already-executed docs (hash dedup)
+            "async": true                          // dispatch as Celery task (returns immediately)
           }
+
+        When ``async=true``, a WorkflowExecution record is created with
+        status='queued', the task is dispatched to Celery, and the response
+        returns the ``execution_id`` immediately.  The frontend polls
+        ``/execution-status/<exec_id>/`` until the task finishes.
         """
-        from .node_executor import execute_workflow
+        from .models import WorkflowExecution
 
         workflow = self.get_object()
 
         doc_ids = request.data.get('document_ids')
         excluded_ids = request.data.get('excluded_ids')
         smart = request.data.get('smart', False)
+        run_async = request.data.get('async', False)
 
         # Auto-detect mode
         if request.data.get('mode'):
@@ -1650,6 +1729,121 @@ class WorkflowViewSet(viewsets.ModelViewSet):
             mode = 'batch'
         else:
             mode = 'full'
+
+        if run_async:
+            # Async execution — dispatch Celery task
+            # ──────────────────────────────────────────────────────────
+            # Locking strategy:
+            #   Primary lock  = workflow.execution_state (DB, authoritative)
+            #   Secondary lock = LocMemCache key (best-effort, unreliable
+            #                    across processes like Celery workers)
+            #
+            # We rely on the DB field as the single source of truth.  The
+            # cache lock is a nice-to-have for same-process dedup but is
+            # NOT required for correctness.
+            # ──────────────────────────────────────────────────────────
+            from .tasks import execute_workflow_async
+
+            force = request.data.get('force', False)
+
+            # Refresh workflow state from DB
+            workflow.refresh_from_db(fields=['execution_state', 'current_execution_id'])
+
+            if workflow.execution_state not in ('idle', 'completed', 'failed'):
+                # Workflow claims it's busy — validate with the DB record
+                active_exec = WorkflowExecution.objects.filter(
+                    workflow=workflow,
+                    status__in=['queued', 'running'],
+                ).order_by('-started_at').first()
+
+                if active_exec:
+                    age = (timezone.now() - active_exec.started_at).total_seconds()
+
+                    if age > 300 or force:
+                        # Stale (>5 min) or forced override — kill it
+                        active_exec.status = 'failed'
+                        active_exec.result_data = {
+                            'error': f'Execution timed out after {int(age)}s (stale lock cleared)',
+                        }
+                        active_exec.completed_at = timezone.now()
+                        active_exec.duration_ms = int(age * 1000)
+                        active_exec.save()
+                        workflow.execution_state = 'idle'
+                        workflow.current_execution_id = None
+                        workflow.save(update_fields=['execution_state', 'current_execution_id', 'updated_at'])
+                    else:
+                        # Genuinely running — return rich 409 so frontend
+                        # can resume polling on this execution
+                        return Response({
+                            'error': 'Workflow is already executing.',
+                            'execution_id': str(active_exec.id),
+                            'status': active_exec.status,
+                            'execution_state': workflow.execution_state,
+                            'started_at': active_exec.started_at.isoformat(),
+                            'age_seconds': int(age),
+                            'resume': True,
+                            'message': f'Execution {active_exec.status} (started {int(age)}s ago). '
+                                       f'Poll /execution-status/{active_exec.id}/ or pass "force": true to override.',
+                        }, status=status.HTTP_409_CONFLICT)
+                else:
+                    # No active execution in DB — state is stuck, reset it
+                    workflow.execution_state = 'idle'
+                    workflow.current_execution_id = None
+                    workflow.save(update_fields=['execution_state', 'current_execution_id', 'updated_at'])
+
+            execution = WorkflowExecution.objects.create(
+                workflow=workflow,
+                status='queued',
+                mode=mode,
+                triggered_by=request.user if request.user.is_authenticated else None,
+                excluded_document_ids=[str(d) for d in (excluded_ids or [])],
+            )
+
+            try:
+                execute_workflow_async.delay(
+                    workflow_id=str(workflow.id),
+                    execution_id=str(execution.id),
+                    user_id=request.user.pk if request.user.is_authenticated else None,
+                    document_ids=doc_ids,
+                    excluded_ids=excluded_ids,
+                    mode=mode,
+                    smart=bool(smart),
+                )
+            except Exception as broker_err:
+                # Celery broker unavailable (no Redis, etc.) — run synchronously
+                # using the already-created execution record.
+                import logging
+                logging.getLogger('clm').warning(
+                    f'[execute] Celery broker unavailable ({broker_err}), '
+                    f'falling back to sync execution for workflow {workflow.id}'
+                )
+                from .node_executor import execute_workflow as _exec_sync
+
+                try:
+                    result = _exec_sync(
+                        workflow,
+                        triggered_by=request.user,
+                        single_document_ids=doc_ids if doc_ids else None,
+                        excluded_document_ids=excluded_ids if excluded_ids else None,
+                        mode=mode,
+                        smart=bool(smart),
+                        execution=execution,
+                    )
+                    return Response(result)
+                except ValueError as e:
+                    return Response(
+                        {'error': str(e)},
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+
+            return Response({
+                'execution_id': str(execution.id),
+                'status': 'queued',
+                'message': 'Workflow execution queued. Poll /execution-status/ for progress.',
+            }, status=status.HTTP_202_ACCEPTED)
+
+        # Synchronous execution (existing behaviour)
+        from .node_executor import execute_workflow
 
         try:
             result = execute_workflow(
@@ -1666,6 +1860,426 @@ class WorkflowViewSet(viewsets.ModelViewSet):
                 {'error': str(e)},
                 status=status.HTTP_400_BAD_REQUEST,
             )
+
+    # -- Execution status (polling for async) ----------------------------------
+
+    @action(detail=True, methods=['get'], url_path='execution-status/(?P<exec_id>[0-9a-f-]+)')
+    def execution_status(self, request, pk=None, exec_id=None):
+        """
+        Lightweight polling endpoint for async execution progress.
+        GET /api/clm/workflows/{id}/execution-status/{exec_id}/
+
+        Returns:
+          {
+            "execution_id": "...",
+            "status": "queued" | "running" | "completed" | "partial" | "failed",
+            "mode": "...",
+            "started_at": "...",
+            "completed_at": "..." | null,
+            "duration_ms": ... | null,
+            "total_documents": ...,
+            "node_summary": [...],
+            "result_data": {...}        // only when completed/failed
+          }
+        """
+        from .models import WorkflowExecution
+
+        workflow = self.get_object()
+        try:
+            execution = WorkflowExecution.objects.get(
+                id=exec_id, workflow=workflow,
+            )
+        except WorkflowExecution.DoesNotExist:
+            return Response(
+                {'error': 'Execution not found.'},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        data = {
+            'execution_id': str(execution.id),
+            'status': execution.status,
+            'mode': execution.mode,
+            'execution_state': workflow.execution_state,
+            'started_at': execution.started_at.isoformat() if execution.started_at else None,
+            'completed_at': execution.completed_at.isoformat() if execution.completed_at else None,
+            'duration_ms': execution.duration_ms,
+            'total_documents': execution.total_documents,
+            'node_summary': execution.node_summary,
+        }
+
+        # Include full result_data only when execution is finished
+        if execution.status in ('completed', 'partial', 'failed'):
+            data['result_data'] = execution.result_data
+
+        return Response(data)
+
+    # -- Live mode toggle ----------------------------------------------------
+
+    @action(detail=True, methods=['get', 'patch'], url_path='live')
+    def live(self, request, pk=None):
+        """
+        GET  /api/clm/workflows/{id}/live/  → current live state
+        PATCH /api/clm/workflows/{id}/live/  → toggle is_live on/off
+
+        Body (PATCH):
+          { "is_live": true, "live_interval": 60 }
+        """
+        workflow = self.get_object()
+
+        if request.method == 'GET':
+            return Response({
+                'is_live': workflow.is_live,
+                'live_interval': workflow.live_interval,
+                'last_executed_at': workflow.last_executed_at.isoformat() if workflow.last_executed_at else None,
+            })
+
+        # PATCH
+        if 'is_live' in request.data:
+            workflow.is_live = bool(request.data['is_live'])
+        if 'live_interval' in request.data:
+            interval = int(request.data['live_interval'])
+            workflow.live_interval = max(interval, 10)  # minimum 10s
+
+        workflow.save(update_fields=['is_live', 'live_interval', 'updated_at'])
+
+        return Response({
+            'is_live': workflow.is_live,
+            'live_interval': workflow.live_interval,
+            'message': f'Workflow is now {"LIVE" if workflow.is_live else "offline"}.',
+        })
+
+    # -- Compile workflow (validate DAG + create event subscriptions) --------
+
+    @action(detail=True, methods=['post'], url_path='compile')
+    def compile_workflow(self, request, pk=None):
+        """
+        POST /api/clm/workflows/{id}/compile/
+
+        Validates the workflow DAG, checks input node configurations,
+        creates event subscriptions for all input nodes, and marks the
+        workflow as compiled.  This is the prerequisite for going live.
+
+        Returns the compilation result with errors, warnings, and
+        subscription details.
+        """
+        from .event_system import compile_workflow as _compile
+        from .models import WorkflowCompilation
+
+        workflow = self.get_object()
+        compilation = _compile(workflow, user=request.user if request.user.is_authenticated else None)
+
+        return Response({
+            'id': str(compilation.id),
+            'status': compilation.status,
+            'node_count': compilation.node_count,
+            'connection_count': compilation.connection_count,
+            'has_cycle': compilation.has_cycle,
+            'has_input_node': compilation.has_input_node,
+            'has_output_node': compilation.has_output_node,
+            'subscriptions_created': compilation.subscriptions_created,
+            'subscription_details': compilation.subscription_details,
+            'errors': compilation.errors,
+            'warnings': compilation.warnings,
+            'config_hash': compilation.config_hash,
+            'compilation_status': workflow.compilation_status,
+            'compiled_at': workflow.compiled_at.isoformat() if workflow.compiled_at else None,
+        }, status=status.HTTP_200_OK if compilation.status != 'failed' else status.HTTP_400_BAD_REQUEST)
+
+    # -- Compile + Go Live (compile then enable) -----------------------------
+
+    @action(detail=True, methods=['post'], url_path='go-live')
+    def go_live(self, request, pk=None):
+        """
+        POST /api/clm/workflows/{id}/go-live/
+        Body: { "live_interval": 60 }  (optional)
+
+        Compiles the workflow and, if successful, sets is_live=True.
+        This is the one-step "go live" action that the frontend calls.
+        """
+        from .event_system import compile_workflow as _compile
+
+        workflow = self.get_object()
+
+        # Compile first
+        compilation = _compile(workflow, user=request.user if request.user.is_authenticated else None)
+
+        if compilation.status == 'failed':
+            return Response({
+                'success': False,
+                'message': 'Compilation failed — cannot go live.',
+                'errors': compilation.errors,
+                'warnings': compilation.warnings,
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        # Set live
+        interval = request.data.get('live_interval')
+        if interval:
+            workflow.live_interval = max(int(interval), 10)
+        workflow.is_live = True
+        workflow.save(update_fields=['is_live', 'live_interval', 'updated_at'])
+
+        return Response({
+            'success': True,
+            'is_live': True,
+            'live_interval': workflow.live_interval,
+            'compilation_status': workflow.compilation_status,
+            'compiled_at': workflow.compiled_at.isoformat() if workflow.compiled_at else None,
+            'subscriptions_created': compilation.subscriptions_created,
+            'subscription_details': compilation.subscription_details,
+            'warnings': compilation.warnings,
+            'message': f'Workflow "{workflow.name}" is now LIVE.',
+        })
+
+    # -- Pause (go offline) --------------------------------------------------
+
+    @action(detail=True, methods=['post'], url_path='pause')
+    def pause(self, request, pk=None):
+        """
+        POST /api/clm/workflows/{id}/pause/
+
+        Pauses a live workflow — sets is_live=False and pauses all
+        event subscriptions.
+        """
+        from .models import EventSubscription
+
+        workflow = self.get_object()
+        workflow.is_live = False
+        workflow.save(update_fields=['is_live', 'updated_at'])
+
+        # Pause all active subscriptions
+        paused = EventSubscription.objects.filter(
+            workflow=workflow, status='active',
+        ).update(status='paused')
+
+        return Response({
+            'success': True,
+            'is_live': False,
+            'subscriptions_paused': paused,
+            'message': f'Workflow "{workflow.name}" is now PAUSED.',
+        })
+
+    # -- Event subscriptions -------------------------------------------------
+
+    @action(detail=True, methods=['get'], url_path='subscriptions')
+    def subscriptions(self, request, pk=None):
+        """
+        GET /api/clm/workflows/{id}/subscriptions/
+
+        Lists all event subscriptions for this workflow with their status,
+        stats, and configuration.
+        """
+        from .models import EventSubscription
+        from .serializers import EventSubscriptionSerializer
+
+        workflow = self.get_object()
+        subs = EventSubscription.objects.filter(
+            workflow=workflow,
+        ).select_related('node').order_by('-created_at')
+
+        return Response({
+            'subscriptions': EventSubscriptionSerializer(subs, many=True).data,
+            'count': subs.count(),
+        })
+
+    # -- Event log -----------------------------------------------------------
+
+    @action(detail=True, methods=['get'], url_path='event-log')
+    def event_log(self, request, pk=None):
+        """
+        GET /api/clm/workflows/{id}/event-log/
+        ?limit=50&event_type=sheet_updated&status=processed
+
+        Lists all events received by this workflow (webhook calls, sheet
+        updates, email arrivals, poll results).
+        """
+        from .models import WebhookEvent
+        from .serializers import WebhookEventSerializer
+
+        workflow = self.get_object()
+        limit = int(request.query_params.get('limit', 50))
+
+        qs = WebhookEvent.objects.filter(
+            workflow=workflow,
+        ).select_related('subscription', 'execution').order_by('-created_at')
+
+        event_type = request.query_params.get('event_type')
+        if event_type:
+            qs = qs.filter(event_type=event_type)
+
+        status_filter = request.query_params.get('status')
+        if status_filter:
+            qs = qs.filter(status=status_filter)
+
+        events = qs[:limit]
+
+        return Response({
+            'events': WebhookEventSerializer(events, many=True).data,
+            'count': len(events),
+        })
+
+    # -- Node execution logs -------------------------------------------------
+
+    @action(detail=True, methods=['get'], url_path='node-execution-logs/(?P<exec_id>[0-9a-f-]+)')
+    def node_execution_logs(self, request, pk=None, exec_id=None):
+        """
+        GET /api/clm/workflows/{id}/node-execution-logs/{exec_id}/
+
+        Returns per-node execution logs for a specific workflow execution.
+        Shows input/output document IDs, timing, errors, and result data
+        for every node that ran.
+        """
+        from .models import NodeExecutionLog, WorkflowExecution
+        from .serializers import NodeExecutionLogSerializer
+
+        workflow = self.get_object()
+
+        try:
+            execution = WorkflowExecution.objects.get(id=exec_id, workflow=workflow)
+        except WorkflowExecution.DoesNotExist:
+            return Response({'error': 'Execution not found.'}, status=status.HTTP_404_NOT_FOUND)
+
+        logs = NodeExecutionLog.objects.filter(
+            execution=execution,
+        ).select_related('node').order_by('dag_level', 'started_at')
+
+        return Response({
+            'execution_id': str(execution.id),
+            'execution_status': execution.status,
+            'node_logs': NodeExecutionLogSerializer(logs, many=True).data,
+            'count': logs.count(),
+        })
+
+    # -- Compilation history -------------------------------------------------
+
+    @action(detail=True, methods=['get'], url_path='compilation-history')
+    def compilation_history(self, request, pk=None):
+        """
+        GET /api/clm/workflows/{id}/compilation-history/
+        ?limit=10
+
+        Lists all compilation attempts for this workflow.
+        """
+        from .models import WorkflowCompilation
+        from .serializers import WorkflowCompilationSerializer
+
+        workflow = self.get_object()
+        limit = int(request.query_params.get('limit', 10))
+
+        compilations = WorkflowCompilation.objects.filter(
+            workflow=workflow,
+        ).order_by('-created_at')[:limit]
+
+        return Response({
+            'compilations': WorkflowCompilationSerializer(compilations, many=True).data,
+            'count': len(compilations),
+        })
+
+    # -- Workflow status (comprehensive server-side status) ------------------
+
+    @action(detail=True, methods=['get', 'post'], url_path='workflow-status')
+    def workflow_status(self, request, pk=None):
+        """
+        GET  /api/clm/workflows/{id}/workflow-status/
+        Comprehensive status: is_live, current execution state, lock info,
+        last execution summary, document counts.
+
+        POST /api/clm/workflows/{id}/workflow-status/
+        Body: { "action": "clear_lock" }
+        Force-clears any stale execution state so Execute can run again.
+        """
+        from .models import WorkflowExecution
+
+        workflow = self.get_object()
+
+        if request.method == 'POST':
+            action_name = request.data.get('action')
+            if action_name == 'clear_lock':
+                # Reset DB-based execution state
+                workflow.execution_state = 'idle'
+                workflow.current_execution_id = None
+                workflow.save(update_fields=['execution_state', 'current_execution_id', 'updated_at'])
+                # Also mark any queued/running executions as failed (stale)
+                stale = WorkflowExecution.objects.filter(
+                    workflow=workflow,
+                    status__in=['queued', 'running'],
+                )
+                count = stale.count()
+                stale.update(
+                    status='failed',
+                    completed_at=timezone.now(),
+                )
+                # Clear cache lock too (best-effort, may not be in this process)
+                try:
+                    from django.core.cache import cache as django_cache
+                    django_cache.delete(f'clm:workflow_exec:{workflow.id}')
+                except Exception:
+                    pass
+                return Response({
+                    'cleared': True,
+                    'stale_executions_cleared': count,
+                    'execution_state': 'idle',
+                    'message': f'Lock cleared. {count} stale execution(s) marked failed.',
+                })
+            return Response({'error': 'Unknown action'}, status=status.HTTP_400_BAD_REQUEST)
+
+        # GET — build comprehensive status (DB-based, no cache dependency)
+        workflow.refresh_from_db(fields=['execution_state', 'current_execution_id'])
+
+        # Find any active execution
+        active_exec = WorkflowExecution.objects.filter(
+            workflow=workflow,
+            status__in=['queued', 'running'],
+        ).order_by('-started_at').first()
+
+        active_info = None
+        if active_exec:
+            age = (timezone.now() - active_exec.started_at).total_seconds()
+            active_info = {
+                'execution_id': str(active_exec.id),
+                'status': active_exec.status,
+                'mode': active_exec.mode,
+                'started_at': active_exec.started_at.isoformat(),
+                'age_seconds': int(age),
+                'is_stale': age > 300,
+            }
+
+        # Last completed execution
+        last_exec = WorkflowExecution.objects.filter(
+            workflow=workflow,
+            status__in=['completed', 'partial', 'failed'],
+        ).order_by('-started_at').first()
+
+        last_info = None
+        if last_exec:
+            last_info = {
+                'execution_id': str(last_exec.id),
+                'status': last_exec.status,
+                'mode': last_exec.mode,
+                'duration_ms': last_exec.duration_ms,
+                'total_documents': last_exec.total_documents,
+                'started_at': last_exec.started_at.isoformat() if last_exec.started_at else None,
+                'completed_at': last_exec.completed_at.isoformat() if last_exec.completed_at else None,
+                'node_summary': last_exec.node_summary,
+            }
+
+        doc_count = workflow.documents.count() if hasattr(workflow, 'documents') else 0
+        node_count = workflow.nodes.count() if hasattr(workflow, 'nodes') else 0
+
+        return Response({
+            'workflow_id': str(workflow.id),
+            'workflow_name': workflow.name,
+            'is_active': workflow.is_active,
+            'is_live': workflow.is_live,
+            'live_interval': workflow.live_interval,
+            'execution_state': workflow.execution_state,
+            'current_execution_id': str(workflow.current_execution_id) if workflow.current_execution_id else None,
+            'last_executed_at': workflow.last_executed_at.isoformat() if workflow.last_executed_at else None,
+            'document_count': doc_count,
+            'node_count': node_count,
+            'lock_held': workflow.execution_state not in ('idle', 'completed', 'failed'),
+            'active_execution': active_info,
+            'last_execution': last_info,
+        })
 
     # -- Execution history --------------------------------------------------
 
@@ -3382,6 +3996,12 @@ class WorkflowViewSet(viewsets.ModelViewSet):
         node.config = config
         node.save(update_fields=['config'])
 
+        # Include cached email_state in the response
+        node.refresh_from_db(fields=['document_state'])
+        ds = node.document_state or {}
+        result['email_state'] = ds.get('email_state', {})
+        result['document_state'] = ds
+
         return Response(result)
 
     # -- Email status (last checked, server-side polling info) ---------------
@@ -3399,6 +4019,17 @@ class WorkflowViewSet(viewsets.ModelViewSet):
             return Response({'error': 'Node not found.'}, status=status.HTTP_404_NOT_FOUND)
 
         config = node.config or {}
+        ds = node.document_state or {}
+        email_state = ds.get('email_state', {})
+
+        # Compute effective polling interval (includes error backoff)
+        interval = config.get('email_refetch_interval', 0)
+        consecutive_errors = config.get('email_consecutive_errors', 0)
+        if consecutive_errors > 0 and interval > 0:
+            effective_interval = min(interval * (2 ** consecutive_errors), 3600)
+        else:
+            effective_interval = interval
+
         return Response({
             'email_last_checked_at': config.get('email_last_checked_at'),
             'email_last_check_status': config.get('email_last_check_status'),
@@ -3406,8 +4037,20 @@ class WorkflowViewSet(viewsets.ModelViewSet):
             'email_last_check_skipped': config.get('email_last_check_skipped'),
             'email_last_check_error': config.get('email_last_check_error'),
             'email_last_check_ms': config.get('email_last_check_ms'),
-            'email_refetch_interval': config.get('email_refetch_interval', 0),
-            'server_polling_active': bool(config.get('email_refetch_interval', 0) > 0),
+            'email_refetch_interval': interval,
+            'effective_interval': effective_interval,
+            'consecutive_errors': consecutive_errors,
+            'server_polling_active': bool(interval > 0),
+            # Cached email state from document_state
+            'email_state': {
+                'seen_count': email_state.get('seen_count', 0),
+                'total_emails_ingested': email_state.get('total_emails_ingested', 0),
+                'last_checked_at': email_state.get('last_checked_at', ''),
+                'last_found': email_state.get('last_found', 0),
+                'last_skipped': email_state.get('last_skipped', 0),
+                'cumulative_found': email_state.get('cumulative_found', 0),
+                'cumulative_skipped': email_state.get('cumulative_skipped', 0),
+            },
         })
 
     # -- Integration: Test connection for cloud sources ---------------------
@@ -3734,6 +4377,41 @@ class WorkflowViewSet(viewsets.ModelViewSet):
             user_id=user_id,
             role_label=request.data.get('role_label', ''),
         )
+
+        # ── Notify the assigned user ────────────────────────────────
+        try:
+            from communications.dispatch import send_alert
+            from django.contrib.auth import get_user_model
+            User = get_user_model()
+            target_user = User.objects.get(pk=user_id)
+            role_text = f' as "{vu.role_label}"' if vu.role_label else ''
+            send_alert(
+                category='clm.validation_assigned',
+                recipient=target_user,
+                title='You have been assigned as a validator',
+                message=(
+                    f'{request.user.get_full_name() or request.user.username} '
+                    f'added you{role_text} to the "{node.label or "Validator"}" step '
+                    f'in workflow "{workflow.name}".'
+                ),
+                actor=request.user,
+                priority='high',
+                target_type='workflow',
+                target_id=str(workflow.id),
+                metadata={
+                    'workflow_id': str(workflow.id),
+                    'workflow_name': workflow.name,
+                    'node_id': str(node.id),
+                    'node_label': node.label,
+                    'role_label': vu.role_label,
+                    'action_url': f'/clm/{workflow.id}',
+                    'validation_url': f'/clm/validation/{workflow.id}',
+                },
+                email=True,
+            )
+        except Exception as e:
+            logger.warning(f"Failed to send validator assignment alert: {e}")
+
         serializer = ValidatorUserSerializer(vu)
         return Response(serializer.data, status=status.HTTP_201_CREATED)
 
@@ -3900,10 +4578,26 @@ class WorkflowViewSet(viewsets.ModelViewSet):
             if d.status == 'pending':
                 workflows_data[wf_id]['pending_count'] += 1
 
+        # Unread validation alerts for the current user
+        try:
+            from communications.models import Alert
+            unread_validation_alerts = Alert.objects.filter(
+                recipient=request.user,
+                is_read=False,
+                category__in=[
+                    'clm.validation_assigned',
+                    'clm.validation_pending',
+                    'clm.validation_resolved',
+                ],
+            ).count()
+        except Exception:
+            unread_validation_alerts = 0
+
         return Response({
             'summary': summary,
             'workflows': list(workflows_data.values()),
             'total_pending': summary['pending'],
+            'unread_alerts': unread_validation_alerts,
         })
 
     # -- AI Chat assistant --------------------------------------------------
@@ -4455,6 +5149,789 @@ class WorkflowViewSet(viewsets.ModelViewSet):
         ser.save()
         return Response(ser.data)
 
+    # ======================================================================
+    # Input Node Management — previous inputs, refresh, source-specific upload
+    # ======================================================================
+
+    @action(detail=True, methods=['get'],
+            url_path='input-node-documents/(?P<node_id>[0-9a-f-]+)')
+    def input_node_documents(self, request, pk=None, node_id=None):
+        """
+        List all documents that belong to a specific input node, grouped
+        by source_type, with previous input history.
+
+        GET /api/clm/workflows/{id}/input-node-documents/{node_id}/
+        ?status=completed  (optional filter)
+
+        Returns:
+        {
+          "node": { ... node config ... },
+          "source_type": "upload",
+          "supports_refresh": false,
+          "supports_manage_uploaded": true,
+          "documents": [ ... ],
+          "document_count": N,
+          "input_history": [ ... previous input operations ... ]
+        }
+        """
+        from .models import InputNodeHistory
+
+        workflow = self.get_object()
+        try:
+            node = workflow.nodes.get(id=node_id, node_type='input')
+        except WorkflowNode.DoesNotExist:
+            return Response(
+                {'error': 'Input node not found.'},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        config = node.config or {}
+        source_type = config.get('source_type', 'upload')
+
+        # Documents belonging to this input node
+        docs = workflow.documents.filter(input_node=node)
+        status_filter = request.query_params.get('status')
+        if status_filter:
+            docs = docs.filter(extraction_status=status_filter)
+
+        # Previous input history for this node
+        history = InputNodeHistory.objects.filter(
+            workflow=workflow, node=node,
+        ).order_by('-created_at')[:20]
+
+        from .serializers import InputNodeHistorySerializer
+        refreshable_sources = {
+            'folder_upload', 'dms_import', 'sheets', 'email_inbox',
+            'google_drive', 'dropbox', 'onedrive', 's3', 'ftp',
+            'url_scrape', 'table',
+        }
+        upload_sources = {'upload', 'bulk_upload'}
+
+        ds = node.document_state or {}
+        resp = {
+            'node': {
+                'id': str(node.id),
+                'label': node.label or 'Input',
+                'node_type': node.node_type,
+                'config': config,
+            },
+            'source_type': source_type,
+            'supports_refresh': source_type in refreshable_sources,
+            'supports_manage_uploaded': source_type in upload_sources,
+            'documents': WorkflowDocumentSerializer(docs, many=True).data,
+            'document_count': docs.count(),
+            'document_state': ds,
+            'input_history': InputNodeHistorySerializer(history, many=True).data,
+        }
+        # For email nodes, surface the cached email_state at the top level
+        if source_type == 'email_inbox':
+            resp['email_state'] = ds.get('email_state', {})
+
+        return Response(resp)
+
+    @action(detail=True, methods=['get'],
+            url_path='input-history/(?P<node_id>[0-9a-f-]+)')
+    def input_history(self, request, pk=None, node_id=None):
+        """
+        List previous input operations for a specific input node.
+        GET /api/clm/workflows/{id}/input-history/{node_id}/
+        ?limit=50&source_type=upload
+        """
+        from .models import InputNodeHistory
+        from .serializers import InputNodeHistorySerializer
+
+        workflow = self.get_object()
+        try:
+            node = workflow.nodes.get(id=node_id, node_type='input')
+        except WorkflowNode.DoesNotExist:
+            return Response(
+                {'error': 'Input node not found.'},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        limit = int(request.query_params.get('limit', 50))
+        history = InputNodeHistory.objects.filter(
+            workflow=workflow, node=node,
+        )
+        source_filter = request.query_params.get('source_type')
+        if source_filter:
+            history = history.filter(source_type=source_filter)
+
+        history = history.order_by('-created_at')[:limit]
+
+        return Response({
+            'node_id': str(node.id),
+            'history': InputNodeHistorySerializer(history, many=True).data,
+            'count': history.count() if hasattr(history, 'count') else len(history),
+        })
+
+    @action(detail=True, methods=['get', 'post'],
+            url_path='node-document-state/(?P<node_id>[0-9a-f-]+)')
+    def node_document_state(self, request, pk=None, node_id=None):
+        """
+        GET  → Return the current document_state for an input node.
+        POST → Force-sync document_state from the actual WorkflowDocument rows.
+
+        GET/POST /api/clm/workflows/{id}/node-document-state/{node_id}/
+
+        Returns:
+        {
+          "node_id": "uuid",
+          "document_state": { ... },
+          "source_type": "upload"
+        }
+        """
+        workflow = self.get_object()
+        try:
+            node = workflow.nodes.get(id=node_id, node_type='input')
+        except WorkflowNode.DoesNotExist:
+            return Response(
+                {'error': 'Input node not found.'},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        if request.method == 'POST':
+            node.sync_document_state()
+            node.refresh_from_db()
+
+        config = node.config or {}
+        return Response({
+            'node_id': str(node.id),
+            'document_state': node.document_state or {},
+            'source_type': config.get('source_type', 'upload'),
+        })
+
+    @action(detail=True, methods=['post'],
+            url_path='refresh-input/(?P<node_id>[0-9a-f-]+)')
+    def refresh_input(self, request, pk=None, node_id=None):
+        """
+        Re-fetch documents from the input node's source.
+
+        For fetchable sources (folder_upload, dms_import, sheets, email_inbox,
+        google_drive, dropbox, etc.), this re-runs the source integration to
+        pick up any new files/rows.
+
+        For upload/bulk_upload sources, this re-runs OCR + extraction on
+        already-uploaded documents (optionally filtered by document_ids).
+
+        POST /api/clm/workflows/{id}/refresh-input/{node_id}/
+        Body (all optional):
+        {
+          "document_ids": ["uuid", ...],  // for upload: re-extract specific docs
+          "force_reextract": false         // for upload: force re-extract all
+        }
+
+        Returns:
+        {
+          "source_type": "...",
+          "action": "refreshed" | "reextracted",
+          "documents_affected": N,
+          "new_documents": N,
+          "history_id": "uuid"
+        }
+        """
+        from .models import InputNodeHistory
+
+        workflow = self.get_object()
+        org = _get_org(request)
+        try:
+            node = workflow.nodes.get(id=node_id, node_type='input')
+        except WorkflowNode.DoesNotExist:
+            return Response(
+                {'error': 'Input node not found.'},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        config = node.config or {}
+        source_type = config.get('source_type', 'upload')
+
+        # Create history record
+        history = InputNodeHistory.objects.create(
+            workflow=workflow,
+            node=node,
+            organization=org,
+            source_type=source_type,
+            status='processing',
+            triggered_by=request.user if request.user.is_authenticated else None,
+        )
+
+        upload_sources = {'upload', 'bulk_upload'}
+
+        if source_type in upload_sources:
+            # Re-extract already uploaded documents
+            return self._refresh_upload_input(
+                request, workflow, node, org, history,
+            )
+        else:
+            # Re-fetch from external source
+            return self._refresh_fetchable_input(
+                request, workflow, node, org, history, source_type,
+            )
+
+    def _refresh_upload_input(self, request, workflow, node, org, history):
+        """Re-OCR and re-extract already uploaded documents."""
+        from .ai_inference import extract_document as run_extraction
+
+        doc_ids = request.data.get('document_ids')
+        force = request.data.get('force_reextract', False)
+
+        docs = workflow.documents.filter(input_node=node)
+        if doc_ids:
+            docs = docs.filter(id__in=doc_ids)
+        elif not force:
+            docs = docs.filter(extraction_status__in=['pending', 'failed'])
+
+        if not workflow.extraction_template:
+            workflow.rebuild_extraction_template()
+        template = workflow.extraction_template
+        doc_type = workflow.document_type
+
+        results = []
+        created_ids = []
+        failed_count = 0
+        for doc in docs:
+            try:
+                run_extraction(doc, template, document_type=doc_type)
+                results.append({'id': str(doc.id), 'status': 'completed'})
+                created_ids.append(str(doc.id))
+            except Exception as e:
+                logger.error(f"Refresh re-extract failed for {doc.id}: {e}")
+                results.append({'id': str(doc.id), 'status': 'failed', 'error': str(e)})
+                failed_count += 1
+
+        history.status = 'completed' if failed_count == 0 else 'partial'
+        history.document_count = len(results)
+        history.failed_count = failed_count
+        history.document_ids = created_ids
+        history.source_reference = {'action': 'reextract', 'force': force}
+        history.details = {'results': results}
+        history.save()
+
+        # Sync document_state on the input node
+        node.sync_document_state()
+
+        return Response({
+            'source_type': 'upload',
+            'action': 'reextracted',
+            'documents_affected': len(results),
+            'new_documents': 0,
+            'failed': failed_count,
+            'history_id': str(history.id),
+            'results': results,
+        })
+
+    def _refresh_fetchable_input(self, request, workflow, node, org, history, source_type):
+        """Re-fetch documents from an external source."""
+        config = node.config or {}
+
+        docs_before = set(
+            workflow.documents.filter(input_node=node)
+            .values_list('id', flat=True)
+        )
+
+        new_doc_ids = []
+        errors = []
+
+        try:
+            if source_type == 'email_inbox':
+                from .listener_executor import check_email_inbox
+                result = check_email_inbox(node=node, user=request.user)
+                errors = result.get('errors', [])
+
+            elif source_type in ('google_drive', 'dropbox', 'onedrive', 's3', 'ftp', 'url_scrape'):
+                from .source_integrations import fetch_from_source
+                result = fetch_from_source(node, workflow, org, user=request.user)
+                errors = result.get('errors', [])
+
+            elif source_type == 'table':
+                google_url = config.get('google_sheet_url', '').strip()
+                if google_url:
+                    from .table_parser import parse_table_file, rows_to_workflow_documents
+                    parsed = parse_table_file(
+                        file_bytes=b'', filename='',
+                        google_sheet_url=google_url,
+                    )
+                    if parsed['row_count'] > 0:
+                        rows_to_workflow_documents(
+                            parsed=parsed, workflow=workflow,
+                            organization=org, input_node=node, user=request.user,
+                        )
+
+            elif source_type == 'folder_upload':
+                folder_id = config.get('folder_id', '')
+                if folder_id:
+                    from fileshare.models import DriveFile
+                    drive_files = DriveFile.objects.filter(
+                        folder_id=folder_id, is_deleted=False,
+                        organization=org,
+                    )
+                    for df in drive_files:
+                        if not df.file:
+                            continue
+                        if df.checksum and workflow.documents.filter(file_hash=df.checksum).exists():
+                            continue
+                        ext = df.name.rsplit('.', 1)[-1].lower() if '.' in df.name else 'other'
+                        doc = WorkflowDocument.objects.create(
+                            workflow=workflow, organization=org,
+                            title=df.name, file=df.file,
+                            file_type=ext if ext in WorkflowViewSet.KNOWN_TYPES else 'other',
+                            file_size=df.file_size or 0,
+                            file_hash=df.checksum or '',
+                            uploaded_by=request.user if request.user.is_authenticated else None,
+                            input_node=node,
+                            global_metadata={'_source': 'folder_upload', '_folder_id': str(folder_id)},
+                        )
+                        if workflow.extraction_template:
+                            try:
+                                from .ai_inference import extract_document
+                                extract_document(doc, workflow.extraction_template,
+                                                 document_type=workflow.document_type)
+                            except Exception as e:
+                                doc.extraction_status = 'failed'
+                                doc.save(update_fields=['extraction_status'])
+                                errors.append(str(e))
+                        else:
+                            doc.extraction_status = 'completed'
+                            doc.save(update_fields=['extraction_status'])
+
+            elif source_type == 'dms_import':
+                dms_doc_ids = config.get('dms_document_ids', [])
+                dms_category = config.get('dms_category', '')
+                if dms_doc_ids or dms_category:
+                    from dms.models import DmsDocument
+                    dms_qs = DmsDocument.objects.all()
+                    if dms_doc_ids:
+                        dms_qs = dms_qs.filter(id__in=dms_doc_ids)
+                    elif dms_category:
+                        dms_qs = dms_qs.filter(category=dms_category)
+                    for dms_doc in dms_qs:
+                        content_hash = ''
+                        if dms_doc.pdf_data:
+                            import hashlib
+                            content_hash = hashlib.sha256(dms_doc.pdf_data).hexdigest()
+                        if content_hash and workflow.documents.filter(file_hash=content_hash).exists():
+                            continue
+                        from django.core.files.base import ContentFile
+                        cf = ContentFile(dms_doc.pdf_data, name=f"{dms_doc.title or 'dms_doc'}.pdf")
+                        doc = WorkflowDocument.objects.create(
+                            workflow=workflow, organization=org,
+                            title=dms_doc.title or dms_doc.original_filename or str(dms_doc.id),
+                            file=cf, file_type='pdf',
+                            file_size=dms_doc.file_size or len(dms_doc.pdf_data or b''),
+                            file_hash=content_hash,
+                            uploaded_by=request.user if request.user.is_authenticated else None,
+                            input_node=node,
+                            original_text=dms_doc.extracted_text or '',
+                            text_source='direct' if dms_doc.extracted_text else 'none',
+                            global_metadata={'_source': 'dms_import', '_dms_document_id': str(dms_doc.id)},
+                        )
+                        if workflow.extraction_template:
+                            try:
+                                from .ai_inference import extract_document
+                                extract_document(doc, workflow.extraction_template,
+                                                 document_type=workflow.document_type)
+                            except Exception as e:
+                                doc.extraction_status = 'failed'
+                                doc.save(update_fields=['extraction_status'])
+                                errors.append(str(e))
+                        else:
+                            doc.extraction_status = 'completed'
+                            doc.save(update_fields=['extraction_status'])
+
+            elif source_type == 'sheets':
+                sheet_id = config.get('sheet_id', '')
+                if sheet_id:
+                    from sheets.models import Sheet
+                    sheet = Sheet.objects.get(id=sheet_id, organization=org)
+                    rows = sheet.rows.prefetch_related('cells').order_by('order')
+                    for row in rows:
+                        row_meta = {}
+                        for cell in row.cells.all():
+                            col_def = next(
+                                (c for c in (sheet.columns or []) if c.get('key') == cell.column_key),
+                                None,
+                            )
+                            label = col_def.get('label', cell.column_key) if col_def else cell.column_key
+                            row_meta[label] = cell.computed_value or cell.raw_value or ''
+                        title_val = list(row_meta.values())[0] if row_meta else ''
+                        title = str(title_val)[:200] or f"Sheet Row {row.order + 1}"
+                        import json as _json
+                        row_hash = hashlib.sha256(
+                            _json.dumps(row_meta, sort_keys=True, default=str).encode()
+                        ).hexdigest()
+                        if workflow.documents.filter(file_hash=row_hash).exists():
+                            continue
+                        WorkflowDocument.objects.create(
+                            workflow=workflow, organization=org,
+                            title=title, file_type='other',
+                            file_hash=row_hash,
+                            uploaded_by=request.user if request.user.is_authenticated else None,
+                            input_node=node,
+                            extracted_metadata=row_meta,
+                            global_metadata={
+                                '_source': 'sheets', '_sheet_id': str(sheet_id),
+                                '_row_order': row.order, **row_meta,
+                            },
+                            extraction_status='completed',
+                        )
+
+        except Exception as e:
+            logger.error(f"Refresh input {source_type} failed: {e}")
+            errors.append(str(e))
+
+        # Calculate new documents
+        docs_after = set(
+            workflow.documents.filter(input_node=node)
+            .values_list('id', flat=True)
+        )
+        new_doc_ids = [str(uid) for uid in (docs_after - docs_before)]
+
+        # Update history
+        history.status = 'completed' if not errors else 'partial'
+        history.document_count = len(new_doc_ids)
+        history.document_ids = new_doc_ids
+        history.source_reference = {'source_type': source_type, 'config_snapshot': config}
+        history.details = {'errors': errors} if errors else {}
+        history.save()
+
+        # Sync document_state on the input node
+        node.sync_document_state()
+
+        return Response({
+            'source_type': source_type,
+            'action': 'refreshed',
+            'documents_affected': len(docs_after),
+            'new_documents': len(new_doc_ids),
+            'errors': errors,
+            'history_id': str(history.id),
+            'document_state': node.document_state or {},
+        })
+
+    @action(detail=True, methods=['post'],
+            url_path='folder-upload/(?P<node_id>[0-9a-f-]+)')
+    def folder_upload(self, request, pk=None, node_id=None):
+        """
+        Import files from a DriveFolder into an input node.
+        POST /api/clm/workflows/{id}/folder-upload/{node_id}/
+        Body: { "folder_id": "uuid" }
+
+        Sets the input node's source_type to 'folder_upload' and imports
+        all files from the specified folder. Subsequent refreshes will
+        re-check the folder for new files.
+        """
+        from .models import InputNodeHistory
+
+        workflow = self.get_object()
+        org = _get_org(request)
+        try:
+            node = workflow.nodes.get(id=node_id, node_type='input')
+        except WorkflowNode.DoesNotExist:
+            return Response({'error': 'Input node not found.'},
+                            status=status.HTTP_404_NOT_FOUND)
+
+        folder_id = request.data.get('folder_id')
+        if not folder_id:
+            return Response({'error': 'folder_id is required.'},
+                            status=status.HTTP_400_BAD_REQUEST)
+
+        # Validate folder exists
+        from fileshare.models import DriveFolder
+        try:
+            folder = DriveFolder.objects.get(id=folder_id, organization=org, is_deleted=False)
+        except DriveFolder.DoesNotExist:
+            return Response({'error': 'Folder not found.'},
+                            status=status.HTTP_404_NOT_FOUND)
+
+        # Update node config
+        config = node.config or {}
+        config['source_type'] = 'folder_upload'
+        config['folder_id'] = str(folder_id)
+        config['folder_name'] = folder.name
+        node.config = config
+        node.save(update_fields=['config'])
+
+        # Import files from folder
+        from fileshare.models import DriveFile
+        drive_files = DriveFile.objects.filter(
+            folder=folder, is_deleted=False, organization=org,
+        )
+
+        if not workflow.extraction_template:
+            workflow.rebuild_extraction_template()
+
+        created = []
+        skipped = []
+        for df in drive_files:
+            if not df.file:
+                continue
+            if df.checksum and WorkflowDocument.objects.filter(
+                workflow=workflow, file_hash=df.checksum,
+            ).exists():
+                skipped.append({'name': df.name, 'reason': 'duplicate'})
+                continue
+            ext = df.name.rsplit('.', 1)[-1].lower() if '.' in df.name else 'other'
+            doc = WorkflowDocument.objects.create(
+                workflow=workflow, organization=org,
+                title=df.name, file=df.file,
+                file_type=ext if ext in self.KNOWN_TYPES else 'other',
+                file_size=df.file_size or 0,
+                file_hash=df.checksum or '',
+                uploaded_by=request.user if request.user.is_authenticated else None,
+                input_node=node,
+                global_metadata={'_source': 'folder_upload', '_folder_id': str(folder_id)},
+            )
+            if workflow.extraction_template:
+                try:
+                    from .ai_inference import extract_document
+                    extract_document(doc, workflow.extraction_template,
+                                     document_type=workflow.document_type)
+                except Exception as e:
+                    logger.error(f"Extraction failed for folder doc {doc.id}: {e}")
+                    doc.extraction_status = 'failed'
+                    doc.save(update_fields=['extraction_status'])
+            else:
+                doc.extraction_status = 'completed'
+                doc.save(update_fields=['extraction_status'])
+            created.append(doc)
+
+        # Record history
+        InputNodeHistory.objects.create(
+            workflow=workflow, node=node, organization=org,
+            source_type='folder_upload',
+            status='completed',
+            document_count=len(created),
+            skipped_count=len(skipped),
+            document_ids=[str(d.id) for d in created],
+            source_reference={
+                'folder_id': str(folder_id),
+                'folder_name': folder.name,
+                'folder_path': folder.get_path(),
+            },
+            details={'skipped': skipped},
+            triggered_by=request.user if request.user.is_authenticated else None,
+        )
+
+        return Response({
+            'documents': WorkflowDocumentSerializer(created, many=True).data,
+            'count': len(created),
+            'skipped': skipped,
+            'folder': {'id': str(folder.id), 'name': folder.name, 'path': folder.get_path()},
+        }, status=status.HTTP_201_CREATED)
+
+    @action(detail=True, methods=['post'],
+            url_path='dms-import/(?P<node_id>[0-9a-f-]+)')
+    def dms_import(self, request, pk=None, node_id=None):
+        """
+        Import documents from the DMS into an input node.
+        POST /api/clm/workflows/{id}/dms-import/{node_id}/
+        Body: { "document_ids": ["uuid", ...] } OR { "category": "contracts" }
+
+        Sets the input node's source_type to 'dms_import' and creates
+        WorkflowDocuments from the DMS PDF content.
+        """
+        from .models import InputNodeHistory
+
+        workflow = self.get_object()
+        org = _get_org(request)
+        try:
+            node = workflow.nodes.get(id=node_id, node_type='input')
+        except WorkflowNode.DoesNotExist:
+            return Response({'error': 'Input node not found.'},
+                            status=status.HTTP_404_NOT_FOUND)
+
+        dms_doc_ids = request.data.get('document_ids', [])
+        category = request.data.get('category', '')
+        if not dms_doc_ids and not category:
+            return Response({'error': 'Provide document_ids or category.'},
+                            status=status.HTTP_400_BAD_REQUEST)
+
+        # Update node config
+        config = node.config or {}
+        config['source_type'] = 'dms_import'
+        if dms_doc_ids:
+            config['dms_document_ids'] = dms_doc_ids
+        if category:
+            config['dms_category'] = category
+        node.config = config
+        node.save(update_fields=['config'])
+
+        from dms.models import DmsDocument
+        dms_qs = DmsDocument.objects.all()
+        if dms_doc_ids:
+            dms_qs = dms_qs.filter(id__in=dms_doc_ids)
+        elif category:
+            dms_qs = dms_qs.filter(category=category)
+
+        if not workflow.extraction_template:
+            workflow.rebuild_extraction_template()
+
+        created = []
+        skipped = []
+        for dms_doc in dms_qs:
+            content_hash = ''
+            if dms_doc.pdf_data:
+                content_hash = hashlib.sha256(dms_doc.pdf_data).hexdigest()
+            if content_hash and WorkflowDocument.objects.filter(
+                workflow=workflow, file_hash=content_hash,
+            ).exists():
+                skipped.append({'title': dms_doc.title, 'reason': 'duplicate'})
+                continue
+
+            from django.core.files.base import ContentFile
+            cf = ContentFile(dms_doc.pdf_data or b'', name=f"{dms_doc.title or 'dms_doc'}.pdf")
+            doc = WorkflowDocument.objects.create(
+                workflow=workflow, organization=org,
+                title=dms_doc.title or dms_doc.original_filename or str(dms_doc.id),
+                file=cf, file_type='pdf',
+                file_size=dms_doc.file_size or len(dms_doc.pdf_data or b''),
+                file_hash=content_hash,
+                uploaded_by=request.user if request.user.is_authenticated else None,
+                input_node=node,
+                original_text=dms_doc.extracted_text or '',
+                text_source='direct' if dms_doc.extracted_text else 'none',
+                global_metadata={'_source': 'dms_import', '_dms_document_id': str(dms_doc.id)},
+            )
+            if workflow.extraction_template:
+                try:
+                    from .ai_inference import extract_document
+                    extract_document(doc, workflow.extraction_template,
+                                     document_type=workflow.document_type)
+                except Exception as e:
+                    logger.error(f"Extraction failed for DMS doc {doc.id}: {e}")
+                    doc.extraction_status = 'failed'
+                    doc.save(update_fields=['extraction_status'])
+            else:
+                doc.extraction_status = 'completed'
+                doc.save(update_fields=['extraction_status'])
+            created.append(doc)
+
+        InputNodeHistory.objects.create(
+            workflow=workflow, node=node, organization=org,
+            source_type='dms_import',
+            status='completed',
+            document_count=len(created),
+            skipped_count=len(skipped),
+            document_ids=[str(d.id) for d in created],
+            source_reference={
+                'dms_document_ids': dms_doc_ids,
+                'category': category,
+            },
+            details={'skipped': skipped},
+            triggered_by=request.user if request.user.is_authenticated else None,
+        )
+
+        return Response({
+            'documents': WorkflowDocumentSerializer(created, many=True).data,
+            'count': len(created),
+            'skipped': skipped,
+        }, status=status.HTTP_201_CREATED)
+
+    @action(detail=True, methods=['post'],
+            url_path='sheets-import/(?P<node_id>[0-9a-f-]+)')
+    def sheets_import(self, request, pk=None, node_id=None):
+        """
+        Import rows from a Sheet (sheets app) into an input node.
+        Each row becomes a WorkflowDocument with cell values as metadata.
+
+        POST /api/clm/workflows/{id}/sheets-import/{node_id}/
+        Body: { "sheet_id": "uuid" }
+
+        Sets the input node's source_type to 'sheets'. Refreshing will
+        re-read the sheet and import any new rows.
+        """
+        from .models import InputNodeHistory
+
+        workflow = self.get_object()
+        org = _get_org(request)
+        try:
+            node = workflow.nodes.get(id=node_id, node_type='input')
+        except WorkflowNode.DoesNotExist:
+            return Response({'error': 'Input node not found.'},
+                            status=status.HTTP_404_NOT_FOUND)
+
+        sheet_id = request.data.get('sheet_id')
+        if not sheet_id:
+            return Response({'error': 'sheet_id is required.'},
+                            status=status.HTTP_400_BAD_REQUEST)
+
+        from sheets.models import Sheet
+        try:
+            sheet = Sheet.objects.get(id=sheet_id, organization=org)
+        except Sheet.DoesNotExist:
+            return Response({'error': 'Sheet not found.'},
+                            status=status.HTTP_404_NOT_FOUND)
+
+        # Update node config
+        config = node.config or {}
+        config['source_type'] = 'sheets'
+        config['sheet_id'] = str(sheet_id)
+        config['sheet_title'] = sheet.title
+        node.config = config
+        node.save(update_fields=['config'])
+
+        rows = sheet.rows.prefetch_related('cells').order_by('order')
+        import json as _json
+
+        created = []
+        skipped = []
+        for row in rows:
+            row_meta = {}
+            for cell in row.cells.all():
+                col_def = next(
+                    (c for c in (sheet.columns or []) if c.get('key') == cell.column_key),
+                    None,
+                )
+                label = col_def.get('label', cell.column_key) if col_def else cell.column_key
+                row_meta[label] = cell.computed_value or cell.raw_value or ''
+
+            title_val = list(row_meta.values())[0] if row_meta else ''
+            title = str(title_val)[:200] or f"Sheet Row {row.order + 1}"
+
+            row_hash = hashlib.sha256(
+                _json.dumps(row_meta, sort_keys=True, default=str).encode()
+            ).hexdigest()
+            if WorkflowDocument.objects.filter(workflow=workflow, file_hash=row_hash).exists():
+                skipped.append({'title': title, 'reason': 'duplicate'})
+                continue
+
+            doc = WorkflowDocument.objects.create(
+                workflow=workflow, organization=org,
+                title=title, file_type='other',
+                file_hash=row_hash,
+                uploaded_by=request.user if request.user.is_authenticated else None,
+                input_node=node,
+                extracted_metadata=row_meta,
+                global_metadata={
+                    '_source': 'sheets', '_sheet_id': str(sheet_id),
+                    '_row_order': row.order, **row_meta,
+                },
+                extraction_status='completed',
+            )
+            created.append(doc)
+
+        InputNodeHistory.objects.create(
+            workflow=workflow, node=node, organization=org,
+            source_type='sheets',
+            status='completed',
+            document_count=len(created),
+            skipped_count=len(skipped),
+            document_ids=[str(d.id) for d in created],
+            source_reference={
+                'sheet_id': str(sheet_id),
+                'sheet_title': sheet.title,
+                'row_count': rows.count(),
+            },
+            details={'skipped': skipped, 'headers': sheet.columns},
+            triggered_by=request.user if request.user.is_authenticated else None,
+        )
+
+        return Response({
+            'documents': WorkflowDocumentSerializer(created, many=True).data,
+            'count': len(created),
+            'skipped': skipped,
+            'sheet': {'id': str(sheet.id), 'title': sheet.title},
+        }, status=status.HTTP_201_CREATED)
+
 
 # ---------------------------------------------------------------------------
 # WorkflowNode
@@ -4499,6 +5976,100 @@ class WorkflowNodeViewSet(viewsets.ModelViewSet):
         instance.delete()
         if node_type == 'rule':
             workflow.rebuild_extraction_template()
+
+    # ── Sheet node actions ──────────────────────────────────────────
+
+    @action(detail=True, methods=['get'], url_path='sheet-queries')
+    def sheet_queries(self, request, pk=None):
+        """
+        GET /api/clm/nodes/<id>/sheet-queries/?limit=50
+        Return recent SheetNodeQuery records for this sheet node.
+        Includes query counts, cache hit stats, and row data.
+        """
+        node = self.get_object()
+        if node.node_type != 'sheet':
+            return Response(
+                {'error': 'This action is only available for sheet nodes.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        from .models import SheetNodeQuery
+        from .serializers import SheetNodeQuerySerializer
+
+        limit = int(request.query_params.get('limit', 50))
+        queries = SheetNodeQuery.objects.filter(
+            node=node,
+        ).select_related('sheet', 'source_document').order_by('-created_at')[:limit]
+
+        # Aggregate stats
+        from django.db.models import Count, Sum, Q
+        stats = SheetNodeQuery.objects.filter(node=node).aggregate(
+            total_queries=Count('id'),
+            total_reads=Count('id', filter=Q(operation='read')),
+            total_writes=Count('id', filter=Q(operation__in=['write', 'append'])),
+            total_cache_hits=Count('id', filter=Q(status='cached')),
+            total_hit_count=Sum('hit_count'),
+        )
+
+        return Response({
+            'node_id': str(node.id),
+            'node_label': node.label,
+            'stats': stats,
+            'queries': SheetNodeQuerySerializer(queries, many=True).data,
+        })
+
+    @action(detail=True, methods=['get'], url_path='sheet-info')
+    def sheet_info(self, request, pk=None):
+        """
+        GET /api/clm/nodes/<id>/sheet-info/
+        Return info about the linked sheet, including columns and row count.
+        """
+        node = self.get_object()
+        if node.node_type != 'sheet':
+            return Response(
+                {'error': 'This action is only available for sheet nodes.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        config = node.config or {}
+        sheet_id = config.get('sheet_id')
+        if not sheet_id:
+            return Response({
+                'linked': False,
+                'message': 'No sheet linked to this node yet.',
+            })
+
+        from sheets.models import Sheet
+        try:
+            sheet = Sheet.objects.get(id=sheet_id)
+        except Sheet.DoesNotExist:
+            return Response({
+                'linked': False,
+                'message': f'Sheet {sheet_id} not found.',
+            }, status=status.HTTP_404_NOT_FOUND)
+
+        # Query stats for this node + sheet combo
+        from .models import SheetNodeQuery
+        from django.db.models import Count, Q
+        query_stats = SheetNodeQuery.objects.filter(
+            node=node, sheet=sheet,
+        ).aggregate(
+            total_queries=Count('id'),
+            cache_hits=Count('id', filter=Q(status='cached')),
+        )
+
+        return Response({
+            'linked': True,
+            'sheet_id': str(sheet.id),
+            'sheet_title': sheet.title,
+            'sheet_description': sheet.description,
+            'columns': sheet.columns,
+            'row_count': sheet.row_count,
+            'col_count': sheet.col_count,
+            'mode': config.get('mode', 'storage'),
+            'write_mode': config.get('write_mode', 'append'),
+            'query_stats': query_stats,
+        })
 
 
 # ---------------------------------------------------------------------------
@@ -4943,3 +6514,54 @@ class PublicUploadVerifyOTPView(PublicUploadOTPView):
             'identifier': identifier,
             'verified': True,
         })
+
+
+# ---------------------------------------------------------------------------
+# Webhook Receiver — public endpoint for inbound webhooks
+# ---------------------------------------------------------------------------
+
+from rest_framework.views import APIView
+
+
+class WebhookReceiverView(APIView):
+    """
+    POST /api/clm/webhooks/<token>/
+
+    Public endpoint (no auth required) for receiving inbound webhook events.
+    Each EventSubscription with source_type='webhook' has a unique token
+    generated at compilation time.  External systems POST to this URL to
+    trigger the linked workflow.
+
+    Optional HMAC verification via X-Webhook-Signature header.
+    """
+    permission_classes = [permissions.AllowAny]
+    authentication_classes = []  # No auth — public endpoint
+
+    def post(self, request, token=None):
+        from .event_system import process_webhook
+
+        payload = request.data if isinstance(request.data, dict) else {'raw': str(request.data)}
+        headers = {k: v for k, v in request.META.items() if k.startswith('HTTP_')}
+
+        # Also grab standard webhook headers
+        for key in ('HTTP_X_WEBHOOK_SIGNATURE', 'HTTP_X_HUB_SIGNATURE', 'HTTP_X_DELIVERY_ID'):
+            val = request.META.get(key)
+            if val:
+                clean_key = key.replace('HTTP_', '').replace('_', '-').title()
+                headers[clean_key] = val
+
+        source_ip = request.META.get('HTTP_X_FORWARDED_FOR', '').split(',')[0].strip()
+        if not source_ip:
+            source_ip = request.META.get('REMOTE_ADDR')
+
+        result = process_webhook(
+            token=str(token),
+            payload=payload,
+            headers=headers,
+            source_ip=source_ip,
+        )
+
+        if result.get('success'):
+            return Response(result, status=status.HTTP_200_OK)
+        else:
+            return Response(result, status=status.HTTP_400_BAD_REQUEST)
