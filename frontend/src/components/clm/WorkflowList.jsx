@@ -4,6 +4,8 @@ import { workflowApi } from '@services/clm/clmApi';
 import { ConfirmModal, Spinner, EmptyState } from '@components/clm/ui/SharedUI';
 import notify from '@utils/clm/clmNotify';
 import { Plus, Copy, Trash2, Edit3, Clock, FileText, GitBranch, Sparkles, Loader2, MessageCircleQuestion, Send } from 'lucide-react';
+import { useFeatureFlags } from '../../contexts/FeatureFlagContext';
+import { getDomainWorkflowTemplates } from '../../domains';
 
 export default function WorkflowList() {
   const [workflows, setWorkflows] = useState([]);
@@ -18,6 +20,29 @@ export default function WorkflowList() {
   const [followUpQuestions, setFollowUpQuestions] = useState([]);   // [{question, answer}]
   const [originalPrompt, setOriginalPrompt] = useState('');         // keep the original prompt across rounds
   const navigate = useNavigate();
+  const { domain } = useFeatureFlags();
+
+  // Domain-aware AI prompt helpers
+  const isProcurement = domain === 'procurement';
+  const aiPlaceholder = isProcurement
+    ? 'Example: Create a purchase order approval pipeline that routes POs over $10,000 to the finance director, uses AI to extract vendor_name and total_value, validates against budget, and sends email to the procurement team on approval.'
+    : 'Example: Create a pipeline that takes uploaded contracts, uses AI to extract contract_type, party_names, and total_value, then filters for NDAs with value over $50,000, requires legal team approval, and sends an email notification with the approved documents.';
+  const aiHints = isProcurement
+    ? [
+        'PO approval with budget check',
+        'Vendor onboarding pipeline',
+        'RFP bid evaluation workflow',
+        'Contract renewal reminders',
+      ]
+    : [
+        'Filter PDFs by contract type',
+        'AI analysis + email results',
+        'Multi-step approval pipeline',
+        'Extract metadata and route by value',
+      ];
+  const createPlaceholder = isProcurement
+    ? 'e.g., PO Approval Pipeline'
+    : 'e.g., Contract Review Pipeline';
 
   const fetchWorkflows = async () => {
     setLoading(true);
@@ -148,7 +173,7 @@ export default function WorkflowList() {
               <input
                 value={name}
                 onChange={(e) => setName(e.target.value)}
-                placeholder="e.g., Contract Review Pipeline"
+                placeholder={createPlaceholder}
                 className="w-full px-3 py-2 border rounded-lg text-sm focus:ring-2 focus:ring-indigo-200 focus:border-indigo-400 outline-none"
                 required
                 autoFocus
@@ -215,7 +240,7 @@ export default function WorkflowList() {
                 <textarea
                   value={aiPrompt}
                   onChange={(e) => setAiPrompt(e.target.value)}
-                  placeholder={"Example: Create a pipeline that takes uploaded contracts, uses AI to extract contract_type, party_names, and total_value, then filters for NDAs with value over $50,000, requires legal team approval, and sends an email notification with the approved documents."}
+                  placeholder={aiPlaceholder}
                   className="w-full px-3 py-2.5 border rounded-lg text-sm focus:ring-2 focus:ring-purple-200 focus:border-purple-400 outline-none resize-y min-h-[120px]"
                   rows={4}
                   required
@@ -223,12 +248,7 @@ export default function WorkflowList() {
                   disabled={aiGenerating}
                 />
                 <div className="mt-2 flex flex-wrap gap-1.5">
-                  {[
-                    'Filter PDFs by contract type',
-                    'AI analysis + email results',
-                    'Multi-step approval pipeline',
-                    'Extract metadata and route by value',
-                  ].map((hint) => (
+                  {aiHints.map((hint) => (
                     <button
                       key={hint}
                       type="button"

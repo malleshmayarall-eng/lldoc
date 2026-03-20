@@ -6,6 +6,7 @@ import {
   Sparkles, Clock, CheckCircle, AlertCircle, Building, ToggleLeft,
 } from 'lucide-react';
 import AIPresetManager from '../components/AIPresetManager';
+import DomainSettings from '../components/DomainSettings';
 
 // ─── Reusable Components ──────────────────────────────────────────────────────
 
@@ -161,8 +162,8 @@ const Settings = () => {
   }, []);
 
   const isOrgAdmin =
-    profile?.role?.role_type === 'org_admin' ||
-    profile?.role?.role_type === 'system_admin';
+    profile?.role_type === 'org_admin' ||
+    profile?.role_type === 'system_admin';
 
   // ── Load ──────────────────────────────────────────────────────────────────
 
@@ -194,7 +195,7 @@ const Settings = () => {
       }
 
       // Load org doc settings if admin
-      const roleType = profileData?.role?.role_type;
+      const roleType = profileData?.role_type;
       if (
         profileData?.organization &&
         (roleType === 'org_admin' || roleType === 'system_admin')
@@ -514,6 +515,24 @@ const Settings = () => {
                   {savingOrg ? 'Saving...' : 'Save Organization Defaults'}
                 </button>
               </div>
+            </>
+          )}
+
+          {/* ── Domain & Feature Flags (admin only — independent of orgSettings) ── */}
+          {isOrgAdmin && (
+            <>
+              <div className="border-t border-gray-200 pt-6">
+                <div className="flex items-center gap-2 mb-4">
+                  <Globe className="h-5 w-5 text-blue-600" />
+                  <h2 className="text-xl font-bold text-gray-900">Domain &amp; Feature Flags</h2>
+                </div>
+                <p className="text-sm text-gray-500 mb-6">
+                  Choose the organisation domain and control which features are available across the app.
+                  Feature toggles override the domain defaults.
+                </p>
+              </div>
+
+              <DomainSettings />
             </>
           )}
         </div>

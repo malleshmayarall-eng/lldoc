@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useRef, useCallback } from 'react';
-import { useParams, Link } from 'react-router-dom';
+import { useParams, Link, useNavigate } from 'react-router-dom';
 import { workflowApi, nodeApi, connectionApi } from '@services/clm/clmApi';
 import useUndoRedo from '@hooks/clm/useUndoRedo';
 import InputNode from './InputNode';
@@ -11,6 +11,8 @@ import ValidatorNode from './ValidatorNode';
 import AINode from './AINode';
 import GateNode from './GateNode';
 import DocCreateNode from './DocCreateNode';
+import SheetNode from './SheetNode';
+import SheetEditorModal from '@components/sheets/SheetEditorModal';
 import DocCreateWizard from './DocCreateWizard';
 import DocumentManager from './DocumentManager';
 import Dashboard from './Dashboard';
@@ -32,15 +34,57 @@ import {
 const NODE_W = 220;
 const NODE_H_BASE = 80;
 
-function nodeCenter(n) {
-  return { x: n.position_x + NODE_W / 2, y: n.position_y + NODE_H_BASE / 2 };
+/**
+ * Perpendicular (right-angle) path from source port to target port.
+ * Always exits horizontal-right from source, enters horizontal-left to target.
+ * Uses a clean H-V-H pattern with proper gap handling.
+ */
+function orthoPath(s, t) {
+  const GAP = 40; // min horizontal clearance before bending
+  if (t.x > s.x + GAP) {
+    // Normal left-to-right: horizontal exit → vertical → horizontal enter
+    const midX = (s.x + t.x) / 2;
+    return `M ${s.x} ${s.y} H ${midX} V ${t.y} H ${t.x}`;
+  }
+  // Target is behind or very close — route around with extra bends
+  const outX = s.x + GAP;
+  const midY = s.y < t.y ? Math.max(s.y, t.y) + 60 : Math.min(s.y, t.y) - 60;
+  const inX = t.x - GAP;
+  return `M ${s.x} ${s.y} H ${outX} V ${midY} H ${inX} V ${t.y} H ${t.x}`;
 }
+
+/** Get midpoint of the path for placing the "+" button */
+function orthoMidpoint(s, t) {
+  const GAP = 40;
+  if (t.x > s.x + GAP) {
+    const midX = (s.x + t.x) / 2;
+    const midY = (s.y + t.y) / 2;
+    return { x: midX, y: midY };
+  }
+  const outX = s.x + GAP;
+  const midY = s.y < t.y ? Math.max(s.y, t.y) + 60 : Math.min(s.y, t.y) - 60;
+  return { x: (outX + (t.x - GAP)) / 2, y: midY };
+}
+
+/** Node type metadata for menus / dialogs */
+const NODE_TYPES = [
+  { type: 'input',      icon: '📥', label: 'Input',      bg: 'hover:bg-blue-50',    color: 'bg-blue-50 text-blue-700 border-blue-200' },
+  { type: 'rule',       icon: '⚙️', label: 'Rule',       bg: 'hover:bg-amber-50',   color: 'bg-amber-50 text-amber-700 border-amber-200' },
+  { type: 'action',     icon: '⚡', label: 'Action',     bg: 'hover:bg-purple-50',  color: 'bg-purple-50 text-purple-700 border-purple-200' },
+  { type: 'validator',  icon: '✅', label: 'Validator',  bg: 'hover:bg-emerald-50', color: 'bg-emerald-50 text-emerald-700 border-emerald-200' },
+  { type: 'ai',         icon: '🧪', label: 'AI',         bg: 'hover:bg-rose-50',    color: 'bg-rose-50 text-rose-700 border-rose-200' },
+  { type: 'and_gate',   icon: '∩',  label: 'AND Gate',  bg: 'hover:bg-orange-50',  color: 'bg-orange-50 text-orange-700 border-orange-200' },
+  { type: 'doc_create', icon: '📄', label: 'Doc Create', bg: 'hover:bg-indigo-50',  color: 'bg-indigo-50 text-indigo-700 border-indigo-200' },
+  { type: 'sheet',      icon: '📊', label: 'Sheet',      bg: 'hover:bg-cyan-50',    color: 'bg-cyan-50 text-cyan-700 border-cyan-200' },
+  { type: 'output',     icon: '📤', label: 'Output',     bg: 'hover:bg-green-50',   color: 'bg-green-50 text-green-700 border-green-200' },
+];
 
 /* ================================================================
    WorkflowCanvas — the main editor (production version)
    ================================================================ */
 export default function WorkflowCanvas() {
   const { id: workflowId } = useParams();
+  const navigate = useNavigate();
 
   /* ── core state ─────────────────── */
   const [workflow, setWorkflow] = useState(null);
@@ -54,11 +98,15 @@ export default function WorkflowCanvas() {
   const [dragStart, setDragStart] = useState({ x: 0, y: 0 });
   const [connecting, setConnecting] = useState(null);
   const [connectMouse, setConnectMouse] = useState(null);
+  const [hoveredConnection, setHoveredConnection] = useState(null);
+  const [midpointMenu, setMidpointMenu] = useState(null); // { connId, x, y }
+  const [showNodeConfigDialog, setShowNodeConfigDialog] = useState(null); // { type, insertBetween: {sourceId, targetId, connId} | null, position: {x, y} }
 
   /* ── panels ──────────────────────── */
   const [tab, setTab] = useState('canvas');
   const [executionResult, setExecutionResult] = useState(null);
   const [executing, setExecuting] = useState(false);
+  const [executionState, setExecutionState] = useState('idle');  // server-maintained: idle|compiling|executing|completed|failed
   const [uploading, setUploading] = useState(false);
   const [uploadProgress, setUploadProgress] = useState(0);    // 0–100 upload %
   const [fieldOptions, setFieldOptions] = useState(null);
@@ -84,7 +132,11 @@ export default function WorkflowCanvas() {
   const [showShareModal, setShowShareModal] = useState(false);
   const [uploadLinks, setUploadLinks] = useState([]);
   const [shareLoading, setShareLoading] = useState(false);
-  const [newLinkLabel, setNewLinkLabel] = useState('');
+  // Sheet modal
+  const [showSheetModal, setShowSheetModal] = useState(false);
+  const [sheetModalId, setSheetModalId] = useState(null);
+  const [sheetModalTitle, setSheetModalTitle] = useState('');
+  const [sheetModalNodeId, setSheetModalNodeId] = useState(null);  const [newLinkLabel, setNewLinkLabel] = useState('');
   const [newLinkPassword, setNewLinkPassword] = useState('');
   const [newLinkRequireLogin, setNewLinkRequireLogin] = useState('none');
   const [copiedLinkId, setCopiedLinkId] = useState(null);
@@ -94,6 +146,8 @@ export default function WorkflowCanvas() {
   const [nodeProcessing, setNodeProcessing] = useState({});   // {nodeId: 'processing'|'done'|'error'}
   const [inspectNodeId, setInspectNodeId] = useState(null);   // node ID for inspector dialog
   const [nodesStatus, setNodesStatus] = useState(null);        // { nodes_changed, pending_execution, already_executed }
+  const [isLive, setIsLive] = useState(false);
+  const [liveInterval, setLiveInterval] = useState(60);
 
   /* ── zoom & pan ─────────────────── */
   const [zoom, setZoom] = useState(1);
@@ -112,6 +166,14 @@ export default function WorkflowCanvas() {
       setWorkflow(wf);
       setNodes(wf.nodes || []);
       setConnections(wf.connections || []);
+      setIsLive(!!wf.is_live);
+      setLiveInterval(wf.live_interval || 60);
+      if (wf.execution_state) setExecutionState(wf.execution_state);
+      // If server says executing/compiling but we're not tracking locally, resume polling
+      if (['executing', 'compiling'].includes(wf.execution_state) && wf.current_execution_id && !executing) {
+        setExecuting(true);
+        _resumeServerExecution(wf.current_execution_id);
+      }
     } catch (e) {
       console.error(e);
     } finally {
@@ -204,11 +266,16 @@ export default function WorkflowCanvas() {
     nodes, connections, setNodes, setConnections, workflowId, fetchAll,
   });
 
-  /* ── Add node ───────────────────── */
-  const addNode = async (type) => {
-    const offsets = { input: [80, 200], rule: [360, 200], listener: [450, 200], validator: [540, 200], action: [640, 200], ai: [740, 200], and_gate: [840, 200], output: [940, 200] };
-    const [px, py] = offsets[type] || [200, 200];
+  /* ── Add node (with optional position + insert-between-connections) ───────────────────── */
+  const addNode = async (type, { overridePos, insertBetween, configOverrides } = {}) => {
+    // Calculate viewport center in canvas coordinates
+    const rect = canvasRef.current?.getBoundingClientRect();
+    const vw = rect?.width || 800;
+    const vh = rect?.height || 600;
+    const centerX = (vw / 2 - pan.x) / zoom - NODE_W / 2;
+    const centerY = (vh / 2 - pan.y) / zoom - NODE_H_BASE / 2;
     const count = nodes.filter((n) => n.node_type === type).length;
+    const [px, py] = overridePos || [centerX + count * 30, centerY + count * 30];
     const label =
       type === 'input' ? 'Input' :
       type === 'rule'  ? `Rule ${count + 1}` :
@@ -217,9 +284,10 @@ export default function WorkflowCanvas() {
       type === 'action' ? `Action ${count + 1}` :
       type === 'ai' ? `AI ${count + 1}` :
       type === 'and_gate' ? `AND Gate ${count + 1}` :
+      type === 'sheet' ? `Sheet ${count + 1}` :
                          'Output';
     try {
-      const config =
+      let config =
         type === 'input' ? { source_type: 'upload' } :
         type === 'rule' ? { boolean_operator: 'AND', conditions: [] } :
         type === 'action' ? { plugin: '', settings: {} } :
@@ -227,26 +295,61 @@ export default function WorkflowCanvas() {
         type === 'validator' ? { description: '' } :
         type === 'ai' ? { model: 'gemini-2.0-flash', system_prompt: '', output_format: 'json_extract', output_key: 'ai_analysis', json_fields: [], temperature: 0.3, max_tokens: 2048, include_text: true, include_metadata: true } :
         type === 'and_gate' ? {} :
+        type === 'sheet' ? { sheet_id: '', mode: 'input', write_mode: 'append', column_mapping: {}, auto_columns: true, include_fields: [], exclude_fields: [] } :
         {};
+      // Merge overrides (from config dialog), extract _label if provided
+      let finalLabel = label;
+      if (configOverrides) {
+        const { _label, ...rest } = configOverrides;
+        if (_label) finalLabel = _label;
+        config = { ...config, ...rest };
+      }
       pushSnapshot();
       const { data } = await nodeApi.create({
         workflow: workflowId,
         node_type: type,
-        label,
-        position_x: px + count * 40,
-        position_y: py + count * 40,
+        label: finalLabel,
+        position_x: px,
+        position_y: py,
         config,
       });
       setNodes((prev) => [...prev, data]);
       setSelected({ type: 'node', id: data.id });
+
+      // If inserting between two nodes, remove old connection and create two new ones
+      if (insertBetween) {
+        const { sourceId, targetId, connId } = insertBetween;
+        // Delete old connection
+        await connectionApi.delete(connId);
+        setConnections((prev) => prev.filter((c) => c.id !== connId));
+        // Create source → new node connection
+        const { data: c1 } = await connectionApi.create({ workflow: workflowId, source_node: sourceId, target_node: data.id });
+        // Create new node → target connection
+        const { data: c2 } = await connectionApi.create({ workflow: workflowId, source_node: data.id, target_node: targetId });
+        setConnections((prev) => [...prev, c1, c2]);
+      }
+
       if (type === 'rule') {
         const { data: wf } = await workflowApi.get(workflowId);
         setWorkflow(wf);
       }
-      notify.success(`${label} node added`);
+      notify.success(`${finalLabel} node added`);
     } catch (e) {
       notify.error('Failed to add node');
     }
+  };
+
+  /* ── Open node config dialog (pre-creation) ───────────── */
+  const openNodeConfigDialog = (type, insertBetween = null, position = null) => {
+    setShowNodeConfigDialog({ type, insertBetween, position });
+    setMidpointMenu(null);
+  };
+
+  /* ── Handle node config dialog submit ───────────── */
+  const handleNodeConfigDialogSubmit = async (type, configOverrides, insertBetween, position) => {
+    const pos = position || null;
+    await addNode(type, { overridePos: pos ? [pos.x, pos.y] : undefined, insertBetween, configOverrides });
+    setShowNodeConfigDialog(null);
   };
 
   /* ── Delete node ────────────────── */
@@ -421,65 +524,176 @@ export default function WorkflowCanvas() {
     }
   };
 
-  /* ── Execute workflow ───────────── */
-  const handleExecute = async () => {
-    setExecuting(true);
-    // Mark all nodes as processing (animated progress bars)
+  /* ── Execute workflow (async with polling, sync fallback) ───────────── */
+
+  // ── Helper: apply execution results to UI ──────────────────────
+  const applyResult = (resultData, execStatus) => {
+    const data = resultData || {};
+    setExecutionResult(data);
+    setExecutionState('idle');
+    setTab('results');
+    const doneMap = {};
+    const nrl = Array.isArray(data.node_results) ? data.node_results : [];
+    nodes.forEach((n) => {
+      const nr = nrl.find((r) => r.node_id === n.id);
+      const hasError = nr?.action?.status === 'failed' || nr?.ai?.status === 'failed';
+      doneMap[n.id] = hasError ? 'error' : 'done';
+    });
+    setNodeProcessing(doneMap);
+    fetchAll(); fetchExecutionHistory(); fetchPendingValidations(); fetchNodesStatus();
+    if (execStatus === 'failed') {
+      notify.error('Execution failed — see results for details');
+    } else if (data.smart_meta) {
+      const sm = data.smart_meta;
+      if (data.message) notify.success(data.message);
+      else if (sm.nodes_changed) notify.success(`Config changed — re-executed all ${data.total_documents || 0} documents`);
+      else {
+        const skipped = data.skipped_documents || 0;
+        const executed = data.total_documents || 0;
+        notify.success(skipped > 0 ? `${executed} executed · ${skipped} up-to-date` : `Executed ${executed} document${executed !== 1 ? 's' : ''}`);
+      }
+    } else {
+      notify.success('Workflow executed successfully');
+    }
+    setTimeout(() => setNodeProcessing({}), 4000);
+  };
+
+  // ── Helper: poll an execution_id with incremental progress ─────
+  const pollExecution = (execId) => new Promise((resolve, reject) => {
+    let pollCount = 0;
+    const maxPolls = 180;
+    const interval = 1500;  // 1.5s for responsive progress
+    const timer = setInterval(async () => {
+      pollCount++;
+      try {
+        const { data: st } = await workflowApi.executionStatus(workflowId, execId);
+        // Update execution state from server
+        if (st.execution_state) setExecutionState(st.execution_state);
+        // ── Incremental node progress from node_summary ──────
+        if (Array.isArray(st.node_summary) && st.node_summary.length > 0) {
+          const progressMap = {};
+          const completedIds = new Set(st.node_summary.map(ns => ns.node_id));
+          nodes.forEach((n) => {
+            if (completedIds.has(n.id)) {
+              progressMap[n.id] = 'done';
+            } else {
+              progressMap[n.id] = 'processing';
+            }
+          });
+          setNodeProcessing(progressMap);
+        }
+        if (['completed', 'partial', 'failed'].includes(st.status)) {
+          clearInterval(timer);
+          resolve(st);
+        } else if (pollCount >= maxPolls) {
+          clearInterval(timer);
+          reject(new Error('Execution timed out — check execution history'));
+        }
+      } catch (err) {
+        clearInterval(timer);
+        reject(err);
+      }
+    }, interval);
+  });
+
+  // ── Resume polling for a server-side execution (page reload recovery) ─
+  const _resumeServerExecution = async (execId) => {
     const processingMap = {};
     nodes.forEach((n) => { processingMap[n.id] = 'processing'; });
     setNodeProcessing(processingMap);
     try {
-      const { data } = await workflowApi.execute(workflowId, { smart: true });
-      setExecutionResult(data);
-      setTab('results');
-
-      // Mark nodes as done/error based on results
-      const doneMap = {};
-      const nodeResults = data.node_results || [];
-      const nrl = Array.isArray(nodeResults) ? nodeResults : [];
-      nodes.forEach((n) => {
-        const nr = nrl.find((r) => r.node_id === n.id);
-        const hasError = nr?.action?.status === 'failed' || nr?.ai?.status === 'failed';
-        doneMap[n.id] = hasError ? 'error' : 'done';
-      });
-      setNodeProcessing(doneMap);
-
-      fetchAll();
-      fetchExecutionHistory();
-      fetchPendingValidations();
-      fetchNodesStatus();
-
-      // Execution feedback
-      if (data.smart_meta) {
-        const sm = data.smart_meta;
-        if (data.message) {
-          notify.success(data.message);
-        } else if (sm.nodes_changed) {
-          notify.success(`Config changed — re-executed all ${data.total_documents || 0} documents`);
-        } else {
-          const skipped = data.skipped_documents || 0;
-          const executed = data.total_documents || 0;
-          if (skipped > 0) {
-            notify.success(`${executed} executed · ${skipped} already up-to-date`);
-          } else {
-            notify.success(`Executed ${executed} document${executed !== 1 ? 's' : ''}`);
-          }
-        }
-      } else {
-        notify.success('Workflow executed successfully');
-      }
-
-      // Clear processing badges after a few seconds
-      setTimeout(() => setNodeProcessing({}), 4000);
+      const result = await pollExecution(execId);
+      applyResult(result.result_data || result, result.status);
     } catch (e) {
-      // Mark all nodes as error on failure
       const errMap = {};
       nodes.forEach((n) => { errMap[n.id] = 'error'; });
       setNodeProcessing(errMap);
       setTimeout(() => setNodeProcessing({}), 4000);
-      notify.error('Execution failed: ' + (e.response?.data?.error || e.message));
+      notify.error('Execution polling failed: ' + e.message);
     } finally {
       setExecuting(false);
+    }
+  };
+
+  const handleExecute = async () => {
+    setExecuting(true);
+    setExecutionState('compiling');
+    const processingMap = {};
+    nodes.forEach((n) => { processingMap[n.id] = 'processing'; });
+    setNodeProcessing(processingMap);
+
+    try {
+      // ── Try async execution first ──────────────────────────────
+      const { data: kickoff } = await workflowApi.executeAsync(workflowId, { smart: true });
+      const execId = kickoff.execution_id;
+      if (!execId) throw new Error('No execution_id returned');
+      notify.info('Workflow execution queued…');
+      const result = await pollExecution(execId);
+      applyResult(result.result_data || result, result.status);
+    } catch (e) {
+      const resp = e.response;
+
+      // ── 409: execution already in flight → resume polling ──────
+      if (resp?.status === 409 && resp?.data?.execution_id) {
+        const existingExecId = resp.data.execution_id;
+        const age = resp.data.age_seconds || 0;
+        notify.info(`Resuming in-flight execution (${resp.data.status}, ${age}s ago)…`);
+        try {
+          const result = await pollExecution(existingExecId);
+          applyResult(result.result_data || result, result.status);
+          return;
+        } catch (pollErr) {
+          notify.warning('In-flight execution unreachable — clearing lock…');
+          try { await workflowApi.clearLock(workflowId); } catch {}
+        }
+      }
+
+      // ── 409: stale lock with no execution_id → auto-clear ─────
+      if (resp?.status === 409 && !resp?.data?.execution_id) {
+        notify.warning('Stale lock detected — clearing…');
+        try { await workflowApi.clearLock(workflowId); } catch {}
+      }
+
+      // ── Fallback: sync execution (Celery might not be running) ─
+      if (resp?.status === 409 || resp?.status === 500 || e.message?.includes('No execution_id')) {
+        try {
+          notify.info('Falling back to synchronous execution…');
+          setExecutionState('executing');
+          const { data: syncResult } = await workflowApi.execute(workflowId, { smart: true });
+          applyResult(syncResult, 'completed');
+          return;
+        } catch (syncErr) {
+          const errMap = {};
+          nodes.forEach((n) => { errMap[n.id] = 'error'; });
+          setNodeProcessing(errMap);
+          setExecutionState('idle');
+          setTimeout(() => setNodeProcessing({}), 4000);
+          notify.error('Execution failed: ' + (syncErr.response?.data?.error || syncErr.message));
+          return;
+        }
+      }
+
+      // ── Other errors ──────────────────────────────────────────
+      const errMap = {};
+      nodes.forEach((n) => { errMap[n.id] = 'error'; });
+      setNodeProcessing(errMap);
+      setExecutionState('idle');
+      setTimeout(() => setNodeProcessing({}), 4000);
+      notify.error('Execution failed: ' + (resp?.data?.error || e.message));
+    } finally {
+      setExecuting(false);
+    }
+  };
+
+  /* ── Live mode toggle ───────────── */
+  const handleToggleLive = async () => {
+    try {
+      const { data } = await workflowApi.setLive(workflowId, { is_live: !isLive });
+      setIsLive(data.is_live);
+      setLiveInterval(data.live_interval || 60);
+      notify.success(data.message || (data.is_live ? 'Workflow is now LIVE' : 'Workflow is now offline'));
+    } catch (e) {
+      notify.error('Failed to toggle live mode: ' + (e.response?.data?.error || e.message));
     }
   };
 
@@ -546,6 +760,56 @@ export default function WorkflowCanvas() {
   const openShareModal = () => {
     setShowShareModal(true);
     fetchUploadLinks();
+  };
+
+  const openSheetModal = async (sheetId, nodeId) => {
+    const { sheetsService } = await import('@services/sheetsService');
+
+    // If no sheet linked, auto-create one and link it to the node
+    if (!sheetId) {
+      if (!nodeId) {
+        notify.error('No sheet linked to open');
+        return;
+      }
+      try {
+        const nodeObj = nodes.find((n) => n.id === nodeId);
+        const label = nodeObj?.label || 'Sheet';
+        const { data: newSheet } = await sheetsService.create({
+          title: `${label} — auto`,
+          col_count: 5,
+          row_count: 10,
+        });
+        // Link the new sheet to the node config
+        const existingConfig = nodeObj?.config || {};
+        await updateNode(nodeId, {
+          config: { ...existingConfig, sheet_id: newSheet.id, sheet_title: newSheet.title },
+        });
+        sheetId = newSheet.id;
+        setSheetModalTitle(newSheet.title || 'Sheet');
+      } catch (e) {
+        notify.error('Failed to create sheet: ' + (e?.response?.data?.error || e?.message || 'Unknown error'));
+        return;
+      }
+    } else {
+      // Try to get the title for the modal header
+      try {
+        const { data } = await sheetsService.get(sheetId);
+        setSheetModalTitle(data?.title || 'Sheet');
+      } catch {
+        setSheetModalTitle('Sheet');
+      }
+    }
+
+    setSheetModalId(sheetId);
+    setSheetModalNodeId(nodeId || null);
+    setShowSheetModal(true);
+  };
+
+  const closeSheetModal = () => {
+    setShowSheetModal(false);
+    setSheetModalId(null);
+    setSheetModalTitle('');
+    setSheetModalNodeId(null);
   };
 
   /* ── Optimize workflow ──────────── */
@@ -752,7 +1016,8 @@ export default function WorkflowCanvas() {
             {optimizing ? <Spinner size="sm" className="text-white" /> : <Sparkles size={14} />}
             {optimizing ? 'Analyzing…' : 'Optimize'}
           </button>
-          {/* Share / Upload Link */}
+          {/* Share / Upload Link — for upload-type input nodes */}
+          {nodes.some(n => n.node_type === 'input' && (n.config?.source_type === 'upload' || !n.config?.source_type)) && (
           <button
             onClick={openShareModal}
             className="px-3 py-1.5 rounded-lg text-xs font-medium flex items-center gap-1.5 transition-colors border bg-white text-gray-600 border-gray-200 hover:bg-blue-50 hover:text-blue-600 hover:border-blue-200"
@@ -761,17 +1026,44 @@ export default function WorkflowCanvas() {
             <Share2 size={14} />
             Share
           </button>
+          )}
+          {/* Share as Form — for sheet-type input nodes */}
+          {nodes.some(n => n.node_type === 'input' && n.config?.source_type === 'sheet' && n.config?.sheet_id) && (() => {
+            const sheetNode = nodes.find(n => n.node_type === 'input' && n.config?.source_type === 'sheet' && n.config?.sheet_id);
+            return (
+              <button
+                onClick={() => openSheetModal(sheetNode.config.sheet_id, sheetNode.id)}
+                className="px-3 py-1.5 rounded-lg text-xs font-medium flex items-center gap-1.5 transition-colors border bg-white text-cyan-600 border-cyan-200 hover:bg-cyan-50 hover:text-cyan-700 hover:border-cyan-300"
+                title="Open sheet &amp; share as form"
+              >
+                <Share2 size={14} />
+                Share Form
+              </button>
+            );
+          })()}
 
           <div className="flex items-center gap-1.5">
+            {/* Execution state badge */}
+            {executionState === 'compiling' && (
+              <span className="px-2 py-1 rounded-lg text-[10px] font-semibold bg-blue-50 text-blue-600 border border-blue-200 animate-pulse flex items-center gap-1">
+                <Spinner size="xs" className="text-blue-500" /> Compiling…
+              </span>
+            )}
+            {executionState === 'executing' && (
+              <span className="px-2 py-1 rounded-lg text-[10px] font-semibold bg-orange-50 text-orange-600 border border-orange-200 animate-pulse flex items-center gap-1">
+                <Spinner size="xs" className="text-orange-500" /> Executing…
+              </span>
+            )}
+
             {/* Nodes changed warning */}
-            {nodesStatus?.nodes_changed && (
+            {nodesStatus?.nodes_changed && !executing && (
               <span className="px-2 py-1 rounded-lg text-[10px] font-semibold bg-amber-50 text-amber-600 border border-amber-200 animate-pulse" title="Node config changed since last run — will re-execute all docs">
                 ⚠ Config changed
               </span>
             )}
 
             {/* Pending docs badge */}
-            {nodesStatus && nodesStatus.pending_execution > 0 && !nodesStatus.nodes_changed && (
+            {nodesStatus && nodesStatus.pending_execution > 0 && !nodesStatus.nodes_changed && !executing && (
               <span className="px-2 py-1 rounded-lg text-[10px] font-medium bg-indigo-50 text-indigo-600 border border-indigo-200" title={`${nodesStatus.pending_execution} new doc${nodesStatus.pending_execution !== 1 ? 's' : ''} to execute`}>
                 {nodesStatus.pending_execution} new
               </span>
@@ -779,11 +1071,31 @@ export default function WorkflowCanvas() {
 
             <button
               onClick={handleExecute}
-              disabled={executing}
-              className="px-4 py-1.5 bg-green-600 text-white rounded-lg text-xs font-medium hover:bg-green-700 disabled:opacity-50 flex items-center gap-1.5 transition-colors"
+              disabled={executing || ['compiling', 'executing'].includes(executionState)}
+              className="px-4 py-1.5 bg-green-600 text-white rounded-lg text-xs font-medium hover:bg-green-700 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-1.5 transition-colors"
+              title={executing ? `${executionState === 'compiling' ? 'Compiling DAG' : 'Executing nodes'}…` : 'Execute workflow'}
             >
               {executing ? <Spinner size="sm" className="text-white" /> : <Play size={14} />}
-              {executing ? 'Running…' : 'Execute'}
+              {executing
+                ? executionState === 'compiling' ? 'Compiling…'
+                  : executionState === 'executing' ? 'Running…'
+                  : 'Running…'
+                : 'Execute'}
+            </button>
+
+            {/* Live mode toggle */}
+            <button
+              onClick={handleToggleLive}
+              disabled={executing}
+              className={`px-3 py-1.5 rounded-lg text-xs font-medium flex items-center gap-1.5 transition-all border ${
+                isLive
+                  ? 'bg-red-50 text-red-700 border-red-300 hover:bg-red-100 ring-1 ring-red-200'
+                  : 'bg-gray-50 text-gray-500 border-gray-200 hover:bg-gray-100'
+              } disabled:opacity-50 disabled:cursor-not-allowed`}
+              title={isLive ? `Live — auto-executing every ${liveInterval}s. Click to stop.` : 'Go live — auto-execute on a schedule'}
+            >
+              <span className={`w-2 h-2 rounded-full ${isLive ? 'bg-red-500 animate-pulse' : 'bg-gray-400'}`} />
+              {isLive ? 'LIVE' : 'Go Live'}
             </button>
           </div>
         </div>
@@ -796,14 +1108,15 @@ export default function WorkflowCanvas() {
             {/* ── Node palette (left) ── */}
             <div className="w-52 bg-white border-r p-3 shrink-0 flex flex-col gap-2 overflow-y-auto">
               <p className="text-[10px] uppercase tracking-wider text-gray-400 font-semibold mb-1">Add Node</p>
-              <button onClick={() => addNode('input')} className="w-full text-left px-3 py-2 rounded-lg text-sm font-medium bg-blue-50 text-blue-700 hover:bg-blue-100 transition-colors">📥 Input</button>
-              <button onClick={() => addNode('rule')} className="w-full text-left px-3 py-2 rounded-lg text-sm font-medium bg-amber-50 text-amber-700 hover:bg-amber-100 transition-colors">⚙️ Rule</button>
-              <button onClick={() => addNode('action')} className="w-full text-left px-3 py-2 rounded-lg text-sm font-medium bg-purple-50 text-purple-700 hover:bg-purple-100 transition-colors">⚡ Action</button>
-              <button onClick={() => addNode('validator')} className="w-full text-left px-3 py-2 rounded-lg text-sm font-medium bg-emerald-50 text-emerald-700 hover:bg-emerald-100 transition-colors">✅ Validator</button>
-              <button onClick={() => addNode('ai')} className="w-full text-left px-3 py-2 rounded-lg text-sm font-medium bg-rose-50 text-rose-700 hover:bg-rose-100 transition-colors">🧪 AI</button>
-              <button onClick={() => addNode('and_gate')} className="w-full text-left px-3 py-2 rounded-lg text-sm font-medium bg-orange-50 text-orange-700 hover:bg-orange-100 transition-colors">∩ AND Gate</button>
-              <button onClick={() => addNode('doc_create')} className="w-full text-left px-3 py-2 rounded-lg text-sm font-medium bg-indigo-50 text-indigo-700 hover:bg-indigo-100 transition-colors">📄 Doc Create</button>
-              <button onClick={() => addNode('output')} className="w-full text-left px-3 py-2 rounded-lg text-sm font-medium bg-green-50 text-green-700 hover:bg-green-100 transition-colors">📤 Output</button>
+              <button onClick={() => openNodeConfigDialog('input')} className="w-full text-left px-3 py-2 rounded-lg text-sm font-medium bg-blue-50 text-blue-700 hover:bg-blue-100 transition-colors">📥 Input</button>
+              <button onClick={() => openNodeConfigDialog('rule')} className="w-full text-left px-3 py-2 rounded-lg text-sm font-medium bg-amber-50 text-amber-700 hover:bg-amber-100 transition-colors">⚙️ Rule</button>
+              <button onClick={() => openNodeConfigDialog('action')} className="w-full text-left px-3 py-2 rounded-lg text-sm font-medium bg-purple-50 text-purple-700 hover:bg-purple-100 transition-colors">⚡ Action</button>
+              <button onClick={() => openNodeConfigDialog('validator')} className="w-full text-left px-3 py-2 rounded-lg text-sm font-medium bg-emerald-50 text-emerald-700 hover:bg-emerald-100 transition-colors">✅ Validator</button>
+              <button onClick={() => openNodeConfigDialog('ai')} className="w-full text-left px-3 py-2 rounded-lg text-sm font-medium bg-rose-50 text-rose-700 hover:bg-rose-100 transition-colors">🧪 AI</button>
+              <button onClick={() => openNodeConfigDialog('and_gate')} className="w-full text-left px-3 py-2 rounded-lg text-sm font-medium bg-orange-50 text-orange-700 hover:bg-orange-100 transition-colors">∩ AND Gate</button>
+              <button onClick={() => openNodeConfigDialog('doc_create')} className="w-full text-left px-3 py-2 rounded-lg text-sm font-medium bg-indigo-50 text-indigo-700 hover:bg-indigo-100 transition-colors">📄 Doc Create</button>
+              <button onClick={() => openNodeConfigDialog('sheet')} className="w-full text-left px-3 py-2 rounded-lg text-sm font-medium bg-cyan-50 text-cyan-700 hover:bg-cyan-100 transition-colors">📊 Sheet</button>
+              <button onClick={() => openNodeConfigDialog('output')} className="w-full text-left px-3 py-2 rounded-lg text-sm font-medium bg-green-50 text-green-700 hover:bg-green-100 transition-colors">📤 Output</button>
 
               <hr className="my-2" />
               <div className="flex items-center justify-between">
@@ -847,7 +1160,10 @@ export default function WorkflowCanvas() {
               ref={canvasRef}
               className={`flex-1 relative overflow-hidden ${panning ? 'cursor-grabbing' : dragging ? 'cursor-grabbing' : 'cursor-grab'}`}
               style={{
-                backgroundImage: 'radial-gradient(circle, #d1d5db 1px, transparent 1px)',
+                backgroundImage: `
+                  linear-gradient(to right, #e5e7eb 1px, transparent 1px),
+                  linear-gradient(to bottom, #e5e7eb 1px, transparent 1px)
+                `,
                 backgroundSize: `${20 * zoom}px ${20 * zoom}px`,
                 backgroundPosition: `${pan.x}px ${pan.y}px`,
                 backgroundColor: '#fafafa',
@@ -858,7 +1174,10 @@ export default function WorkflowCanvas() {
               onMouseDown={onCanvasMouseDown}
               onWheel={onCanvasWheel}
               onClick={(e) => {
-                if (e.target === canvasRef.current && !didPan.current) setSelected(null);
+                if (e.target === canvasRef.current && !didPan.current) {
+                  setSelected(null);
+                  setMidpointMenu(null);
+                }
               }}
             >
               {/* Transform layer for zoom + pan */}
@@ -874,7 +1193,7 @@ export default function WorkflowCanvas() {
                   height: '5000px',
                 }}
               >
-              {/* SVG connections — curved bezier */}
+              {/* SVG connections — orthogonal tree-style lines */}
               <svg className="absolute inset-0 w-full h-full pointer-events-none" style={{ zIndex: 0 }}>
                 {connections.map((c) => {
                   const src = nodes.find((n) => n.id === c.source_node);
@@ -887,26 +1206,33 @@ export default function WorkflowCanvas() {
                   }
                   const s = { x: src.position_x + NODE_W, y: srcY };
                   const t = { x: tgt.position_x,           y: tgt.position_y + NODE_H_BASE / 2 };
-                  const dx = Math.abs(t.x - s.x) * 0.5;
-                  const path = `M ${s.x} ${s.y} C ${s.x + dx} ${s.y}, ${t.x - dx} ${t.y}, ${t.x} ${t.y}`;
+                  const path = orthoPath(s, t);
+                  const mid = orthoMidpoint(s, t);
                   const isSelected = selected?.type === 'connection' && selected.id === c.id;
+                  const isHovered = hoveredConnection === c.id;
                   // Color edges by handle: green for approved, red for rejected
                   const handleColor = c.source_handle === 'approved' ? '#10b981'
                     : c.source_handle === 'rejected' ? '#ef4444' : null;
                   const strokeColor = isSelected ? '#6366f1' : handleColor || (executing ? '#818cf8' : '#94a3b8');
                   return (
-                    <g key={c.id} style={{ pointerEvents: 'all' }}>
+                    <g key={c.id} style={{ pointerEvents: 'all' }}
+                      onMouseEnter={() => setHoveredConnection(c.id)}
+                      onMouseLeave={() => setHoveredConnection(null)}
+                    >
+                      {/* Invisible fat hit area */}
                       <path
                         d={path} fill="none"
                         stroke="transparent" strokeWidth={14}
                         style={{ cursor: 'pointer' }}
                         onClick={() => setSelected({ type: 'connection', id: c.id })}
                       />
+                      {/* Visible line */}
                       <path
                         d={path} fill="none"
                         stroke={strokeColor}
-                        strokeWidth={isSelected ? 3 : 2}
-                        strokeDasharray={isSelected ? '' : (handleColor ? '' : '6 3')}
+                        strokeWidth={isSelected ? 3 : isHovered ? 2.5 : 2}
+                        strokeLinejoin="round"
+                        strokeLinecap="round"
                         markerEnd={c.source_handle === 'approved' ? 'url(#arrow-approved)' : c.source_handle === 'rejected' ? 'url(#arrow-rejected)' : 'url(#arrow)'}
                         className={executing ? 'animate-dash' : ''}
                       />
@@ -914,7 +1240,7 @@ export default function WorkflowCanvas() {
                       {c.source_handle && (
                         <text
                           x={(s.x + t.x) / 2}
-                          y={(s.y + t.y) / 2 - 6}
+                          y={Math.min(s.y, t.y) - 8}
                           textAnchor="middle"
                           className="fill-current text-[9px] font-medium pointer-events-none"
                           style={{ fill: handleColor || '#94a3b8' }}
@@ -922,25 +1248,38 @@ export default function WorkflowCanvas() {
                           {c.source_handle === 'approved' ? 'True' : 'False'}
                         </text>
                       )}
+                      {/* Midpoint add button — appears on hover */}
+                      {isHovered && !connecting && !executing && (
+                        <g
+                          style={{ cursor: 'pointer', pointerEvents: 'all' }}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setMidpointMenu({ connId: c.id, x: mid.x, y: mid.y, sourceId: c.source_node, targetId: c.target_node });
+                          }}
+                        >
+                          <circle cx={mid.x} cy={mid.y} r={12} fill="white" stroke="#6366f1" strokeWidth={2} />
+                          <text x={mid.x} y={mid.y + 1} textAnchor="middle" dominantBaseline="central" fill="#6366f1" fontSize="16" fontWeight="bold" style={{ pointerEvents: 'none' }}>+</text>
+                        </g>
+                      )}
                     </g>
                   );
                 })}
+                {/* In-progress connection line */}
                 {connecting && connectMouse && (() => {
                   const src = nodes.find((n) => n.id === connecting.nodeId);
                   if (!src) return null;
-                  // Compute Y offset for validator branching handles
                   let srcY = src.position_y + NODE_H_BASE / 2;
                   if (src.node_type === 'validator' && connecting.handle) {
                     srcY = src.position_y + (connecting.handle === 'approved' ? NODE_H_BASE * 0.3 : NODE_H_BASE * 0.7);
                   }
                   const s = { x: src.position_x + NODE_W, y: srcY };
-                  const dx = Math.abs(connectMouse.x - s.x) * 0.5;
-                  const path = `M ${s.x} ${s.y} C ${s.x + dx} ${s.y}, ${connectMouse.x - dx} ${connectMouse.y}, ${connectMouse.x} ${connectMouse.y}`;
+                  const path = orthoPath(s, connectMouse);
                   const color = connecting.handle === 'approved' ? '#10b981' : connecting.handle === 'rejected' ? '#ef4444' : '#6366f1';
                   return (
                     <path
                       d={path} fill="none"
                       stroke={color} strokeWidth={2} strokeDasharray="4 4"
+                      strokeLinejoin="round" strokeLinecap="round"
                     />
                   );
                 })()}
@@ -966,8 +1305,14 @@ export default function WorkflowCanvas() {
                   node,
                   isSelected,
                   processingStatus,
-                  onSelect: () => setSelected({ type: 'node', id: node.id }),
+                  // single-click now selects AND opens the inspector (table/CSV view)
+                  onSelect: () => {
+                    setSelected({ type: 'node', id: node.id });
+                    setInspectNodeId(node.id);
+                  },
+                  // keep double-click mapping for existing shortcuts
                   onDoubleClick: () => setInspectNodeId(node.id),
+                  onOpenSheet: () => openSheetModal(node.config?.sheet_id, node.id),
                   onDragStart: (e) => {
                     e.stopPropagation();
                     setDragging(node.id);
@@ -985,10 +1330,61 @@ export default function WorkflowCanvas() {
                 if (node.node_type === 'ai')       return <AINode {...commonProps} />;
                 if (node.node_type === 'and_gate') return <GateNode {...commonProps} />;
                 if (node.node_type === 'doc_create') return <DocCreateNode {...commonProps} />;
+                if (node.node_type === 'sheet')      return (
+                  <SheetNode
+                    {...commonProps}
+                    // clicking a sheet node opens the sheet viewer dialog
+                    onSelect={() => {
+                      setSelected({ type: 'node', id: node.id });
+                      setInspectNodeId(null);
+                      openSheetModal(node.config?.sheet_id, node.id);
+                    }}
+                    onDoubleClick={() => {
+                      setSelected({ type: 'node', id: node.id });
+                      setInspectNodeId(null);
+                      openSheetModal(node.config?.sheet_id, node.id);
+                    }}
+                  />
+                );
                 if (node.node_type === 'output')    return <OutputNode {...commonProps} />;
                 return null;
               })}
               </div>{/* end transform layer */}
+
+              {/* Midpoint menu — appears when clicking + on a connection */}
+              {midpointMenu && (
+                <div
+                  className="absolute z-40"
+                  style={{
+                    left: midpointMenu.x * zoom + pan.x - 88,
+                    top: midpointMenu.y * zoom + pan.y + 16,
+                  }}
+                >
+                  <div className="bg-white rounded-xl shadow-2xl border border-gray-200 p-2 w-44 space-y-0.5 animate-in fade-in zoom-in-95">
+                    <p className="text-[10px] uppercase tracking-wider text-gray-400 font-semibold px-2 py-1">Insert Node</p>
+                    {NODE_TYPES.map(n => (
+                      <button
+                        key={n.type}
+                        onClick={() => {
+                          const pos = { x: midpointMenu.x - NODE_W / 2, y: midpointMenu.y - NODE_H_BASE / 2 };
+                          openNodeConfigDialog(n.type, { sourceId: midpointMenu.sourceId, targetId: midpointMenu.targetId, connId: midpointMenu.connId }, pos);
+                        }}
+                        className={`w-full text-left px-3 py-1.5 rounded-lg text-xs font-medium text-gray-700 ${n.bg} transition-colors flex items-center gap-2`}
+                      >
+                        <span>{n.icon}</span> {n.label}
+                      </button>
+                    ))}
+                    <div className="border-t border-gray-100 mt-1 pt-1">
+                      <button
+                        onClick={() => setMidpointMenu(null)}
+                        className="w-full text-center px-3 py-1 rounded-lg text-xs text-gray-400 hover:text-gray-600 hover:bg-gray-50 transition-colors"
+                      >
+                        Cancel
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              )}
 
               {/* Floating add-node button */}
               <div className="absolute bottom-20 right-4 z-30">
@@ -1004,19 +1400,10 @@ export default function WorkflowCanvas() {
                   </button>
                   {showAddMenu && (
                     <div className="absolute bottom-12 right-0 bg-white rounded-xl shadow-xl border p-2 w-44 space-y-1 animate-in fade-in slide-in-from-bottom-2">
-                      {[
-                        { type: 'input',     icon: '📥', label: 'Input',     bg: 'hover:bg-blue-50' },
-                        { type: 'rule',      icon: '⚙️', label: 'Rule',      bg: 'hover:bg-amber-50' },
-                        { type: 'action',    icon: '⚡', label: 'Action',    bg: 'hover:bg-purple-50' },
-                        { type: 'validator', icon: '✅', label: 'Validator', bg: 'hover:bg-emerald-50' },
-                        { type: 'ai',        icon: '🧪', label: 'AI',        bg: 'hover:bg-rose-50' },
-                        { type: 'and_gate',  icon: '∩',  label: 'AND Gate', bg: 'hover:bg-orange-50' },
-                        { type: 'doc_create', icon: '📄', label: 'Doc Create', bg: 'hover:bg-indigo-50' },
-                        { type: 'output',    icon: '📤', label: 'Output',   bg: 'hover:bg-green-50' },
-                      ].map(n => (
+                      {NODE_TYPES.map(n => (
                         <button
                           key={n.type}
-                          onClick={() => { addNode(n.type); setShowAddMenu(false); }}
+                          onClick={() => { openNodeConfigDialog(n.type); setShowAddMenu(false); }}
                           className={`w-full text-left px-3 py-1.5 rounded-lg text-xs font-medium text-gray-700 ${n.bg} transition-colors flex items-center gap-2`}
                         >
                           <span>{n.icon}</span> {n.label}
@@ -1070,7 +1457,7 @@ export default function WorkflowCanvas() {
 
             {/* ── Right sidebar — node config ── */}
             {selectedNode && (
-              <div className="w-80 bg-white border-l p-4 shrink-0 overflow-y-auto">
+              <div className="w-[420px] bg-white border-l p-4 shrink-0 overflow-y-auto">
                 <div className="flex items-center justify-between mb-3">
                   <h3 className="font-semibold text-sm text-gray-900 capitalize flex items-center gap-2">
                     <Settings size={14} className="text-gray-400" />
@@ -1170,6 +1557,15 @@ export default function WorkflowCanvas() {
                   />
                 )}
 
+                {/* Sheet config */}
+                {selectedNode.node_type === 'sheet' && (
+                  <SheetConfigPanel
+                    node={selectedNode}
+                    onChange={(config) => updateNode(selectedNode.id, { config })}
+                    connections={connections}
+                  />
+                )}
+
                 {/* Node last result + document list — show if node has results or execution data exists */}
                 {(selectedNode.last_result?.count != null || (executionResult?.node_results || []).some(r => r.node_id === String(selectedNode.id))) && (
                   <NodeResultPanel
@@ -1200,7 +1596,7 @@ export default function WorkflowCanvas() {
 
             {/* Connection selected — delete action */}
             {selected?.type === 'connection' && (
-              <div className="w-72 bg-white border-l p-4 shrink-0">
+              <div className="w-[420px] bg-white border-l p-4 shrink-0">
                 <div className="flex items-center justify-between mb-3">
                   <h3 className="font-semibold text-sm text-gray-900">Connection</h3>
                   <button onClick={() => setSelected(null)} className="text-gray-400 hover:text-gray-600 text-lg">×</button>
@@ -1239,6 +1635,17 @@ export default function WorkflowCanvas() {
         )}
 
       </div>
+
+      {/* ── Node Config Dialog — appears before creating a node ──── */}
+      {showNodeConfigDialog && (
+        <NodeConfigDialog
+          nodeType={showNodeConfigDialog.type}
+          insertBetween={showNodeConfigDialog.insertBetween}
+          position={showNodeConfigDialog.position}
+          onSubmit={handleNodeConfigDialogSubmit}
+          onCancel={() => setShowNodeConfigDialog(null)}
+        />
+      )}
 
       {/* ── Optimize Workflow Modal ──── */}
       {showOptimizeModal && optimizeResult && (
@@ -1563,7 +1970,246 @@ export default function WorkflowCanvas() {
           onClose={() => setInspectNodeId(null)}
         />
       )}
+
+      {/* ── Sheet editor modal (full spreadsheet) ── */}
+      <SheetEditorModal
+        open={showSheetModal}
+        sheetId={sheetModalId}
+        title={sheetModalTitle || undefined}
+        onClose={closeSheetModal}
+        onSaved={() => notify.success('Sheet saved')}
+        navigateToFull={() => {
+          closeSheetModal();
+          navigate(`/sheets/${sheetModalId}`);
+        }}
+        workflowId={workflowId}
+        workflowNodeId={sheetModalNodeId}
+      />
     </div>
+  );
+}
+
+
+/* ================================================================
+   NodeConfigDialog — pre-creation config dialog for node setup
+   Shows a modal with type-specific quick configuration fields
+   before creating the node and opening the sidebar.
+   ================================================================ */
+function NodeConfigDialog({ nodeType, insertBetween, position, onSubmit, onCancel }) {
+  const [label, setLabel] = React.useState('');
+  const [config, setConfig] = React.useState({});
+  const [creating, setCreating] = React.useState(false);
+
+  const meta = NODE_TYPES.find(n => n.type === nodeType) || NODE_TYPES[0];
+
+  const handleSubmit = async () => {
+    setCreating(true);
+    const overrides = { ...config };
+    if (label.trim()) overrides._label = label.trim();
+    await onSubmit(nodeType, overrides, insertBetween, position);
+    setCreating(false);
+  };
+
+  return (
+    <>
+      <div className="fixed inset-0 z-[80] bg-black/30 backdrop-blur-sm" onClick={onCancel} />
+      <div className="fixed inset-0 z-[85] flex items-center justify-center p-4">
+        <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md overflow-hidden animate-in fade-in zoom-in-95">
+          {/* Header */}
+          <div className={`px-6 py-4 border-b ${meta.color} bg-opacity-30`}>
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-3">
+                <span className="text-2xl">{meta.icon}</span>
+                <h3 className="font-semibold text-gray-900">Add {meta.label} Node</h3>
+              </div>
+              <button onClick={onCancel} className="text-gray-400 hover:text-gray-600 text-xl leading-none">×</button>
+            </div>
+          </div>
+
+          {/* Body */}
+          <div className="px-6 py-5 space-y-4">
+            {/* Label field — universal */}
+            <div>
+              <label className="block text-xs font-medium text-gray-600 mb-1.5">Node Label</label>
+              <input
+                value={label}
+                onChange={(e) => setLabel(e.target.value)}
+                placeholder={meta.label}
+                className="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-indigo-200 focus:border-indigo-400 outline-none transition-all"
+                autoFocus
+              />
+            </div>
+
+            {/* Type-specific quick config */}
+            {nodeType === 'input' && (
+              <div>
+                <label className="block text-xs font-medium text-gray-600 mb-1.5">Source Type</label>
+                <select
+                  value={config.source_type || 'upload'}
+                  onChange={(e) => setConfig(prev => ({ ...prev, source_type: e.target.value }))}
+                  className="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-indigo-200 focus:border-indigo-400 outline-none"
+                >
+                  <option value="upload">📤 Manual Upload</option>
+                  <option value="form">📝 Form / CSV</option>
+                  <option value="email_inbox">📧 Email Inbox</option>
+                  <option value="webhook">🔗 Webhook</option>
+                  <option value="google_drive">📁 Google Drive</option>
+                  <option value="dropbox">☁️ Dropbox</option>
+                  <option value="onedrive">☁️ OneDrive</option>
+                  <option value="s3">🗄 S3 Bucket</option>
+                  <option value="ftp">🖥 FTP/SFTP</option>
+                  <option value="url_scrape">🌐 URL Scrape</option>
+                  <option value="table">📊 Table / Sheet</option>
+                </select>
+              </div>
+            )}
+
+            {nodeType === 'rule' && (
+              <div>
+                <label className="block text-xs font-medium text-gray-600 mb-1.5">Boolean Operator</label>
+                <div className="flex gap-2">
+                  {['AND', 'OR'].map(op => (
+                    <button
+                      key={op}
+                      onClick={() => setConfig(prev => ({ ...prev, boolean_operator: op }))}
+                      className={`flex-1 px-3 py-2 rounded-lg text-sm font-medium border transition-all ${
+                        (config.boolean_operator || 'AND') === op
+                          ? 'bg-amber-50 border-amber-300 text-amber-700'
+                          : 'bg-gray-50 border-gray-200 text-gray-500 hover:bg-gray-100'
+                      }`}
+                    >
+                      {op}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {nodeType === 'ai' && (
+              <>
+                <div>
+                  <label className="block text-xs font-medium text-gray-600 mb-1.5">AI Model</label>
+                  <select
+                    value={config.model || 'gemini-2.0-flash'}
+                    onChange={(e) => setConfig(prev => ({ ...prev, model: e.target.value }))}
+                    className="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-indigo-200 focus:border-indigo-400 outline-none"
+                  >
+                    <option value="gemini-2.0-flash">Gemini 2.0 Flash</option>
+                    <option value="gemini-2.5-pro-preview-05-06">Gemini 2.5 Pro</option>
+                    <option value="gemini-2.5-flash-preview-05-20">Gemini 2.5 Flash</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-xs font-medium text-gray-600 mb-1.5">Output Key</label>
+                  <input
+                    value={config.output_key || ''}
+                    onChange={(e) => setConfig(prev => ({ ...prev, output_key: e.target.value }))}
+                    placeholder="ai_analysis"
+                    className="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-indigo-200 focus:border-indigo-400 outline-none"
+                  />
+                </div>
+              </>
+            )}
+
+            {nodeType === 'validator' && (
+              <div>
+                <label className="block text-xs font-medium text-gray-600 mb-1.5">Description</label>
+                <textarea
+                  value={config.description || ''}
+                  onChange={(e) => setConfig(prev => ({ ...prev, description: e.target.value }))}
+                  placeholder="What should reviewers validate?"
+                  rows={2}
+                  className="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-indigo-200 focus:border-indigo-400 outline-none resize-none"
+                />
+              </div>
+            )}
+
+            {nodeType === 'action' && (
+              <div>
+                <label className="block text-xs font-medium text-gray-600 mb-1.5">Action Type</label>
+                <select
+                  value={config.plugin || ''}
+                  onChange={(e) => setConfig(prev => ({ ...prev, plugin: e.target.value }))}
+                  className="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-indigo-200 focus:border-indigo-400 outline-none"
+                >
+                  <option value="">Select an action…</option>
+                  <option value="email">📧 Send Email</option>
+                  <option value="webhook">🔗 Webhook</option>
+                  <option value="move_folder">📂 Move to Folder</option>
+                  <option value="tag">🏷 Tag Documents</option>
+                  <option value="export">📤 Export</option>
+                </select>
+              </div>
+            )}
+
+            {nodeType === 'listener' && (
+              <div>
+                <label className="block text-xs font-medium text-gray-600 mb-1.5">Trigger Type</label>
+                <select
+                  value={config.trigger_type || ''}
+                  onChange={(e) => setConfig(prev => ({ ...prev, trigger_type: e.target.value }))}
+                  className="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-indigo-200 focus:border-indigo-400 outline-none"
+                >
+                  <option value="">Select a trigger…</option>
+                  <option value="manual_gate">🚪 Manual Gate</option>
+                  <option value="schedule">⏰ Schedule</option>
+                  <option value="webhook">🔗 Webhook</option>
+                </select>
+              </div>
+            )}
+
+            {nodeType === 'sheet' && (
+              <div className="bg-cyan-50 rounded-lg p-3 text-xs text-cyan-700">
+                <p className="font-medium">📊 Mode is auto-detected from connections</p>
+              </div>
+            )}
+
+            {/* Info for simple node types */}
+            {(nodeType === 'output' || nodeType === 'and_gate' || nodeType === 'doc_create') && (
+              <div className="bg-gray-50 rounded-lg p-3 text-xs text-gray-500">
+                {nodeType === 'output' && <p>Collects final results of the workflow pipeline.</p>}
+                {nodeType === 'and_gate' && <p>Waits for all incoming connections to complete before passing data.</p>}
+                {nodeType === 'doc_create' && <p>Generates documents from extracted data using templates.</p>}
+              </div>
+            )}
+
+            {insertBetween && (
+              <div className="bg-indigo-50 rounded-lg p-2.5 text-xs text-indigo-600 flex items-center gap-2">
+                <span className="text-base">🔗</span>
+                <span>Will be inserted between the connected nodes.</span>
+              </div>
+            )}
+          </div>
+
+          {/* Footer */}
+          <div className="px-6 py-4 border-t bg-gray-50 flex items-center justify-end gap-3">
+            <button
+              onClick={onCancel}
+              className="px-4 py-2 rounded-lg text-sm font-medium text-gray-600 hover:bg-gray-100 transition-colors"
+            >
+              Cancel
+            </button>
+            <button
+              onClick={handleSubmit}
+              disabled={creating}
+              className="px-5 py-2 rounded-lg text-sm font-medium bg-indigo-600 text-white hover:bg-indigo-700 disabled:opacity-50 transition-colors flex items-center gap-2"
+            >
+              {creating ? (
+                <>
+                  <Loader2 size={14} className="animate-spin" />
+                  Creating…
+                </>
+              ) : (
+                <>
+                  <Plus size={14} />
+                  Add {meta.label}
+                </>
+              )}
+            </button>
+          </div>
+        </div>
+      </div>
+    </>
   );
 }
 
@@ -1841,6 +2487,24 @@ function InputConfigPanel({ node, onChange, workflowId, onUpdate, documentTypes 
   const [tableImported, setTableImported] = React.useState(!!(serverConfig.table_info));
   // File extensions filter (shared by cloud sources)
   const [fileExtensions, setFileExtensions] = React.useState((serverConfig.file_extensions || []).join(', '));
+  // Form / CSV state
+  const [formColumns, setFormColumns] = React.useState(serverConfig.form_columns || [{ name: '' }]);
+  const [formRows, setFormRows] = React.useState(serverConfig.form_rows || [{}]);
+  const [formTargetSheet, setFormTargetSheet] = React.useState(serverConfig.form_target_sheet || '');
+  const [formNewSheetTitle, setFormNewSheetTitle] = React.useState('');
+  const [formSheets, setFormSheets] = React.useState([]);
+  const [formLoadingSheets, setFormLoadingSheets] = React.useState(false);
+  const [formSaving, setFormSaving] = React.useState(false);
+  // Sheet source state (input → sheet → share as form)
+  const [sheetSourceSheets, setSheetSourceSheets] = React.useState([]);
+  const [sheetSourceLoading, setSheetSourceLoading] = React.useState(false);
+  const [sheetSourceId, setSheetSourceId] = React.useState(serverConfig.sheet_id || '');
+  const [sheetSourceLinks, setSheetSourceLinks] = React.useState([]);
+  const [sheetSourceLinksLoading, setSheetSourceLinksLoading] = React.useState(false);
+  const [sheetSourceCreatingLink, setSheetSourceCreatingLink] = React.useState(false);
+  const [sheetSourceCopiedToken, setSheetSourceCopiedToken] = React.useState(null);
+  const [sheetSourceCreatingSheet, setSheetSourceCreatingSheet] = React.useState(false);
+  const [sheetSourceNewName, setSheetSourceNewName] = React.useState('');
   // UI state
   const [dirty, setDirty] = React.useState(false);
   const [checking, setChecking] = React.useState(false);
@@ -1899,6 +2563,16 @@ function InputConfigPanel({ node, onChange, workflowId, onUpdate, documentTypes 
     setSelectedSheet('');
     setTableImported(!!(c.table_info));
     setFileExtensions((c.file_extensions || []).join(', '));
+    setFormColumns(c.form_columns || [{ name: '' }]);
+    setFormRows(c.form_rows || [{}]);
+    setFormTargetSheet(c.form_target_sheet || '');
+    setFormNewSheetTitle('');
+    setFormSaving(false);
+    // Sheet source
+    setSheetSourceId(c.sheet_id || '');
+    setSheetSourceLinks([]);
+    setSheetSourceNewName('');
+    setSheetSourceCreatingSheet(false);
     setDirty(false);
     setLastCheckResult(null);
     setTestResult(null);
@@ -1970,6 +2644,16 @@ function InputConfigPanel({ node, onChange, workflowId, onUpdate, documentTypes 
       });
       // Preserve table_info from server config if exists
       if (serverConfig.table_info) config.table_info = serverConfig.table_info;
+    } else if (sourceType === 'form') {
+      Object.assign(config, {
+        form_columns: formColumns.filter(c => c.name.trim()),
+        form_rows: formRows,
+        form_target_sheet: formTargetSheet,
+      });
+    } else if (sourceType === 'sheet') {
+      Object.assign(config, {
+        sheet_id: sheetSourceId,
+      });
     }
     return config;
   };
@@ -2069,12 +2753,265 @@ function InputConfigPanel({ node, onChange, workflowId, onUpdate, documentTypes 
     }
   };
 
+  // ── Form / CSV handlers ──
+  // Fetch available sheets for the form target dropdown
+  React.useEffect(() => {
+    if (sourceType !== 'form') return;
+    let cancelled = false;
+    setFormLoadingSheets(true);
+    import('@services/sheetsService').then(({ sheetsService }) => {
+      sheetsService.list().then(({ data }) => {
+        if (!cancelled) {
+          const list = Array.isArray(data) ? data : (data.results || []);
+          setFormSheets(list);
+        }
+      }).catch(() => {}).finally(() => { if (!cancelled) setFormLoadingSheets(false); });
+    });
+    return () => { cancelled = true; };
+  }, [sourceType]);
+
+  const handleFormAddColumn = () => {
+    setFormColumns(prev => [...prev, { name: '' }]);
+    setDirty(true);
+  };
+
+  const handleFormRemoveColumn = (idx) => {
+    setFormColumns(prev => prev.filter((_, i) => i !== idx));
+    // Also clean rows
+    setFormRows(prev => prev.map(row => {
+      const copy = { ...row };
+      const removed = formColumns[idx]?.name;
+      if (removed) delete copy[removed];
+      return copy;
+    }));
+    setDirty(true);
+  };
+
+  const handleFormColumnRename = (idx, newName) => {
+    const oldName = formColumns[idx]?.name;
+    setFormColumns(prev => prev.map((c, i) => i === idx ? { name: newName } : c));
+    // Rename key in all rows
+    if (oldName && newName && oldName !== newName) {
+      setFormRows(prev => prev.map(row => {
+        const copy = { ...row };
+        if (oldName in copy) {
+          copy[newName] = copy[oldName];
+          delete copy[oldName];
+        }
+        return copy;
+      }));
+    }
+    setDirty(true);
+  };
+
+  const handleFormAddRow = () => {
+    setFormRows(prev => [...prev, {}]);
+    setDirty(true);
+  };
+
+  const handleFormRemoveRow = (idx) => {
+    setFormRows(prev => prev.filter((_, i) => i !== idx));
+    setDirty(true);
+  };
+
+  const handleFormCellChange = (rowIdx, colName, value) => {
+    setFormRows(prev => prev.map((row, i) => i === rowIdx ? { ...row, [colName]: value } : row));
+    setDirty(true);
+  };
+
+  const handleFormCreateSheet = async () => {
+    try {
+      const { sheetsService } = await import('@services/sheetsService');
+      const title = formNewSheetTitle.trim() || `Form Data ${new Date().toLocaleDateString()}`;
+      const { data } = await sheetsService.create({ title, row_count: 0, col_count: 0 });
+      setFormSheets(prev => [data, ...prev]);
+      setFormTargetSheet(data.id);
+      setFormNewSheetTitle('');
+      setDirty(true);
+      notify.success(`Sheet "${title}" created`);
+    } catch (e) {
+      notify.error('Failed to create sheet: ' + (e.response?.data?.error || e.message));
+    }
+  };
+
+  const handleFormSaveCSVAndExecute = async () => {
+    // Validate
+    const validCols = formColumns.filter(c => c.name.trim());
+    if (validCols.length === 0) { notify.error('Add at least one column'); return; }
+    const validRows = formRows.filter(row => validCols.some(c => row[c.name]?.toString().trim()));
+    if (validRows.length === 0) { notify.error('Add at least one row with data'); return; }
+
+    setFormSaving(true);
+    try {
+      // Build CSV content
+      const headers = validCols.map(c => c.name);
+      const csvLines = [headers.join(',')];
+      validRows.forEach(row => {
+        const cells = headers.map(h => {
+          const val = (row[h] || '').toString().replace(/"/g, '""');
+          return val.includes(',') || val.includes('"') || val.includes('\n') ? `"${val}"` : val;
+        });
+        csvLines.push(cells.join(','));
+      });
+      const csvContent = csvLines.join('\n');
+
+      // Create a CSV Blob and upload as file
+      const blob = new Blob([csvContent], { type: 'text/csv' });
+      const file = new File([blob], 'form_data.csv', { type: 'text/csv' });
+
+      // If a target sheet is selected, save to it first
+      if (formTargetSheet) {
+        const { sheetsService } = await import('@services/sheetsService');
+        const targetSheet = formSheets.find(s => s.id === formTargetSheet);
+        // Ensure columns exist
+        const existingCols = (targetSheet?.columns || []).map(c => c.label);
+        for (const h of headers) {
+          if (!existingCols.includes(h)) {
+            await sheetsService.addColumn(formTargetSheet, { label: h, type: 'text' });
+          }
+        }
+        // Add rows with cell data
+        for (const row of validRows) {
+          const { data: newRow } = await sheetsService.addRow(formTargetSheet);
+          const cells = [];
+          if (targetSheet?.columns) {
+            for (const col of targetSheet.columns) {
+              if (row[col.label] != null) {
+                cells.push({ row_order: newRow.order, column_key: col.key, raw_value: String(row[col.label]) });
+              }
+            }
+          }
+          // Also handle new columns
+          if (cells.length > 0) {
+            await sheetsService.bulkUpdate(formTargetSheet, cells);
+          }
+        }
+        notify.success(`Saved ${validRows.length} rows to sheet`);
+      }
+
+      // Upload CSV as document to the workflow
+      const fd = new FormData();
+      fd.append('files', file);
+      await workflowApi.upload(workflowId, fd);
+
+      // Save the config
+      const cfg = buildConfig();
+      cfg.form_columns = validCols;
+      cfg.form_rows = validRows;
+      cfg.form_target_sheet = formTargetSheet;
+      onChange(cfg);
+      setDirty(false);
+      onUpdate?.();
+      notify.success(`Uploaded ${validRows.length} rows as CSV document`);
+    } catch (e) {
+      notify.error('Save failed: ' + (e.response?.data?.error || e.message));
+    } finally {
+      setFormSaving(false);
+    }
+  };
+
+  // ── Sheet source handlers ──
+  React.useEffect(() => {
+    if (sourceType !== 'sheet') return;
+    let cancelled = false;
+    setSheetSourceLoading(true);
+    import('@services/sheetsService').then(({ sheetsService }) => {
+      sheetsService.list().then(({ data }) => {
+        if (!cancelled) {
+          const list = Array.isArray(data) ? data : (data.results || []);
+          setSheetSourceSheets(list);
+        }
+      }).catch(() => {}).finally(() => { if (!cancelled) setSheetSourceLoading(false); });
+    });
+    return () => { cancelled = true; };
+  }, [sourceType]);
+
+  // Fetch share links for the selected sheet
+  const fetchSheetSourceLinks = React.useCallback(async () => {
+    if (!sheetSourceId) { setSheetSourceLinks([]); return; }
+    setSheetSourceLinksLoading(true);
+    try {
+      const { sheetsService } = await import('@services/sheetsService');
+      const { data } = await sheetsService.listShareLinks(sheetSourceId);
+      setSheetSourceLinks(data);
+    } catch { /* swallow */ }
+    finally { setSheetSourceLinksLoading(false); }
+  }, [sheetSourceId]);
+
+  React.useEffect(() => {
+    if (sourceType === 'sheet' && sheetSourceId) fetchSheetSourceLinks();
+  }, [sourceType, sheetSourceId, fetchSheetSourceLinks]);
+
+  const handleSheetSourceCreateLink = async () => {
+    if (!sheetSourceId) return;
+    setSheetSourceCreatingLink(true);
+    try {
+      const { sheetsService } = await import('@services/sheetsService');
+      const sheet = sheetSourceSheets.find(s => s.id === sheetSourceId);
+      await sheetsService.createShareLink(sheetSourceId, {
+        label: (sheet?.title || 'Sheet') + ' Intake Form',
+        workflow: workflowId,
+        workflow_node: node.id,
+      });
+      await fetchSheetSourceLinks();
+    } catch (e) {
+      notify.error('Failed to create link: ' + (e?.response?.data?.error || e?.message));
+    } finally {
+      setSheetSourceCreatingLink(false);
+    }
+  };
+
+  const handleSheetSourceCopyLink = (token) => {
+    const url = `${window.location.origin}/sheets/form/${token}`;
+    navigator.clipboard.writeText(url);
+    setSheetSourceCopiedToken(token);
+    setTimeout(() => setSheetSourceCopiedToken(null), 2000);
+  };
+
+  const handleSheetSourceToggleLink = async (linkId, isActive) => {
+    if (!sheetSourceId) return;
+    try {
+      const { sheetsService } = await import('@services/sheetsService');
+      await sheetsService.updateShareLink(sheetSourceId, linkId, { is_active: !isActive });
+      await fetchSheetSourceLinks();
+    } catch { /* swallow */ }
+  };
+
+  const handleSheetSourceDeleteLink = async (linkId) => {
+    if (!sheetSourceId) return;
+    try {
+      const { sheetsService } = await import('@services/sheetsService');
+      await sheetsService.deleteShareLink(sheetSourceId, linkId);
+      await fetchSheetSourceLinks();
+    } catch { /* swallow */ }
+  };
+
+  const handleSheetSourceCreate = async () => {
+    setSheetSourceCreatingSheet(true);
+    try {
+      const { sheetsService } = await import('@services/sheetsService');
+      const title = sheetSourceNewName.trim() || `Input Sheet ${new Date().toLocaleDateString()}`;
+      const { data } = await sheetsService.create({ title, row_count: 10, col_count: 5 });
+      setSheetSourceSheets(prev => [data, ...prev]);
+      setSheetSourceId(data.id);
+      setSheetSourceNewName('');
+      setDirty(true);
+      notify.success(`Sheet "${title}" created`);
+    } catch (e) {
+      notify.error('Failed to create sheet: ' + (e?.response?.data?.error || e?.message));
+    } finally {
+      setSheetSourceCreatingSheet(false);
+    }
+  };
+
   const cloudSources = ['google_drive', 'dropbox', 'onedrive', 's3', 'ftp', 'url_scrape'];
 
   const primarySources = [
     { value: 'upload',       icon: '📄', label: 'Upload',   desc: 'Manual upload' },
+    { value: 'sheet',        icon: '📊', label: 'Sheet',    desc: 'Sheet form' },
+    { value: 'form',         icon: '📝', label: 'Form',     desc: 'CSV form' },
     { value: 'url_scrape',   icon: '🌐', label: 'URL',      desc: 'Fetch URLs' },
-    { value: 'table',        icon: '📊', label: 'Table',    desc: 'Spreadsheet' },
+    { value: 'table',        icon: '�', label: 'Table',    desc: 'Spreadsheet' },
     { value: 'email_inbox',  icon: '📧', label: 'Email',    desc: 'IMAP inbox' },
     { value: 'webhook',      icon: '🔗', label: 'Webhook',  desc: 'API ingest' },
     { value: 'google_drive', icon: '🗂️', label: 'G-Drive',  desc: 'Google Drive' },
@@ -2182,8 +3119,8 @@ function InputConfigPanel({ node, onChange, workflowId, onUpdate, documentTypes 
         )}
       </div>
 
-      {/* Document Type Selector — hidden for email inbox (emails don't have a fixed doc type) */}
-      {sourceType !== 'email_inbox' && (
+      {/* Document Type Selector — hidden for email inbox, form, and sheet (structured data) */}
+      {sourceType !== 'email_inbox' && sourceType !== 'form' && sourceType !== 'sheet' && (
       <div>
         <label className="block text-[10px] uppercase tracking-wider text-gray-400 font-semibold mb-1.5">Document Type</label>
         <select
@@ -2198,23 +3135,11 @@ function InputConfigPanel({ node, onChange, workflowId, onUpdate, documentTypes 
             <option key={dt.key} value={dt.key}>{dt.icon} {dt.label} — {dt.field_count} fields</option>
           ))}
         </select>
-
-        {/* Nudge when no document type selected */}
-        {!docType && documentTypes.length > 0 && (
-          <div className="mt-2 flex items-start gap-2 rounded-lg bg-amber-50/80 border border-amber-200/60 px-2.5 py-2">
-            <div className="mt-px shrink-0 w-4 h-4 rounded-full bg-amber-400/20 flex items-center justify-center">
-              <span className="text-[10px] leading-none">!</span>
-            </div>
-            <p className="text-[10.5px] text-amber-700 leading-snug">
-              No document type selected — extracted fields will use defaults. Pick a type for structured metadata.
-            </p>
-          </div>
-        )}
       </div>
       )}
 
       {/* Selected type preview */}
-      {sourceType !== 'email_inbox' && docType && (() => {
+      {sourceType !== 'email_inbox' && sourceType !== 'form' && sourceType !== 'sheet' && docType && (() => {
         const sel = documentTypes.find(t => t.key === docType);
         return sel ? (
           <div>
@@ -2236,29 +3161,310 @@ function InputConfigPanel({ node, onChange, workflowId, onUpdate, documentTypes 
         ) : null;
       })()}
 
-      {/* Upload source info */}
-      {sourceType === 'upload' && (
-        <div className="rounded-xl bg-gradient-to-br from-blue-50 to-indigo-50/50 p-3 border border-blue-100">
-          <p className="text-xs font-medium text-gray-700 mb-1">Manual Upload</p>
-          <p className="text-[11px] text-gray-500 leading-relaxed">Upload files in the Documents tab. All formats supported including ZIP archives.</p>
+      {/* Webhook source info */}
+      {sourceType === 'webhook' && (
+        <div className="rounded-xl bg-gray-50 p-3 border border-gray-100">
+          <code className="block text-[10px] bg-white border border-gray-200 px-2 py-1 rounded-md font-mono text-gray-600">POST /api/clm/workflows/{'{id}'}/webhook-ingest/</code>
         </div>
       )}
 
-      {/* Webhook source info */}
-      {sourceType === 'webhook' && (
-        <div className="rounded-xl bg-gradient-to-br from-blue-50 to-indigo-50/50 p-3 border border-blue-100">
-          <p className="text-xs font-medium text-gray-700 mb-1">Webhook Ingest</p>
-          <p className="text-[11px] text-gray-500 leading-relaxed mb-1.5">External systems can POST documents to this endpoint:</p>
-          <code className="block text-[10px] bg-white/80 border border-gray-200 px-2 py-1 rounded-md font-mono text-gray-600">POST /api/clm/workflows/{'{id}'}/webhook-ingest/</code>
+      {/* Form / CSV source */}
+      {sourceType === 'form' && (
+        <div className="space-y-3">
+          {/* Column definitions */}
+          <div>
+            <label className="block text-[10px] text-gray-400 font-medium uppercase tracking-wider mb-1.5">Columns</label>
+            <div className="space-y-1.5">
+              {formColumns.map((col, ci) => (
+                <div key={ci} className="flex items-center gap-1.5">
+                  <input
+                    value={col.name}
+                    onChange={(e) => handleFormColumnRename(ci, e.target.value)}
+                    placeholder={`Column ${ci + 1}`}
+                    className="flex-1 px-2.5 py-1.5 border border-gray-200 rounded-lg text-xs text-gray-700 focus:ring-2 focus:ring-blue-100 focus:border-blue-300 outline-none"
+                  />
+                  {formColumns.length > 1 && (
+                    <button onClick={() => handleFormRemoveColumn(ci)}
+                      className="px-1.5 text-red-400 hover:text-red-600 text-sm shrink-0">×</button>
+                  )}
+                </div>
+              ))}
+            </div>
+            <button onClick={handleFormAddColumn}
+              className="mt-1.5 text-[11px] text-blue-600 hover:text-blue-700 font-medium transition-colors">
+              + Add Column
+            </button>
+          </div>
+
+          {/* Data rows — editable table */}
+          {formColumns.some(c => c.name.trim()) && (
+            <div>
+              <label className="block text-[10px] text-gray-400 font-medium uppercase tracking-wider mb-1.5">
+                Data ({formRows.length} row{formRows.length !== 1 ? 's' : ''})
+              </label>
+              <div className="overflow-auto max-h-72 border border-gray-100 rounded-xl">
+                <table className="min-w-full text-[10px]">
+                  <thead className="bg-gray-50/80 sticky top-0 z-10">
+                    <tr>
+                      <th className="px-2 py-1.5 text-left text-gray-400 font-medium w-8">#</th>
+                      {formColumns.filter(c => c.name.trim()).map((col, ci) => (
+                        <th key={ci} className="px-2 py-1.5 text-left text-gray-500 font-semibold whitespace-nowrap">{col.name}</th>
+                      ))}
+                      <th className="px-2 py-1.5 w-8" />
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-gray-50">
+                    {formRows.map((row, ri) => (
+                      <tr key={ri} className="hover:bg-blue-50/30 transition-colors">
+                        <td className="px-2 py-1 text-gray-300">{ri + 1}</td>
+                        {formColumns.filter(c => c.name.trim()).map((col, ci) => (
+                          <td key={ci} className="px-1 py-0.5">
+                            <input
+                              value={row[col.name] || ''}
+                              onChange={(e) => handleFormCellChange(ri, col.name, e.target.value)}
+                              className="w-full px-1.5 py-1 border border-transparent hover:border-gray-200 focus:border-blue-300 rounded text-[10px] text-gray-700 outline-none focus:ring-1 focus:ring-blue-100 bg-transparent"
+                              placeholder="—"
+                            />
+                          </td>
+                        ))}
+                        <td className="px-1 py-0.5">
+                          <button onClick={() => handleFormRemoveRow(ri)}
+                            className="text-red-300 hover:text-red-500 text-xs">×</button>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+              <button onClick={handleFormAddRow}
+                className="mt-1.5 text-[11px] text-blue-600 hover:text-blue-700 font-medium transition-colors">
+                + Add Row
+              </button>
+            </div>
+          )}
+
+          {/* Save to sheet selector */}
+          <div>
+            <label className="block text-[10px] text-gray-400 font-medium uppercase tracking-wider mb-1.5">Save to Sheet</label>
+            {formLoadingSheets ? (
+              <p className="text-[11px] text-gray-400">Loading sheets…</p>
+            ) : (
+              <>
+                <select
+                  value={formTargetSheet}
+                  onChange={(e) => { setFormTargetSheet(e.target.value); setDirty(true); }}
+                  className="w-full px-2.5 py-1.5 border border-gray-200 rounded-lg text-xs text-gray-700 focus:ring-2 focus:ring-blue-100 focus:border-blue-300 outline-none bg-white"
+                >
+                  <option value="">— None (CSV upload only) —</option>
+                  {formSheets.map(s => (
+                    <option key={s.id} value={s.id}>{s.title || `Sheet ${s.id.slice(0, 8)}`}</option>
+                  ))}
+                </select>
+                {/* Create new sheet inline */}
+                <div className="flex items-center gap-1.5 mt-2">
+                  <input
+                    value={formNewSheetTitle}
+                    onChange={(e) => setFormNewSheetTitle(e.target.value)}
+                    placeholder="New sheet name…"
+                    className="flex-1 px-2.5 py-1.5 border border-gray-200 rounded-lg text-xs text-gray-700 focus:ring-2 focus:ring-blue-100 focus:border-blue-300 outline-none"
+                    onKeyDown={(e) => { if (e.key === 'Enter') handleFormCreateSheet(); }}
+                  />
+                  <button
+                    onClick={handleFormCreateSheet}
+                    className="px-3 py-1.5 bg-emerald-600 text-white rounded-lg text-[11px] font-medium hover:bg-emerald-700 transition-colors whitespace-nowrap"
+                  >
+                    + Create
+                  </button>
+                </div>
+              </>
+            )}
+          </div>
+
+          {/* Save CSV & Execute */}
+          <button
+            onClick={handleFormSaveCSVAndExecute}
+            disabled={formSaving || !formColumns.some(c => c.name.trim())}
+            className="w-full px-2 py-2.5 bg-gray-800 text-white rounded-xl text-xs font-medium hover:bg-gray-900 disabled:opacity-50 transition-all flex items-center justify-center gap-1.5 shadow-sm"
+          >
+            {formSaving ? (
+              <><Spinner size="sm" className="text-white" /> Saving…</>
+            ) : (
+              <>📝 Save CSV{formTargetSheet ? ' & Sheet' : ''} → Execute</>
+            )}
+          </button>
+        </div>
+      )}
+
+      {/* Sheet source — pick a sheet, share as form for collecting submissions */}
+      {sourceType === 'sheet' && (
+        <div className="space-y-3">
+          <div className="rounded-xl bg-cyan-50/60 p-3 border border-cyan-200">
+            <div className="flex items-center gap-2">
+              <span className="text-base">📊</span>
+              <div className="flex-1">
+                <p className="text-xs font-semibold text-cyan-700">Sheet Input</p>
+                <p className="text-[10px] text-cyan-600">
+                  Share as a public form — submissions become rows in the sheet for processing.
+                </p>
+              </div>
+            </div>
+          </div>
+
+          {/* Sheet picker */}
+          <div>
+            <label className="block text-[10px] text-gray-400 font-semibold uppercase tracking-wider mb-1.5">Linked Sheet</label>
+            {sheetSourceLoading ? (
+              <p className="text-[11px] text-gray-400">Loading sheets…</p>
+            ) : sheetSourceSheets.length === 0 ? (
+              <div className="space-y-2">
+                <p className="text-[11px] text-gray-400 italic">No sheets found.</p>
+                <div className="flex gap-2">
+                  <input
+                    value={sheetSourceNewName}
+                    onChange={(e) => setSheetSourceNewName(e.target.value)}
+                    placeholder="New sheet name"
+                    className="flex-1 px-2 py-1.5 border border-gray-200 rounded-lg text-xs focus:ring-2 focus:ring-cyan-200 focus:border-cyan-400 outline-none"
+                    onKeyDown={(e) => { if (e.key === 'Enter') handleSheetSourceCreate(); }}
+                  />
+                  <button
+                    onClick={handleSheetSourceCreate}
+                    disabled={sheetSourceCreatingSheet}
+                    className="px-3 py-1.5 bg-cyan-600 text-white rounded-lg text-[11px] font-medium hover:bg-cyan-700 disabled:opacity-50 transition-colors whitespace-nowrap"
+                  >
+                    {sheetSourceCreatingSheet ? 'Creating…' : '+ Create'}
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <>
+                <select
+                  value={sheetSourceId}
+                  onChange={(e) => { setSheetSourceId(e.target.value); setDirty(true); }}
+                  className="w-full px-2.5 py-1.5 border rounded-lg text-xs focus:ring-2 focus:ring-cyan-200 focus:border-cyan-400 outline-none"
+                >
+                  <option value="">— Select sheet —</option>
+                  {sheetSourceSheets.map(s => (
+                    <option key={s.id} value={s.id}>{s.title || `Sheet ${s.id.slice(0,8)}`}</option>
+                  ))}
+                </select>
+                {!sheetSourceId && (
+                  <div className="mt-2 flex gap-2">
+                    <input
+                      value={sheetSourceNewName}
+                      onChange={(e) => setSheetSourceNewName(e.target.value)}
+                      placeholder="New sheet name"
+                      className="flex-1 px-2 py-1.5 border border-gray-200 rounded-lg text-xs focus:ring-2 focus:ring-cyan-200 focus:border-cyan-400 outline-none"
+                      onKeyDown={(e) => { if (e.key === 'Enter') handleSheetSourceCreate(); }}
+                    />
+                    <button
+                      onClick={handleSheetSourceCreate}
+                      disabled={sheetSourceCreatingSheet}
+                      className="px-3 py-1.5 bg-cyan-600 text-white rounded-lg text-[11px] font-medium hover:bg-cyan-700 disabled:opacity-50 transition-colors whitespace-nowrap"
+                    >
+                      {sheetSourceCreatingSheet ? 'Creating…' : 'Create'}
+                    </button>
+                  </div>
+                )}
+              </>
+            )}
+          </div>
+
+          {/* Share links for the selected sheet */}
+          {sheetSourceId && (
+            <div className="space-y-2">
+              <div className="flex items-center justify-between">
+                <label className="text-[10px] text-gray-400 font-semibold uppercase tracking-wider">Form Share Links</label>
+              </div>
+
+              <button
+                onClick={handleSheetSourceCreateLink}
+                disabled={sheetSourceCreatingLink}
+                className="w-full flex items-center justify-center gap-1.5 px-3 py-2 text-xs font-medium text-white bg-cyan-600 hover:bg-cyan-700 rounded-lg transition-colors disabled:opacity-50"
+              >
+                {sheetSourceCreatingLink ? (
+                  <><Spinner size="sm" className="text-white" /> Creating…</>
+                ) : (
+                  <>🔗 Create Share Link</>
+                )}
+              </button>
+
+              {sheetSourceLinksLoading ? (
+                <div className="flex items-center justify-center py-3">
+                  <Spinner size="sm" className="text-gray-400" />
+                </div>
+              ) : sheetSourceLinks.length === 0 ? (
+                <p className="text-center text-[11px] text-gray-400 py-2">
+                  No share links yet. Create one to start collecting responses.
+                </p>
+              ) : (
+                <div className="space-y-2">
+                  {sheetSourceLinks.map(link => (
+                    <div
+                      key={link.id}
+                      className={`border rounded-xl p-3 transition-colors ${
+                        link.is_active ? 'border-cyan-200 bg-cyan-50/40' : 'border-gray-200 bg-gray-50 opacity-60'
+                      }`}
+                    >
+                      <div className="flex items-start justify-between gap-2">
+                        <div className="min-w-0 flex-1">
+                          <p className="text-[11px] font-medium text-gray-800 truncate">{link.label || 'Share Link'}</p>
+                          <p className="text-[10px] text-gray-400 font-mono truncate mt-0.5">
+                            {window.location.origin}/sheets/form/{link.token}
+                          </p>
+                          <p className="text-[10px] text-gray-400 mt-0.5">
+                            {link.submission_count} submission{link.submission_count !== 1 ? 's' : ''}
+                          </p>
+                        </div>
+                        <div className="flex items-center gap-1 shrink-0">
+                          <button
+                            onClick={() => handleSheetSourceCopyLink(link.token)}
+                            className="p-1.5 rounded-lg hover:bg-white text-gray-400 hover:text-cyan-600 transition-colors"
+                            title="Copy link"
+                          >
+                            {sheetSourceCopiedToken === link.token
+                              ? <CheckCircle2 size={13} className="text-emerald-500" />
+                              : <Copy size={13} />
+                            }
+                          </button>
+                          <button
+                            onClick={() => handleSheetSourceToggleLink(link.id, link.is_active)}
+                            className={`text-[9px] px-1.5 py-0.5 rounded-full font-medium ${
+                              link.is_active ? 'bg-emerald-100 text-emerald-700 hover:bg-emerald-200' : 'bg-gray-200 text-gray-600 hover:bg-gray-300'
+                            }`}
+                          >
+                            {link.is_active ? 'Active' : 'Off'}
+                          </button>
+                          <button
+                            onClick={() => handleSheetSourceDeleteLink(link.id)}
+                            className="p-1.5 rounded-lg hover:bg-red-50 text-gray-400 hover:text-red-500 transition-colors"
+                            title="Delete"
+                          >
+                            <Trash2 size={12} />
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Save config */}
+          {dirty && (
+            <button
+              onClick={handleSave}
+              className="w-full px-2 py-2.5 bg-cyan-600 text-white rounded-xl text-xs font-medium hover:bg-cyan-700 transition-colors"
+            >
+              Save Config
+            </button>
+          )}
         </div>
       )}
 
       {/* Email inbox configuration */}
       {sourceType === 'email_inbox' && (
         <div className="space-y-3">
-          <div className="rounded-xl bg-gradient-to-br from-blue-50 to-indigo-50/50 p-2.5 border border-blue-100">
-            <p className="text-[11px] text-gray-600">Connect an IMAP inbox. Each email becomes a document.</p>
-          </div>
 
           {/* IMAP Host */}
           <div>
@@ -2292,7 +3498,6 @@ function InputConfigPanel({ node, onChange, workflowId, onUpdate, documentTypes 
               placeholder="16-char app password"
               className="w-full px-2.5 py-2 border border-gray-200 rounded-lg text-xs text-gray-700 focus:ring-2 focus:ring-blue-100 focus:border-blue-300 outline-none"
             />
-            <p className="text-[10px] text-gray-400 mt-1">Gmail: myaccount.google.com → Security → App passwords</p>
           </div>
 
           {/* Folder */}
@@ -2388,11 +3593,6 @@ function InputConfigPanel({ node, onChange, workflowId, onUpdate, documentTypes 
             )}
           </div>
 
-          {/* Email metadata info */}
-          <div className="rounded-lg bg-gray-50 p-2 text-[10px] text-gray-400">
-            Auto-injected fields: <span className="font-mono text-gray-500">email_subject</span>, <span className="font-mono text-gray-500">email_sender</span>, <span className="font-mono text-gray-500">email_date</span>
-          </div>
-
           {/* Save */}
           {dirty && (
             <button onClick={handleSave}
@@ -2437,9 +3637,6 @@ function InputConfigPanel({ node, onChange, workflowId, onUpdate, documentTypes 
       {/* ── Google Drive configuration ── */}
       {sourceType === 'google_drive' && (
         <div className="space-y-3">
-          <div className="rounded-xl bg-gradient-to-br from-blue-50 to-indigo-50/50 p-2.5 border border-blue-100">
-            <p className="text-[11px] text-gray-600">Fetch documents from a Google Drive folder.</p>
-          </div>
 
           {/* Access mode toggle */}
           <div>
@@ -2517,9 +3714,9 @@ function InputConfigPanel({ node, onChange, workflowId, onUpdate, documentTypes 
               {showGoogleHelp && (
                 <div className="mt-2 rounded-lg bg-amber-50 border border-amber-100 p-2.5 text-[10px] text-amber-700 space-y-1">
                   <ol className="ml-3 list-decimal space-y-0.5">
-                    <li><a href="https://console.cloud.google.com" target="_blank" rel="noopener" className="underline text-blue-500">Cloud Console</a> → create project</li>
+                    <li>Cloud Console → create project</li>
                     <li>Enable Google Drive API</li>
-                    <li>IAM → Service Accounts → Create → Keys → JSON</li>
+                    <li>Service Accounts → Create → Keys → JSON</li>
                     <li>Share folder with service account email</li>
                   </ol>
                 </div>
@@ -2538,14 +3735,10 @@ function InputConfigPanel({ node, onChange, workflowId, onUpdate, documentTypes 
       {/* ── Dropbox configuration ── */}
       {sourceType === 'dropbox' && (
         <div className="space-y-3">
-          <div className="rounded-xl bg-gradient-to-br from-blue-50 to-indigo-50/50 p-2.5 border border-blue-100">
-            <p className="text-[11px] text-gray-600">Fetch documents from a Dropbox folder.</p>
-          </div>
           <div>
             <label className="block text-[10px] text-gray-400 font-medium mb-1">Access Token</label>
             <input type="password" value={dropboxToken} onChange={(e) => { setDropboxToken(e.target.value); setDirty(true); }}
               placeholder="OAuth2 access token" className="w-full px-2.5 py-2 border border-gray-200 rounded-lg text-xs text-gray-700 focus:ring-2 focus:ring-blue-100 focus:border-blue-300 outline-none" />
-            <p className="text-[10px] text-gray-400 mt-1">dropbox.com/developers → App console</p>
           </div>
           <div>
             <label className="block text-[10px] text-gray-400 font-medium mb-1">Folder Path</label>
@@ -2563,9 +3756,6 @@ function InputConfigPanel({ node, onChange, workflowId, onUpdate, documentTypes 
       {/* ── OneDrive / SharePoint configuration ── */}
       {sourceType === 'onedrive' && (
         <div className="space-y-3">
-          <div className="rounded-xl bg-gradient-to-br from-blue-50 to-indigo-50/50 p-2.5 border border-blue-100">
-            <p className="text-[11px] text-gray-600">Fetch documents from OneDrive or SharePoint.</p>
-          </div>
           <div>
             <label className="block text-[10px] text-gray-400 font-medium mb-1">Access Token</label>
             <input type="password" value={onedriveToken} onChange={(e) => { setOnedriveToken(e.target.value); setDirty(true); }}
@@ -2592,9 +3782,6 @@ function InputConfigPanel({ node, onChange, workflowId, onUpdate, documentTypes 
       {/* ── AWS S3 configuration ── */}
       {sourceType === 's3' && (
         <div className="space-y-3">
-          <div className="rounded-xl bg-gradient-to-br from-blue-50 to-indigo-50/50 p-2.5 border border-blue-100">
-            <p className="text-[11px] text-gray-600">Fetch documents from an AWS S3 bucket.</p>
-          </div>
           <div>
             <label className="block text-[10px] text-gray-400 font-medium mb-1">Bucket</label>
             <input value={s3Bucket} onChange={(e) => { setS3Bucket(e.target.value); setDirty(true); }}
@@ -2633,9 +3820,6 @@ function InputConfigPanel({ node, onChange, workflowId, onUpdate, documentTypes 
       {/* ── FTP / SFTP configuration ── */}
       {sourceType === 'ftp' && (
         <div className="space-y-3">
-          <div className="rounded-xl bg-gradient-to-br from-blue-50 to-indigo-50/50 p-2.5 border border-blue-100">
-            <p className="text-[11px] text-gray-600">Fetch documents from an FTP or SFTP server.</p>
-          </div>
           <div className="flex gap-1.5">
             {['ftp', 'sftp'].map(p => (
               <button key={p} onClick={() => { setFtpProtocol(p); setFtpPort(p === 'sftp' ? '22' : '21'); setDirty(true); }}
@@ -2683,9 +3867,6 @@ function InputConfigPanel({ node, onChange, workflowId, onUpdate, documentTypes 
       {/* ── URL Scrape configuration ── */}
       {sourceType === 'url_scrape' && (
         <div className="space-y-3">
-          <div className="rounded-xl bg-gradient-to-br from-blue-50 to-indigo-50/50 p-2.5 border border-blue-100">
-            <p className="text-[11px] text-gray-600">Paste URLs to files or web pages. PDFs download directly, HTML pages get content extracted.</p>
-          </div>
           <div>
             <label className="block text-[10px] text-gray-400 font-medium mb-1">URLs <span className="text-gray-300 font-normal">(one per line)</span></label>
             <textarea value={scrapeUrls} onChange={(e) => { setScrapeUrls(e.target.value); setDirty(true); }}
@@ -2894,8 +4075,8 @@ function InputConfigPanel({ node, onChange, workflowId, onUpdate, documentTypes 
         </div>
       )}
 
-      {/* Save for non-email sources */}
-      {sourceType !== 'email_inbox' && dirty && (
+      {/* Save for non-email, non-form sources */}
+      {sourceType !== 'email_inbox' && sourceType !== 'form' && sourceType !== 'sheet' && dirty && (
         <button
           onClick={handleSave}
           className="w-full px-2 py-2.5 bg-blue-600 text-white rounded-xl text-xs font-medium hover:bg-blue-700 transition-colors"
@@ -3209,27 +4390,11 @@ function ActionConfigPanel({ node, onChange, plugins, workflowId, onExecutionCom
         ))}
       </select>
 
-      {/* Plugin description */}
+      {/* Plugin badge */}
       {selectedPlugin && (
-        <div className="mb-3 bg-purple-50 rounded-lg p-2.5 text-xs text-purple-700">
-          <p className="font-medium mb-1">{selectedPlugin.icon} {selectedPlugin.display_name}</p>
-          <p className="text-purple-600 text-[11px]">{selectedPlugin.description}</p>
-          {selectedPlugin.required_fields?.length > 0 && (
-            <div className="mt-2">
-              <span className="text-[10px] text-purple-400 uppercase font-semibold">Required fields: </span>
-              {selectedPlugin.required_fields.map((f) => (
-                <span key={f} className="inline-block bg-purple-100 text-purple-700 px-1.5 py-0.5 rounded mr-1 text-[10px]">{f}</span>
-              ))}
-            </div>
-          )}
-          {selectedPlugin.optional_fields?.length > 0 && (
-            <div className="mt-1">
-              <span className="text-[10px] text-purple-400 uppercase font-semibold">Optional: </span>
-              {selectedPlugin.optional_fields.map((f) => (
-                <span key={f} className="inline-block bg-gray-100 text-gray-500 px-1.5 py-0.5 rounded mr-1 text-[10px]">{f}</span>
-              ))}
-            </div>
-          )}
+        <div className="mb-3 flex items-center gap-2 text-xs text-purple-700">
+          <span>{selectedPlugin.icon}</span>
+          <span className="font-medium">{selectedPlugin.display_name}</span>
         </div>
       )}
 
@@ -3433,18 +4598,16 @@ function ListenerConfigPanel({ node, onChange, triggers, workflowId, onUpdate })
         ))}
       </select>
 
-      {/* Trigger description */}
+      {/* Trigger badge */}
       {selectedTrigger && (
-        <div className="mb-3 bg-cyan-50 rounded-lg p-2.5 text-xs text-cyan-700">
-          <p className="font-medium mb-1">{selectedTrigger.icon} {selectedTrigger.display_name}</p>
-          <p className="text-cyan-600 text-[11px]">{selectedTrigger.description}</p>
-          <div className="mt-1.5">
-            <span className={`text-[10px] px-1.5 py-0.5 rounded-full font-medium ${
-              selectedTrigger.category === 'approval' ? 'bg-amber-100 text-amber-700' :
-              selectedTrigger.category === 'manual' ? 'bg-gray-100 text-gray-600' :
-              'bg-cyan-100 text-cyan-700'
-            }`}>{selectedTrigger.category}</span>
-          </div>
+        <div className="mb-3 flex items-center gap-2 text-xs text-cyan-700">
+          <span>{selectedTrigger.icon}</span>
+          <span className="font-medium">{selectedTrigger.display_name}</span>
+          <span className={`text-[10px] px-1.5 py-0.5 rounded-full font-medium ${
+            selectedTrigger.category === 'approval' ? 'bg-amber-100 text-amber-700' :
+            selectedTrigger.category === 'manual' ? 'bg-gray-100 text-gray-600' :
+            'bg-cyan-100 text-cyan-700'
+          }`}>{selectedTrigger.category}</span>
         </div>
       )}
 
@@ -3651,10 +4814,6 @@ function ValidatorConfigPanel({ node, onChange, workflowId, onUpdate }) {
         className="w-full mb-3 px-2.5 py-1.5 border rounded-lg text-xs focus:ring-2 focus:ring-emerald-200 focus:border-emerald-400 outline-none resize-y"
       />
 
-      <div className="bg-emerald-50 rounded-lg px-2.5 py-2 mb-3 text-[11px] text-emerald-700">
-        ✅ <b>Any one</b> user approval = document approved
-      </div>
-
       {/* Add user — simple dropdown */}
       <label className="block text-[11px] text-gray-500 mb-1">Add Validator</label>
       <select
@@ -3815,28 +4974,6 @@ function AIConfigPanel({ node, onChange, models }) {
         ))}
       </div>
 
-      {/* Format description */}
-      <div className="mb-3 bg-rose-50 rounded-lg p-2.5 text-[11px] text-rose-700">
-        {outputFormat === 'json_extract' && (
-          <>
-            <p className="font-medium">📋 JSON Extractor</p>
-            <p className="text-rose-600 mt-0.5">AI extracts structured fields into document metadata. Each field becomes filterable by downstream Rule nodes.</p>
-          </>
-        )}
-        {outputFormat === 'yes_no' && (
-          <>
-            <p className="font-medium">✅ Yes/No Gate</p>
-            <p className="text-rose-600 mt-0.5">AI answers yes or no. Stored as <code className="bg-rose-100 px-1 rounded font-mono">{outputKey}</code> = "yes"/"no". Use a Rule node: <code className="bg-rose-100 px-1 rounded font-mono">{outputKey} eq yes</code></p>
-          </>
-        )}
-        {outputFormat === 'text' && (
-          <>
-            <p className="font-medium">📝 Free Text</p>
-            <p className="text-rose-600 mt-0.5">AI returns free-form text, stored as <code className="bg-rose-100 px-1 rounded font-mono">{outputKey}</code>.</p>
-          </>
-        )}
-      </div>
-
       {/* ── JSON Fields (only for json_extract) ── */}
       {outputFormat === 'json_extract' && (
         <div className="mb-3">
@@ -3849,7 +4986,6 @@ function AIConfigPanel({ node, onChange, models }) {
               + Add Field
             </button>
           </div>
-          <p className="text-[10px] text-gray-400 mb-2">Each field is extracted by AI and stored in document metadata. Rule nodes can filter on them.</p>
           <div className="space-y-2">
             {jsonFields.map((field, idx) => (
               <div key={idx} className="bg-gray-50 rounded-lg p-2 border border-gray-100">
@@ -3883,16 +5019,6 @@ function AIConfigPanel({ node, onChange, models }) {
               </div>
             ))}
           </div>
-          {jsonFields.length > 0 && (
-            <div className="mt-2 bg-indigo-50 rounded-lg p-2 text-[10px] text-indigo-600">
-              <p className="font-semibold mb-0.5">💡 Rule node filter examples:</p>
-              {jsonFields.filter((f) => f.name).slice(0, 2).map((f, i) => (
-                <p key={i} className="font-mono text-indigo-700">
-                  {f.name} {f.type === 'number' ? 'gt 100' : f.type === 'boolean' ? 'eq true' : 'contains high'}
-                </p>
-              ))}
-            </div>
-          )}
         </div>
       )}
 
@@ -3937,15 +5063,8 @@ function AIConfigPanel({ node, onChange, models }) {
         value={outputKey}
         onChange={(e) => { setOutputKey(e.target.value); setDirty(true); }}
         placeholder="ai_analysis"
-        className="w-full mb-1 px-2.5 py-1.5 border rounded-lg text-xs focus:ring-2 focus:ring-rose-200 focus:border-rose-400 outline-none"
+        className="w-full mb-3 px-2.5 py-1.5 border rounded-lg text-xs focus:ring-2 focus:ring-rose-200 focus:border-rose-400 outline-none"
       />
-      <p className="text-[10px] text-gray-400 mb-3">
-        {outputFormat === 'json_extract'
-          ? 'Full JSON stored under this key. Individual fields also stored at top level.'
-          : outputFormat === 'yes_no'
-          ? `"yes" or "no" stored as ${outputKey} in metadata`
-          : `AI response stored under ${outputKey}`}
-      </p>
 
       {/* ── Temperature ── */}
       <label className="block text-xs text-gray-500 mb-1">Temperature: {temperature}</label>
@@ -3953,11 +5072,8 @@ function AIConfigPanel({ node, onChange, models }) {
         type="range" min="0" max="1" step="0.1"
         value={temperature}
         onChange={(e) => { setTemperature(parseFloat(e.target.value)); setDirty(true); }}
-        className="w-full mb-1 accent-rose-500"
+        className="w-full mb-3 accent-rose-500"
       />
-      <div className="flex justify-between text-[10px] text-gray-400 mb-3">
-        <span>Precise</span><span>Creative</span>
-      </div>
 
       {/* ── Max tokens ── */}
       <label className="block text-xs text-gray-500 mb-1">Max Tokens</label>
@@ -4019,26 +5135,10 @@ function GateConfigPanel({ node, onChange }) {
     <div>
       {/* Gate type info */}
       <div className="bg-orange-50 rounded-lg p-3 text-xs text-orange-700 mb-3">
-        <p className="font-semibold mb-1">∩ AND Gate</p>
-        <p className="text-[11px] opacity-80">
-          Documents must pass through ALL upstream paths to continue. Only docs present in every incoming connection will flow downstream.
+        <p className="font-semibold">∩ AND Gate</p>
+        <p className="text-[11px] opacity-80 mt-0.5">
+          Only documents present in every incoming connection pass through.
         </p>
-      </div>
-
-      {/* How it works */}
-      <div className="bg-gray-50 rounded-lg p-2.5 text-[10px] text-gray-500 mb-3">
-        <p className="font-medium text-gray-600 mb-1">How it works</p>
-        <ul className="space-y-0.5 list-disc list-inside">
-          <li>Connect 2+ upstream paths to this gate</li>
-          <li>Only docs that appear in <strong>every</strong> path pass through</li>
-          <li>Use to require docs pass multiple checks</li>
-        </ul>
-      </div>
-
-      {/* Why no OR gate? */}
-      <div className="bg-indigo-50 rounded-lg p-2.5 text-[10px] text-indigo-600 mb-3">
-        <p className="font-medium text-indigo-700 mb-1">💡 Why no OR gate?</p>
-        <p>Regular nodes (Rule, Action, AI, Output) with multiple inputs already <strong>merge all docs automatically</strong> (union = OR behavior). The AND gate is the only gate needed — it restricts to the intersection.</p>
       </div>
 
       {/* Last result */}
@@ -4094,9 +5194,6 @@ function DocCreateConfigPanel({ node, onChange, workflowId, fieldOptions }) {
       {/* Header */}
       <div className="bg-gradient-to-br from-indigo-50 to-violet-50 rounded-xl p-3.5 border border-indigo-100">
         <p className="font-semibold text-indigo-800 text-xs flex items-center gap-1.5">📄 Document Creator</p>
-        <p className="text-[10px] text-indigo-600/70 mt-1 leading-relaxed">
-          Creates editor documents from CLM metadata.
-        </p>
       </div>
 
       {/* Config summary */}
@@ -4171,6 +5268,228 @@ function DocCreateConfigPanel({ node, onChange, workflowId, fieldOptions }) {
         onSave={(draft) => onChange(draft)}
         fieldOptions={fieldOptions}
       />
+    </div>
+  );
+}
+
+
+/* ──────────────────────────────────────────────────────── */
+/*  SheetConfigPanel — sidebar config for Sheet nodes       */
+/* ──────────────────────────────────────────────────────── */
+
+function SheetConfigPanel({ node, onChange, connections = [] }) {
+  const config = node.config || {};
+  const writeMode = config.write_mode || 'append';
+  const autoColumns = config.auto_columns !== false;
+  const lastResult = node.last_result || {};
+
+  // Auto-detect mode: if this node has any incoming connections, it writes (storage).
+  // If no incoming connections, it reads from the sheet (input).
+  const hasIncoming = connections.some(c => c.target_node === node.id);
+  const effectiveMode = hasIncoming ? 'storage' : 'input';
+
+  // Sync effective mode to config whenever connections change
+  React.useEffect(() => {
+    if (config.mode !== effectiveMode) {
+      onChange({ ...config, mode: effectiveMode });
+    }
+  }, [effectiveMode]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const [sheets, setSheets] = React.useState([]);
+  const [loadingSheets, setLoadingSheets] = React.useState(false);
+
+  // Fetch available sheets on mount
+  React.useEffect(() => {
+    let cancelled = false;
+    setLoadingSheets(true);
+    import('@services/sheetsService').then(({ sheetsService }) => {
+      sheetsService.list().then(({ data }) => {
+        if (!cancelled) {
+          const list = Array.isArray(data) ? data : (data.results || []);
+          setSheets(list);
+        }
+      }).catch(() => {}).finally(() => { if (!cancelled) setLoadingSheets(false); });
+    });
+    return () => { cancelled = true; };
+  }, []);
+
+  const update = (patch) => {
+    onChange({ ...config, ...patch });
+  };
+
+  const selectedSheet = sheets.find(s => s.id === config.sheet_id);
+  const [creatingSheetName, setCreatingSheetName] = React.useState('New Sheet');
+  const [creatingSheet, setCreatingSheet] = React.useState(false);
+
+  const handleCreateSheet = async () => {
+    setCreatingSheet(true);
+    try {
+      const { sheetsService } = await import('@services/sheetsService');
+      const payload = { title: creatingSheetName, col_count: 5, row_count: 10 };
+      const { data } = await sheetsService.create(payload);
+      // add to local list and select
+      setSheets((prev) => [data, ...prev]);
+      update({ sheet_id: data.id, sheet_title: data.title });
+      notify.success('Sheet created and linked');
+    } catch (e) {
+      notify.error('Failed to create sheet: ' + (e.response?.data?.error || e.message));
+    } finally {
+      setCreatingSheet(false);
+    }
+  };
+
+  return (
+    <div className="space-y-3">
+      {/* Header */}
+      <div className={`rounded-xl p-3 border ${
+        effectiveMode === 'input'
+          ? 'bg-blue-50/60 border-blue-200'
+          : 'bg-emerald-50/60 border-emerald-200'
+      }`}>
+        <div className="flex items-center gap-2">
+          <span className="text-base">{effectiveMode === 'input' ? '📊' : '📝'}</span>
+          <div className="flex-1">
+            <p className={`text-xs font-semibold ${effectiveMode === 'input' ? 'text-blue-700' : 'text-emerald-700'}`}>
+              {effectiveMode === 'input' ? 'Read Mode' : 'Write Mode'}
+            </p>
+          </div>
+          <span className={`text-[9px] font-bold uppercase px-2 py-0.5 rounded-full ${
+            effectiveMode === 'input'
+              ? 'bg-blue-100 text-blue-600'
+              : 'bg-emerald-100 text-emerald-600'
+          }`}>
+            Auto
+          </span>
+        </div>
+      </div>
+
+      {/* Sheet picker */}
+      <div>
+        <label className="block text-[10px] text-gray-400 uppercase font-semibold mb-1.5">Linked Sheet</label>
+        {loadingSheets ? (
+          <p className="text-[11px] text-gray-400">Loading sheets…</p>
+        ) : sheets.length === 0 ? (
+          <div className="space-y-2">
+            <p className="text-[11px] text-gray-400 italic">No sheets found.</p>
+            <div className="flex gap-2">
+              <input value={creatingSheetName} onChange={(e) => setCreatingSheetName(e.target.value)} className="flex-1 px-2 py-1 border rounded text-sm" />
+              <button onClick={handleCreateSheet} disabled={creatingSheet} className={`px-3 py-1 rounded text-xs font-medium ${creatingSheet ? 'bg-gray-200 text-gray-500' : 'bg-emerald-600 text-white hover:bg-emerald-700'}`}>
+                {creatingSheet ? 'Creating…' : 'Create Sheet'}
+              </button>
+            </div>
+          </div>
+        ) : (
+          <>
+          <select
+            value={config.sheet_id || ''}
+            onChange={(e) => {
+              const s = sheets.find(sh => sh.id === e.target.value);
+              update({ sheet_id: e.target.value, sheet_title: s?.title || '' });
+            }}
+            className="w-full px-2.5 py-1.5 border rounded-lg text-sm focus:ring-2 focus:ring-cyan-200 focus:border-cyan-400 outline-none"
+          >
+            <option value="">— Select sheet —</option>
+            {sheets.map(s => (
+              <option key={s.id} value={s.id}>{s.title || `Sheet ${s.id.slice(0, 8)}`}</option>
+            ))}
+          </select>
+          {/* Quick-create when nothing selected */}
+          {!config.sheet_id && (
+            <div className="mt-2 flex gap-2">
+              <input value={creatingSheetName} onChange={(e) => setCreatingSheetName(e.target.value)} className="flex-1 px-2 py-1 border rounded text-sm" placeholder="New sheet name" />
+              <button onClick={handleCreateSheet} disabled={creatingSheet} className={`px-3 py-1 rounded text-xs font-medium ${creatingSheet ? 'bg-gray-200 text-gray-500' : 'bg-emerald-600 text-white hover:bg-emerald-700'}`}>
+                {creatingSheet ? 'Creating…' : 'Create'}
+              </button>
+            </div>
+          )}
+          </>
+        )}
+        {selectedSheet && (
+          <p className="text-[10px] text-gray-400 mt-1">
+            {selectedSheet.row_count ?? '?'} rows · {selectedSheet.col_count ?? '?'} columns
+          </p>
+        )}
+      </div>
+
+      {/* Write-mode specific: write behavior + overwrite */}
+      {effectiveMode === 'storage' && (
+        <div>
+          <label className="block text-[10px] text-gray-400 uppercase font-semibold mb-1.5">Write Behavior</label>
+          <div className="flex gap-1">
+            <button
+              onClick={() => update({ write_mode: 'append' })}
+              className={`flex-1 px-3 py-2 rounded-lg text-xs font-medium transition-colors ${
+                writeMode === 'append'
+                  ? 'bg-emerald-100 text-emerald-800 border border-emerald-300'
+                  : 'bg-gray-50 text-gray-500 border border-gray-200 hover:bg-gray-100'
+              }`}
+            >
+              ➕ Append
+            </button>
+            <button
+              onClick={() => update({ write_mode: 'overwrite' })}
+              className={`flex-1 px-3 py-2 rounded-lg text-xs font-medium transition-colors ${
+                writeMode === 'overwrite'
+                  ? 'bg-amber-100 text-amber-800 border border-amber-300'
+                  : 'bg-gray-50 text-gray-500 border border-gray-200 hover:bg-gray-100'
+              }`}
+            >
+              🔄 Overwrite
+            </button>
+          </div>
+          {writeMode === 'overwrite' && (
+            <p className="mt-1.5 text-[10px] text-amber-600 font-medium">⚠️ Clears all rows before writing</p>
+          )}
+        </div>
+      )}
+
+      {/* Auto columns toggle (write mode only) */}
+      {effectiveMode === 'storage' && (
+        <label className="flex items-center gap-2 cursor-pointer">
+          <input
+            type="checkbox"
+            checked={autoColumns}
+            onChange={(e) => update({ auto_columns: e.target.checked })}
+            className="rounded border-gray-300 text-cyan-600 focus:ring-cyan-400"
+          />
+          <span className="text-xs text-gray-600">Auto-create columns for new fields</span>
+        </label>
+      )}
+
+      {/* Last execution result */}
+      {(lastResult.sheet_status || lastResult.sheet_mode) && (
+        <div className="bg-gray-50 rounded-xl p-3 space-y-1.5 border border-gray-100">
+          <p className="text-[10px] uppercase text-gray-400 font-semibold flex items-center gap-1.5">
+            Last Execution
+            {lastResult.sheet_status === 'completed' && <span className="text-[8px] bg-emerald-100 text-emerald-600 px-1.5 py-0.5 rounded-full font-bold">✓ Done</span>}
+            {lastResult.sheet_status === 'error' && <span className="text-[8px] bg-red-100 text-red-600 px-1.5 py-0.5 rounded-full font-bold">✕ Error</span>}
+            {lastResult.write_mode === 'overwrite' && <span className="text-[8px] bg-amber-100 text-amber-600 px-1.5 py-0.5 rounded-full font-bold">🔄 Overwrite</span>}
+          </p>
+          {lastResult.sheet_status === 'error' && lastResult.message && (
+            <p className="text-[10px] text-red-600 bg-red-50 rounded-md px-2 py-1">{lastResult.message}</p>
+          )}
+          <div className="flex flex-wrap gap-2 text-xs font-medium">
+            {lastResult.row_count > 0 && (
+              <span className="px-2 py-1 bg-cyan-100 text-cyan-700 rounded-md">📊 {lastResult.row_count} rows read</span>
+            )}
+            {lastResult.rows_overwritten > 0 && (
+              <span className="px-2 py-1 bg-amber-100 text-amber-700 rounded-md">🗑️ {lastResult.rows_overwritten} cleared</span>
+            )}
+            {lastResult.rows_written > 0 && (
+              <span className="px-2 py-1 bg-emerald-100 text-emerald-700 rounded-md">✓ {lastResult.rows_written} written</span>
+            )}
+            {lastResult.query_count > 0 && (
+              <span className="px-2 py-1 bg-gray-100 text-gray-600 rounded-md">⚡ {lastResult.query_count} queries</span>
+            )}
+            {lastResult.cache_hits > 0 && (
+              <span className="px-2 py-1 bg-amber-100 text-amber-700 rounded-md">⊘ {lastResult.cache_hits} cached</span>
+            )}
+          </div>
+          {lastResult.sheet_title && (
+            <p className="text-[10px] text-gray-500">Sheet: {lastResult.sheet_title}</p>
+          )}
+        </div>
+      )}
     </div>
   );
 }

@@ -473,8 +473,13 @@ export default function useQuickLatex() {
   /**
    * Render preview — routes to LaTeX or HTML render endpoint based on code_type.
    * For HTML, also stores the raw HTML in state for instant iframe preview.
+   * @param {string} documentId
+   * @param {string} code
+   * @param {Object} metadata
+   * @param {string} codeType - 'latex' | 'html'
+   * @param {Object} [processingSettings] - Export studio settings (margins, headers, footers, layout)
    */
-  const renderPreview = useCallback(async (documentId, code, metadata = {}, codeType = 'latex') => {
+  const renderPreview = useCallback(async (documentId, code, metadata = {}, codeType = 'latex', processingSettings = null) => {
     if (!documentId || !code) return null;
     dispatch({ type: 'SET_PREVIEW_LOADING', payload: true });
     try {
@@ -483,6 +488,7 @@ export default function useQuickLatex() {
         result = await quickLatexService.renderHtmlPreview(documentId, {
           html_code: code,
           metadata,
+          ...(processingSettings ? { processing_settings: processingSettings } : {}),
         });
       } else {
         const needsTikz = /\\begin\{tikzpicture\}|\\usetikzlibrary/.test(code);
@@ -491,6 +497,7 @@ export default function useQuickLatex() {
           latex_code: code,
           preamble,
           metadata,
+          ...(processingSettings ? { processing_settings: processingSettings } : {}),
         });
       }
       if (result?.error) throw new Error(result.error);

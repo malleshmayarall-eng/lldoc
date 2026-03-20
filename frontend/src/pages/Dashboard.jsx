@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../contexts/AuthContext';
 import { documentService } from '../services/documentService';
+import { openDocumentInEditor } from '../utils/documentRouting';
 import useWorkflowStore from '../store/workflowStore';
 import { FileText, AlertTriangle, CheckCircle, Clock, TrendingUp, ListTodo, Bell, Share2, Activity, Eye, MessageSquare, Edit3, Calendar, User as UserIcon, ArrowRight, AlertCircle as AlertCircleIcon, Sparkles, Zap, Target, ShieldCheck, History, FileCheck } from 'lucide-react';
 
@@ -451,6 +452,11 @@ const Dashboard = () => {
                           {approval.document_title || approval.workflow?.document_title || 'Untitled'}
                         </p>
                         <div className="flex items-center gap-2 mt-1">
+                          {(approval.workflow_name || approval.workflow?.name) && (
+                            <span className="px-1.5 py-0.5 text-[10px] font-medium rounded bg-blue-100 text-blue-700 truncate max-w-[120px]">
+                              {approval.workflow_name || approval.workflow?.name}
+                            </span>
+                          )}
                           {approval.role && (
                             <span className="px-1.5 py-0.5 text-[10px] font-medium rounded bg-green-100 text-green-700 truncate">
                               {approval.role}
@@ -664,7 +670,7 @@ const Dashboard = () => {
             {dashboardData?.my_documents?.recent?.map((doc) => (
               <div
                 key={`my-${doc.id}`}
-                onClick={() => navigate(`/drafter/${doc.id}`)}
+                onClick={() => openDocumentInEditor(navigate, doc)}
                 className="p-4 hover:bg-gray-50 cursor-pointer transition-colors group"
               >
                 <div className="flex items-center justify-between">
@@ -704,7 +710,7 @@ const Dashboard = () => {
               return (
                 <div
                   key={`shared-${doc.id}`}
-                  onClick={() => navigate(`/drafter/${doc.id}`)}
+                  onClick={() => openDocumentInEditor(navigate, doc)}
                   className="p-4 hover:bg-gray-50 cursor-pointer transition-colors group"
                 >
                   <div className="flex items-center justify-between">

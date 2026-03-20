@@ -72,6 +72,18 @@ export const workflowApi = {
 
   // Execute workflow
   execute: (id, data = {}) => api.post(`/workflows/${id}/execute/`, data),
+  executeAsync: (id, data = {}) => api.post(`/workflows/${id}/execute/`, { ...data, async: true }),
+
+  // Execution status polling (for async execution)
+  executionStatus: (id, execId) => api.get(`/workflows/${id}/execution-status/${execId}/`),
+
+  // Workflow status (comprehensive — includes lock info, active execution, last execution)
+  workflowStatus: (id) => api.get(`/workflows/${id}/workflow-status/`),
+  clearLock:      (id) => api.post(`/workflows/${id}/workflow-status/`, { action: 'clear_lock' }),
+
+  // Live mode toggle
+  getLive:  (id) => api.get(`/workflows/${id}/live/`),
+  setLive:  (id, data) => api.patch(`/workflows/${id}/live/`, data),
 
   // Smart execution: nodes config change detection
   nodesStatus:      (id) => api.get(`/workflows/${id}/nodes-status/`),
@@ -167,8 +179,17 @@ export const workflowApi = {
   createUploadLink:  (id, data = {}) => api.post(`/workflows/${id}/upload-links/`, data),
   updateUploadLink:  (id, linkId, data) => api.patch(`/workflows/${id}/upload-links/${linkId}/`, data),
   deleteUploadLink:  (id, linkId) => api.delete(`/workflows/${id}/upload-links/${linkId}/`),
-};
 
+  // Input node specific endpoints (backend additions)
+  inputNodeDocuments: (wfId, nodeId, params) => api.get(`/workflows/${wfId}/input-node-documents/${nodeId}/`, { params }),
+  inputNodeHistory:   (wfId, nodeId, params) => api.get(`/workflows/${wfId}/input-history/${nodeId}/`, { params }),
+  nodeDocumentState:  (wfId, nodeId) => api.get(`/workflows/${wfId}/node-document-state/${nodeId}/`),
+  syncNodeState:      (wfId, nodeId) => api.post(`/workflows/${wfId}/node-document-state/${nodeId}/`),
+  refreshInput:       (wfId, nodeId, data = {}) => api.post(`/workflows/${wfId}/refresh-input/${nodeId}/`, data),
+  folderUpload:       (wfId, nodeId, data = {}) => api.post(`/workflows/${wfId}/folder-upload/${nodeId}/`, data),
+  dmsImport:          (wfId, nodeId, data = {}) => api.post(`/workflows/${wfId}/dms-import/${nodeId}/`, data),
+  sheetsImport:       (wfId, nodeId, data = {}) => api.post(`/workflows/${wfId}/sheets-import/${nodeId}/`, data),
+};
 // ── Nodes ────────────────────────────────────────────────────────────────
 export const nodeApi = {
   list:   (workflowId) => api.get('/nodes/', { params: { workflow: workflowId } }),

@@ -215,17 +215,45 @@ const useWorkflowStore = create((set, get) => ({
   },
 
   /**
-   * Fetch my pending approvals
+   * Fetch my pending approvals (merges old doc-workflow approvals + CLM validations)
    */
   fetchMyApprovals: async () => {
     set((state) => ({ loading: { ...state.loading, approvals: true }, error: null }));
     try {
-      const data = await workflowService.getMyApprovals();
+      // Fetch both sources in parallel
+      const [oldData, clmData] = await Promise.allSettled([
+        workflowService.getMyApprovals(),
+        // CLM validation decisions for current user
+        import('../services/clm/clmApi').then(m => m.workflowApi.myValidations({ status: 'pending' })).then(r => r.data),
+      ]);
+
+      const oldApprovals = oldData.status === 'fulfilled'
+        ? (oldData.value.approvals || oldData.value.results || [])
+        : [];
+
+      // Flatten CLM decisions from workflows into a flat array
+      const clmWorkflows = clmData.status === 'fulfilled'
+        ? (clmData.value.workflows || [])
+        : [];
+      const clmDecisions = clmWorkflows.flatMap(wf =>
+        (wf.decisions || []).map(d => ({
+          ...d,
+          // Normalise shape so Dashboard can render them alongside old approvals
+          _source: 'clm',
+          document_title: d.document_title || 'Untitled Document',
+          workflow: { document: null, document_title: d.document_title, name: wf.workflow_name },
+          workflow_id: wf.workflow_id,
+          workflow_name: wf.workflow_name,
+          role: d.node_label || 'Validator',
+        }))
+      );
+
+      const merged = [...oldApprovals, ...clmDecisions];
       set({ 
-        myApprovals: data.approvals || data.results || [],
+        myApprovals: merged,
         loading: { ...get().loading, approvals: false }
       });
-      return data;
+      return { approvals: merged, clm_summary: clmData.status === 'fulfilled' ? clmData.value.summary : null };
     } catch (error) {
       set({ error: error.message, loading: { ...get().loading, approvals: false } });
       throw error;

@@ -122,6 +122,50 @@ export const userService = {
     const response = await api.patch(`/users/organizations/${orgId}/`, orgData);
     return response.data;
   },
+
+  // ── Domain & Feature Flags ─────────────────────────────────────────
+
+  /** GET /users/organizations/domains/ — list available domain choices */
+  getDomainChoices: async () => {
+    const response = await api.get('/users/organizations/domains/');
+    return response.data;
+  },
+
+  /** GET /users/organizations/feature-schema/ — full feature schema with labels/descriptions */
+  getFeatureSchema: async () => {
+    const response = await api.get('/users/organizations/feature-schema/');
+    return response.data;
+  },
+
+  /** GET /users/organizations/current/domain-settings/ — current org's domain + overrides */
+  getDomainSettings: async () => {
+    const response = await api.get('/users/organizations/current/domain-settings/');
+    return response.data;
+  },
+
+  /** PATCH /users/organizations/current/domain-settings/ — update domain and/or feature overrides */
+  updateDomainSettings: async (data) => {
+    const response = await api.patch('/users/organizations/current/domain-settings/', data);
+    return response.data;
+  },
+
+  /** POST /users/organizations/current/reset-feature-overrides/ — reset all overrides to domain defaults */
+  resetFeatureOverrides: async () => {
+    const response = await api.post('/users/organizations/current/reset-feature-overrides/');
+    return response.data;
+  },
+
+  /** GET /users/organizations/current/feature-flags/ — resolved feature flags for current org */
+  getFeatureFlags: async () => {
+    const response = await api.get('/users/organizations/current/feature-flags/');
+    return response.data;
+  },
+
+  /** GET /users/organizations/current/domain-config/ — domain-specific config (templates, workflows, UI hints) */
+  getDomainConfig: async () => {
+    const response = await api.get('/users/organizations/current/domain-config/');
+    return response.data;
+  },
 };
 
 export default userService;

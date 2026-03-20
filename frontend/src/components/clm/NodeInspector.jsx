@@ -167,6 +167,7 @@ const NT = {
   ai:         { icon: '🧪', bg: 'bg-rose-50/60',    label: 'AI' },
   and_gate:   { icon: '∩',  bg: 'bg-orange-50/60',  label: 'AND Gate' },
   doc_create: { icon: '📄', bg: 'bg-indigo-50/60',  label: 'Doc Create' },
+  sheet:      { icon: '📊', bg: 'bg-cyan-50/60',    label: 'Sheet' },
   output:     { icon: '📤', bg: 'bg-green-50/60',   label: 'Output' },
 };
 

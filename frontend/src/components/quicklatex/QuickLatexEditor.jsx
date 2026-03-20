@@ -24,6 +24,7 @@ import {
   Loader2,
   RefreshCw,
   Save,
+  Settings2,
   Sparkles,
   Trash2,
   User,
@@ -36,6 +37,7 @@ import AIChatPanel from './AIChatPanel';
 import DuplicateDialog from './DuplicateDialog';
 import BulkDuplicateDialog from './BulkDuplicateDialog';
 import QuickLatexImageSidebar from './QuickLatexImageSidebar';
+import ExportSettingsPanel from '../ExportSettingsPanel';
 
 /* ------------------------------------------------------------------ */
 /*  QuickLatexEditor                                                    */
@@ -69,6 +71,24 @@ const QuickLatexEditor = ({
   onResolveImages,
   onMapImage,
   onBack,
+  // Export Studio props
+  exportDraft,
+  exportLoading,
+  exportSaving,
+  exportError,
+  exportDirty,
+  exportTemplates,
+  exportImages,
+  exportPdfFiles,
+  exportMetadataSnapshot,
+  onUpdateExportSetting,
+  onSaveExportSettings,
+  onResetExportSettings,
+  onUploadExportImage,
+  onUploadExportPdfFile,
+  onSaveHeaderFooterPdf,
+  onRemoveHeaderFooterPdf,
+  onRefreshExportPreview,
 }) => {
   // ── Local state ────────────────────────────────────────────────────
 
@@ -78,7 +98,7 @@ const QuickLatexEditor = ({
   const [documentType, setDocumentType] = useState('contract');
   const [category, setCategory] = useState('contract');
 
-  const [rightPanel, setRightPanel] = useState(null); // 'ai' | 'images' | null  (preview is now the main view)
+  const [rightPanel, setRightPanel] = useState(null); // 'ai' | 'images' | 'export' | null  (preview is now the main view)
   const [showCode, setShowCode] = useState(false); // code editor visible
   const [showDuplicate, setShowDuplicate] = useState(false);
   const [showBulkDuplicate, setShowBulkDuplicate] = useState(false);
@@ -89,6 +109,7 @@ const QuickLatexEditor = ({
   const editorRef = useRef(null);
   const saveTimeoutRef = useRef(null);
   const previewTimeoutRef = useRef(null);
+  const exportSettingsAppliedRef = useRef(false);
 
   // ── Sync from prop ─────────────────────────────────────────────────
 
@@ -100,6 +121,7 @@ const QuickLatexEditor = ({
     setDocumentType(doc.document_type || 'contract');
     setCategory(doc.category || 'contract');
     setCodeType(doc.latex_block?.code_type || 'latex');
+    exportSettingsAppliedRef.current = false; // reset when doc changes
   }, [doc?.id]);
 
   // ── Trigger preview on initial load ────────────────────────────────
@@ -109,10 +131,25 @@ const QuickLatexEditor = ({
     const code = doc.latex_block?.latex_code || doc.latex_code || '';
     const ct = doc.latex_block?.code_type || 'latex';
     if (code.trim()) {
-      onRenderPreview?.(doc.id, code, doc.latex_block?.custom_metadata?.metadata_values || {}, ct);
+      onRenderPreview?.(doc.id, code, doc.latex_block?.custom_metadata?.metadata_values || {}, ct, exportDraft?.processing_settings);
     }
     onFetchPlaceholders?.(doc.id);
   }, [doc?.id]);
+
+  // ── Re-render preview once export settings finish loading ──────────
+  // Export settings load asynchronously after the document, so the
+  // initial render (above) may fire with exportDraft = null. Once the
+  // draft arrives, re-render so the preview reflects margins/headers.
+
+  useEffect(() => {
+    if (!doc?.id || !exportDraft?.processing_settings || exportSettingsAppliedRef.current) return;
+    exportSettingsAppliedRef.current = true;
+    const code = doc.latex_block?.latex_code || doc.latex_code || latexCode || '';
+    const ct = doc.latex_block?.code_type || codeType || 'latex';
+    if (code.trim()) {
+      onRenderPreview?.(doc.id, code, doc.latex_block?.custom_metadata?.metadata_values || {}, ct, exportDraft.processing_settings);
+    }
+  }, [doc?.id, exportDraft?.processing_settings]);
 
   // ── Auto-save + auto-preview (debounced) ───────────────────────────
 
@@ -131,7 +168,7 @@ const QuickLatexEditor = ({
     if (previewTimeoutRef.current) clearTimeout(previewTimeoutRef.current);
     previewTimeoutRef.current = setTimeout(() => {
       if (newCode.trim()) {
-        onRenderPreview?.(doc.id, newCode, doc.latex_block?.custom_metadata?.metadata_values || {}, codeType);
+        onRenderPreview?.(doc.id, newCode, doc.latex_block?.custom_metadata?.metadata_values || {}, codeType, exportDraft?.processing_settings);
       }
     }, 2000);
   }, [doc?.id, codeType, onUpdate, onRenderPreview]);
@@ -151,7 +188,7 @@ const QuickLatexEditor = ({
     setHasUnsavedChanges(false);
     // Refresh preview after save
     if (latexCode.trim()) {
-      setTimeout(() => onRenderPreview?.(doc.id, latexCode, {}, codeType), 300);
+      setTimeout(() => onRenderPreview?.(doc.id, latexCode, {}, codeType, exportDraft?.processing_settings), 300);
     }
   }, [doc?.id, title, author, documentType, category, latexCode, codeType, onUpdate, onRenderPreview]);
 
@@ -185,14 +222,14 @@ const QuickLatexEditor = ({
       setLatexCode(result.latex_code);
       // Render preview — AI sidebar stays open so user sees changes alongside
       setTimeout(() => {
-        onRenderPreview?.(doc.id, result.latex_code, {}, resultCodeType);
+        onRenderPreview?.(doc.id, result.latex_code, {}, resultCodeType, exportDraft?.processing_settings);
         onFetchPlaceholders?.(doc.id);
       }, 400);
     } else if (result?.document) {
       const newCode = result.document.latex_block?.latex_code || result.document.latex_code || '';
       if (newCode) setLatexCode(newCode);
       setTimeout(() => {
-        onRenderPreview?.(doc.id, newCode, {}, resultCodeType);
+        onRenderPreview?.(doc.id, newCode, {}, resultCodeType, exportDraft?.processing_settings);
         onFetchPlaceholders?.(doc.id);
       }, 400);
     }
@@ -207,7 +244,7 @@ const QuickLatexEditor = ({
       const reverted = result.latex_block?.latex_code || result.latex_code || previousCode;
       setLatexCode(reverted);
       setTimeout(() => {
-        onRenderPreview?.(doc.id, reverted, {}, codeType);
+        onRenderPreview?.(doc.id, reverted, {}, codeType, exportDraft?.processing_settings);
       }, 400);
     }
   }, [doc?.id, codeType, onUndoEdit, onRenderPreview]);
@@ -231,7 +268,7 @@ const QuickLatexEditor = ({
         setCodeType(newType);
         // Trigger preview for new code type
         if (newCode.trim()) {
-          setTimeout(() => onRenderPreview?.(doc.id, newCode, {}, newType), 300);
+          setTimeout(() => onRenderPreview?.(doc.id, newCode, {}, newType, exportDraft?.processing_settings), 300);
         }
       } else {
         setCodeType(newType);
@@ -362,6 +399,20 @@ const QuickLatexEditor = ({
                 {imageplaceholders.length}
               </span>
             )}
+          </button>
+
+          {/* Export Studio toggle */}
+          <button
+            onClick={() => setRightPanel(rightPanel === 'export' ? null : 'export')}
+            className={`flex items-center gap-1 px-2.5 py-1 rounded-md text-xs font-medium transition-colors ${
+              rightPanel === 'export'
+                ? 'bg-blue-600 text-white'
+                : 'text-blue-600 hover:bg-blue-50'
+            }`}
+            title="Export Studio — headers, footers, margins, layout"
+          >
+            <Settings2 size={13} />
+            <span className="hidden sm:inline">Export</span>
           </button>
 
           {/* Code type toggle */}
@@ -589,7 +640,7 @@ const QuickLatexEditor = ({
                       onUpdateMetadata?.(doc.id, metadata);
                       setTimeout(() => {
                         if (latexCode.trim()) {
-                          onRenderPreview?.(doc.id, latexCode, metadata, codeType);
+                          onRenderPreview?.(doc.id, latexCode, metadata, codeType, exportDraft?.processing_settings);
                         }
                         onFetchPlaceholders?.(doc.id);
                       }, 500);
@@ -627,7 +678,7 @@ const QuickLatexEditor = ({
                 </a>
               )}
               <button
-                onClick={() => onRenderPreview?.(doc.id, latexCode, {}, codeType)}
+                onClick={() => onRenderPreview?.(doc.id, latexCode, {}, codeType, exportDraft?.processing_settings)}
                 disabled={previewLoading}
                 className="p-1 rounded hover:bg-gray-100 text-gray-400 disabled:opacity-30 transition-colors"
                 title="Refresh"
@@ -666,7 +717,7 @@ const QuickLatexEditor = ({
                 <p className="text-xs font-medium text-gray-700 mb-1">Render failed</p>
                 <p className="text-[11px] text-gray-400 leading-relaxed max-w-[240px]">{previewError}</p>
                 <button
-                  onClick={() => onRenderPreview?.(doc.id, latexCode, {}, codeType)}
+                  onClick={() => onRenderPreview?.(doc.id, latexCode, {}, codeType, exportDraft?.processing_settings)}
                   className="mt-3 text-[11px] text-blue-500 hover:text-blue-600 font-medium"
                 >
                   Try again
@@ -737,6 +788,47 @@ const QuickLatexEditor = ({
               onClose={() => setRightPanel(null)}
               onResolveImages={onResolveImages}
             />
+          </div>
+        )}
+
+        {/* ── Export Studio Sidebar (alongside preview) ──────────────── */}
+        {rightPanel === 'export' && (
+          <div className="w-[380px] min-w-[340px] flex-shrink-0 border-l border-gray-200 overflow-y-auto bg-gray-50/40">
+            <div className="flex items-center justify-between px-4 py-2.5 border-b border-gray-200 bg-white sticky top-0 z-10">
+              <div className="flex items-center gap-2">
+                <Settings2 size={14} className="text-blue-600" />
+                <span className="text-sm font-semibold text-gray-800">Export Studio</span>
+              </div>
+              <button
+                onClick={() => setRightPanel(null)}
+                className="p-1 rounded-md hover:bg-gray-100 text-gray-400 transition-colors"
+                aria-label="Close export studio"
+              >
+                <EyeOff size={14} />
+              </button>
+            </div>
+            <div className="p-3">
+              <ExportSettingsPanel
+                documentId={doc.id}
+                exportDraft={exportDraft}
+                exportLoading={exportLoading}
+                exportSaving={exportSaving}
+                exportError={exportError}
+                exportDirty={exportDirty}
+                templates={exportTemplates}
+                images={exportImages}
+                pdfFiles={exportPdfFiles}
+                metadataSnapshot={exportMetadataSnapshot}
+                onUpdate={onUpdateExportSetting}
+                onSave={onSaveExportSettings}
+                onReset={onResetExportSettings}
+                onUploadImage={onUploadExportImage}
+                onUploadPdfFile={onUploadExportPdfFile}
+                onSaveHeaderFooterPdf={onSaveHeaderFooterPdf}
+                onRemoveHeaderFooterPdf={onRemoveHeaderFooterPdf}
+                onRefreshPreview={onRefreshExportPreview}
+              />
+            </div>
           </div>
         )}
       </div>

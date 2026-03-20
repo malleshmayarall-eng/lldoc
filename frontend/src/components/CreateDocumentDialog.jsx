@@ -23,50 +23,18 @@ import {
 import aiService from '../services/aiService';
 import { documentService } from '../services/documentService';
 import masterService from '../services/masterService';
+import { openDocumentInEditor } from '../utils/documentRouting';
 import { extractPlaceholderFields } from '../utils/metadataFieldUsageTracker';
+import { useFeatureFlags } from '../contexts/FeatureFlagContext';
+import { getDomainDocumentTypes, getDomainCategories, getCreateDialogConfig } from '../domains';
 
 /* ------------------------------------------------------------------ */
 /*  Constants                                                          */
 /* ------------------------------------------------------------------ */
 
-const DOCUMENT_TYPES = [
-  { value: 'contract', label: 'Contract' },
-  { value: 'agreement', label: 'Agreement' },
-  { value: 'nda', label: 'NDA' },
-  { value: 'policy', label: 'Policy' },
-  { value: 'regulation', label: 'Regulation' },
-  { value: 'legal_brief', label: 'Legal Brief' },
-  { value: 'terms', label: 'Terms & Conditions' },
-  { value: 'license', label: 'License' },
-  { value: 'memo', label: 'Memorandum' },
-  { value: 'other', label: 'Other' },
-];
-
-const CATEGORIES = [
-  { value: 'contract', label: 'Contract / Agreement' },
-  { value: 'policy', label: 'Policy Document' },
-  { value: 'regulation', label: 'Regulation / Compliance' },
-  { value: 'legal_brief', label: 'Legal Brief' },
-  { value: 'terms', label: 'Terms & Conditions' },
-  { value: 'nda', label: 'Non-Disclosure Agreement' },
-  { value: 'license', label: 'License Agreement' },
-  { value: 'other', label: 'Other' },
-];
-
-const EMPTY_META = {
-  title: '',
-  author: '',
-  document_type: 'contract',
-  category: 'contract',
-  jurisdiction: '',
-  governing_law: '',
-  reference_number: '',
-  project_name: '',
-  effective_date: '',
-  expiration_date: '',
-  parties: [],
-  custom_metadata: {},
-};
+// DOCUMENT_TYPES, CATEGORIES, and EMPTY_META are now domain-aware.
+// They are computed inside the component via getDomainDocumentTypes() / getDomainCategories()
+// based on the active domain from FeatureFlagContext.
 
 /* ------------------------------------------------------------------ */
 /*  Tiny reusable components                                           */
@@ -223,6 +191,26 @@ const AddCustomFieldRow = ({ onAdd }) => {
 const CreateDocumentDialog = () => {
   const navigate = useNavigate();
   const textAreaRef = useRef(null);
+  const { domain } = useFeatureFlags();
+
+  /* --- domain-aware constants --------------------------------------- */
+  const DOCUMENT_TYPES = useMemo(() => getDomainDocumentTypes(domain), [domain]);
+  const CATEGORIES = useMemo(() => getDomainCategories(domain), [domain]);
+  const dialogConfig = useMemo(() => getCreateDialogConfig(domain), [domain]);
+  const EMPTY_META = useMemo(() => ({
+    title: '',
+    author: '',
+    document_type: dialogConfig.defaultDocType,
+    category: dialogConfig.defaultCategory,
+    jurisdiction: '',
+    governing_law: '',
+    reference_number: '',
+    project_name: '',
+    effective_date: '',
+    expiration_date: '',
+    parties: [],
+    custom_metadata: {},
+  }), [dialogConfig]);
 
   /* --- state -------------------------------------------------------- */
   const [isOpen, setIsOpen] = useState(false);
@@ -338,17 +326,20 @@ const CreateDocumentDialog = () => {
     setIsCreating(true);
     setError(null);
     try {
-      const created = await documentService.createDocument({ title: 'Untitled Document' });
+      const created = await documentService.createDocument({
+        title: 'Untitled Document',
+        document_type: dialogConfig.defaultDocType,
+      });
       const documentId = created?.id || created?.document_id;
       if (!documentId) throw new Error('Document ID not returned from server');
       closeDialog();
-      navigate(`/drafter/${documentId}`);
+  openDocumentInEditor(navigate, created);
     } catch (err) {
       setError(err?.response?.data?.detail || err?.message || 'Failed to create document');
     } finally {
       setIsCreating(false);
     }
-  }, [busy, closeDialog, navigate]);
+  }, [busy, closeDialog, navigate, dialogConfig]);
 
   /* --- analyse with AI -> go to step 2 ------------------------------ */
   const handleAnalyze = useCallback(async () => {
@@ -364,8 +355,8 @@ const CreateDocumentDialog = () => {
       setMeta({
         title: extracted.title || '',
         author: extracted.author || '',
-        document_type: extracted.document_type || 'contract',
-        category: extracted.category || 'contract',
+        document_type: extracted.document_type || dialogConfig.defaultDocType,
+        category: extracted.category || dialogConfig.defaultCategory,
         jurisdiction: extracted.jurisdiction || '',
         governing_law: extracted.governing_law || '',
         reference_number: extracted.reference_number || '',
@@ -415,7 +406,7 @@ const CreateDocumentDialog = () => {
       }
 
       closeDialog();
-      navigate(`/drafter/${documentId}`);
+  openDocumentInEditor(navigate, document || { id: documentId });
     } catch (err) {
       setError(err?.response?.data?.detail || err?.response?.data?.message || err?.message || 'Failed to create document');
     } finally {
@@ -438,7 +429,7 @@ const CreateDocumentDialog = () => {
       const documentId = document?.id || document?.document_id;
       if (!documentId) throw new Error('Document ID not returned from server');
       closeDialog();
-      navigate(`/drafter/${documentId}`);
+  openDocumentInEditor(navigate, document || { id: documentId });
     } catch (err) {
       setError(err?.response?.data?.detail || err?.message || 'Failed to create document');
     } finally {
@@ -620,14 +611,14 @@ const CreateDocumentDialog = () => {
             </div>
             <div>
               <h2 className="text-lg font-semibold text-gray-900">
-                {step === 1 ? 'Create a new document'
+                {step === 1 ? dialogConfig.title
                   : step === 2 ? 'Review AI-extracted metadata'
                   : step === 3 ? 'Choose a template'
                   : `New from "${selectedTemplate?.name}"`}
               </h2>
               <p className="text-sm text-gray-500">
                 {step === 1
-                  ? 'Start blank, from a template, or paste text for AI-assisted creation.'
+                  ? dialogConfig.subtitle
                   : step === 2
                   ? 'Edit any field before creating your document.'
                   : step === 3
@@ -648,137 +639,145 @@ const CreateDocumentDialog = () => {
 
         {/* =================== BODY =================== */}
         <div className="flex-1 overflow-y-auto px-6 py-5 space-y-4">
-          {/* ---------- STEP 1: Text input ---------- */}
+          {/* ---------- STEP 1: Creation modes + content input ---------- */}
           {step === 1 && (
             <>
-              {/* Two creation-mode cards */}
-              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
-                {/* Blank document card */}
-                <div className="rounded-2xl border border-blue-100 bg-gradient-to-br from-blue-50 to-white px-5 py-4 flex flex-col gap-3">
-                  <div>
-                    <h3 className="text-base font-semibold text-gray-900">Blank document</h3>
-                    <p className="text-sm text-gray-500 mt-0.5">Jump straight into the editor with a clean slate.</p>
-                  </div>
-                  <button
-                    type="button"
-                    onClick={handleCreateBlank}
-                    disabled={busy}
-                    className={`w-full px-4 py-2 rounded-lg text-sm font-semibold text-white transition-colors ${
-                      busy ? 'bg-blue-300 cursor-not-allowed' : 'bg-blue-600 hover:bg-blue-700'
-                    }`}
-                  >
-                    {isCreating ? 'Creating...' : 'Create blank'}
-                  </button>
-                </div>
+              {/* ─── Creation mode cards, ordered by domain ─── */}
+              {(() => {
+                const cardOrder = dialogConfig.cardOrder || ['blank', 'template', 'ai_assist', 'quick_latex'];
 
-                {/* From Template card */}
-                <div className="rounded-2xl border border-emerald-100 bg-gradient-to-br from-emerald-50 to-white px-5 py-4 flex flex-col gap-3">
-                  <div>
-                    <div className="flex items-center gap-1.5 mb-0.5">
-                      <BookTemplate className="h-4 w-4 text-emerald-600" />
-                      <h3 className="text-base font-semibold text-gray-900">From Template</h3>
+                const CARDS = {
+                  /* Quick LaTeX */
+                  quick_latex: (
+                    <div key="quick_latex" className="rounded-2xl border border-indigo-100 bg-gradient-to-br from-indigo-50 to-white px-5 py-4 flex flex-col gap-3">
+                      <div>
+                        <div className="flex items-center gap-1.5 mb-0.5">
+                          <Code className="h-4 w-4 text-indigo-600" />
+                          <h3 className="text-base font-semibold text-gray-900">Quick LaTeX</h3>
+                        </div>
+                        <p className="text-sm text-gray-500">One LaTeX block with AI, placeholders &amp; bulk duplicate.</p>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => { closeDialog(); navigate('/quick-latex'); }}
+                        disabled={busy}
+                        className={`w-full px-4 py-2 rounded-lg text-sm font-semibold text-white transition-colors ${
+                          busy ? 'bg-indigo-300 cursor-not-allowed' : 'bg-indigo-600 hover:bg-indigo-700'
+                        }`}
+                      >
+                        Open Quick LaTeX
+                      </button>
                     </div>
-                    <p className="text-sm text-gray-500">Pick a master template and customise title &amp; metadata.</p>
-                  </div>
-                  <button
-                    type="button"
-                    onClick={handleOpenTemplates}
-                    disabled={busy}
-                    className={`w-full px-4 py-2 rounded-lg text-sm font-semibold text-white transition-colors ${
-                      busy ? 'bg-emerald-300 cursor-not-allowed' : 'bg-emerald-600 hover:bg-emerald-700'
-                    }`}
-                  >
-                    Browse templates
-                  </button>
-                </div>
-
-                {/* AI Assist card */}
-                <div className="rounded-2xl border border-violet-100 bg-gradient-to-br from-violet-50 to-white px-5 py-4 flex flex-col gap-3">
-                  <div>
-                    <div className="flex items-center gap-1.5 mb-0.5">
-                      <Sparkles className="h-4 w-4 text-violet-500" />
-                      <h3 className="text-base font-semibold text-gray-900">AI Assist</h3>
+                  ),
+                  /* From Template */
+                  template: (
+                    <div key="template" className="rounded-2xl border border-emerald-100 bg-gradient-to-br from-emerald-50 to-white px-5 py-4 flex flex-col gap-3">
+                      <div>
+                        <div className="flex items-center gap-1.5 mb-0.5">
+                          <BookTemplate className="h-4 w-4 text-emerald-600" />
+                          <h3 className="text-base font-semibold text-gray-900">From Template</h3>
+                        </div>
+                        <p className="text-sm text-gray-500">Pick a master template and customise title &amp; metadata.</p>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={handleOpenTemplates}
+                        disabled={busy}
+                        className={`w-full px-4 py-2 rounded-lg text-sm font-semibold text-white transition-colors ${
+                          busy ? 'bg-emerald-300 cursor-not-allowed' : 'bg-emerald-600 hover:bg-emerald-700'
+                        }`}
+                      >
+                        Browse templates
+                      </button>
                     </div>
-                    <p className="text-sm text-gray-500">Guided setup — type, template, metadata in a few steps.</p>
-                  </div>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      closeDialog();
-                      setTimeout(() => window.dispatchEvent(new CustomEvent('openAIDocumentWizard')), 80);
-                    }}
-                    disabled={busy}
-                    className={`w-full px-4 py-2 rounded-lg text-sm font-semibold text-white transition-colors ${
-                      busy ? 'bg-violet-300 cursor-not-allowed' : 'bg-gradient-to-r from-violet-600 to-blue-600 hover:from-violet-700 hover:to-blue-700'
-                    }`}
-                  >
-                    Start AI Assist
-                  </button>
-                </div>
-
-                {/* Quick LaTeX card */}
-                <div className="rounded-2xl border border-indigo-100 bg-gradient-to-br from-indigo-50 to-white px-5 py-4 flex flex-col gap-3">
-                  <div>
-                    <div className="flex items-center gap-1.5 mb-0.5">
-                      <Code className="h-4 w-4 text-indigo-600" />
-                      <h3 className="text-base font-semibold text-gray-900">Quick LaTeX</h3>
+                  ),
+                  /* AI Assist — wider card spanning 2 cols on lg */
+                  ai_assist: (
+                    <div key="ai_assist" className="rounded-2xl border border-violet-100 bg-gradient-to-br from-violet-50 via-purple-50 to-white px-5 py-4 flex flex-col gap-3 lg:col-span-2">
+                      <div>
+                        <div className="flex items-center gap-1.5 mb-0.5">
+                          <Sparkles className="h-4 w-4 text-violet-500" />
+                          <h3 className="text-base font-semibold text-gray-900">AI Assist</h3>
+                          <span className="text-[10px] px-1.5 py-0.5 bg-violet-100 text-violet-700 rounded-full font-medium">Recommended</span>
+                        </div>
+                        <p className="text-sm text-gray-500">AI-guided setup — describe your document and let AI structure it, extract metadata, and suggest templates automatically.</p>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          closeDialog();
+                          setTimeout(() => window.dispatchEvent(new CustomEvent('openAIDocumentWizard')), 80);
+                        }}
+                        disabled={busy}
+                        className={`w-full px-4 py-2.5 rounded-lg text-sm font-semibold text-white transition-colors ${
+                          busy ? 'bg-violet-300 cursor-not-allowed' : 'bg-gradient-to-r from-violet-600 to-blue-600 hover:from-violet-700 hover:to-blue-700'
+                        }`}
+                      >
+                        Start AI Assist
+                      </button>
                     </div>
-                    <p className="text-sm text-gray-500">One LaTeX block with AI, placeholders &amp; bulk duplicate.</p>
-                  </div>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      closeDialog();
-                      navigate('/quick-latex');
-                    }}
-                    disabled={busy}
-                    className={`w-full px-4 py-2 rounded-lg text-sm font-semibold text-white transition-colors ${
-                      busy ? 'bg-indigo-300 cursor-not-allowed' : 'bg-indigo-600 hover:bg-indigo-700'
-                    }`}
-                  >
-                    Open Quick LaTeX
-                  </button>
-                </div>
-              </div>
+                  ),
+                  /* Blank document (Document Drafter) */
+                  blank: (
+                    <div key="blank" className="rounded-2xl border border-blue-100 bg-gradient-to-br from-blue-50 to-white px-5 py-4 flex flex-col gap-3">
+                      <div>
+                        <h3 className="text-base font-semibold text-gray-900">Blank Document</h3>
+                        <p className="text-sm text-gray-500 mt-0.5">Open the editor with a clean slate.</p>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={handleCreateBlank}
+                        disabled={busy}
+                        className={`w-full px-4 py-2 rounded-lg text-sm font-semibold text-white transition-colors ${
+                          busy ? 'bg-blue-300 cursor-not-allowed' : 'bg-blue-600 hover:bg-blue-700'
+                        }`}
+                      >
+                        {isCreating ? 'Creating...' : 'Create blank'}
+                      </button>
+                    </div>
+                  ),
+                };
 
-              {/* File drop zone */}
-              <div
-                className="border-2 border-dashed border-gray-200 rounded-xl p-4 bg-gray-50/60 hover:border-blue-300 transition-colors"
-                onDrop={handleDrop}
-                onDragOver={(e) => e.preventDefault()}
-              >
-                <div className="flex flex-col sm:flex-row items-center gap-3">
-                  <div className="flex items-center gap-2 text-gray-600">
-                    <UploadCloud className="h-5 w-5" />
-                    <span className="text-sm font-medium">Drop a .txt / .md file here</span>
+                return (
+                  <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+                    {cardOrder.map((key) => CARDS[key]).filter(Boolean)}
                   </div>
-                  <div className="flex-1" />
-                  <label className="inline-flex items-center gap-2 px-3 py-2 text-sm font-medium rounded-lg bg-white border border-gray-200 shadow-sm hover:bg-gray-100 cursor-pointer">
-                    Upload file
-                    <input
-                      type="file"
-                      accept=".txt,.md,text/plain,text/markdown"
-                      className="hidden"
-                      onChange={handleFileChange}
-                    />
-                  </label>
-                </div>
-                {uploadedFileName && (
-                  <p className="mt-3 text-xs text-gray-500">Loaded: {uploadedFileName}</p>
-                )}
-              </div>
+                );
+              })()}
 
-              {/* Textarea */}
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-2">
-                  Paste your document text
-                </label>
+              {/* ─── Combined file upload + text input ─── */}
+              <div className="rounded-xl border border-gray-200 bg-white overflow-hidden">
+                <div
+                  className="border-b border-dashed border-gray-200 p-4 bg-gray-50/60 hover:bg-blue-50/40 transition-colors"
+                  onDrop={handleDrop}
+                  onDragOver={(e) => e.preventDefault()}
+                >
+                  <div className="flex flex-col sm:flex-row items-center gap-3">
+                    <div className="flex items-center gap-2 text-gray-600">
+                      <UploadCloud className="h-5 w-5" />
+                      <span className="text-sm font-medium">Drop a file here or upload</span>
+                    </div>
+                    <div className="flex-1" />
+                    <label className="inline-flex items-center gap-2 px-3 py-2 text-sm font-medium rounded-lg bg-white border border-gray-200 shadow-sm hover:bg-gray-100 cursor-pointer">
+                      Choose file
+                      <input
+                        type="file"
+                        accept=".txt,.md,.tex,.csv,text/plain,text/markdown"
+                        className="hidden"
+                        onChange={handleFileChange}
+                      />
+                    </label>
+                  </div>
+                  {uploadedFileName && (
+                    <p className="mt-2 text-xs text-gray-500">Loaded: <span className="font-medium">{uploadedFileName}</span></p>
+                  )}
+                </div>
                 <textarea
                   ref={textAreaRef}
                   value={text}
                   onChange={(e) => setText(e.target.value)}
-                  placeholder="Paste or type the full document text here..."
-                  className="w-full min-h-[200px] rounded-xl border border-gray-200 bg-white px-4 py-3 text-sm text-gray-800 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                  placeholder="Or paste / type your document text here…"
+                  className="w-full min-h-[160px] px-4 py-3 text-sm text-gray-800 focus:outline-none resize-y placeholder:text-gray-400 border-0"
                 />
               </div>
             </>

@@ -487,6 +487,78 @@ export default function ExecutionResults({
         );
       })()}
 
+      {/* ═══ Sheet Node Results ═══ */}
+      {(() => {
+        const shNodes = nrl.filter(nr => nr.sheet);
+        if (shNodes.length === 0) return null;
+        const totalRead = shNodes.reduce((s, nr) => s + (nr.sheet?.row_count || 0), 0);
+        const totalWritten = shNodes.reduce((s, nr) => s + (nr.sheet?.rows_written || 0), 0);
+        const totalQueries = shNodes.reduce((s, nr) => s + (nr.sheet?.query_count || 0), 0);
+        const totalCached = shNodes.reduce((s, nr) => s + (nr.sheet?.cache_hits || 0), 0);
+
+        return (
+          <div className="rounded-2xl border border-gray-100 bg-white overflow-hidden">
+            <div className="px-4 py-3 border-b border-gray-100">
+              <div className="flex items-center gap-2.5">
+                <div className="w-7 h-7 rounded-xl bg-cyan-50 flex items-center justify-center">
+                  <span className="text-sm">📊</span>
+                </div>
+                <div>
+                  <h4 className="text-[13px] font-semibold text-gray-800">
+                    Sheet I/O
+                  </h4>
+                  <div className="flex items-center gap-1.5 mt-0.5">
+                    {totalRead > 0 && (
+                      <span className="text-[10px] text-cyan-600 font-medium">📊 {totalRead} rows read</span>
+                    )}
+                    {totalWritten > 0 && (
+                      <><span className="w-[3px] h-[3px] rounded-full bg-gray-300 inline-block" /><span className="text-[10px] text-emerald-600 font-medium">✓ {totalWritten} written</span></>
+                    )}
+                    {totalQueries > 0 && (
+                      <><span className="w-[3px] h-[3px] rounded-full bg-gray-300 inline-block" /><span className="text-[10px] text-gray-500 font-medium">⚡ {totalQueries} queries</span></>
+                    )}
+                    {totalCached > 0 && (
+                      <><span className="w-[3px] h-[3px] rounded-full bg-gray-300 inline-block" /><span className="text-[10px] text-amber-600 font-medium">⊘ {totalCached} cached</span></>
+                    )}
+                  </div>
+                </div>
+              </div>
+            </div>
+            <div className="divide-y divide-gray-50">
+              {shNodes.map((nr, idx) => (
+                <div key={nr.node_id || idx} className="px-4 py-2.5 flex items-center gap-3">
+                  <div className={`w-6 h-6 rounded-lg flex items-center justify-center shrink-0 ${
+                    nr.sheet?.mode === 'input' ? 'bg-cyan-50' : 'bg-emerald-50'
+                  }`}>
+                    <span className="text-xs">{nr.sheet?.mode === 'input' ? '📊' : '📝'}</span>
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <p className="text-[12px] font-medium text-gray-800 truncate">
+                      {nr.label || 'Sheet'}
+                    </p>
+                    <p className="text-[10px] text-gray-400">
+                      {nr.sheet?.sheet_title || `Sheet ${(nr.sheet?.sheet_id || '').slice(0, 8)}`}
+                      {' · '}{nr.sheet?.mode === 'input' ? 'Read' : 'Write'} mode
+                    </p>
+                  </div>
+                  <div className="flex items-center gap-2 text-[10px] font-medium shrink-0">
+                    {nr.sheet?.mode === 'input' && (nr.sheet?.row_count > 0) && (
+                      <span className="px-2 py-1 bg-cyan-50 text-cyan-700 rounded-md">{nr.sheet.row_count} rows</span>
+                    )}
+                    {nr.sheet?.mode === 'storage' && (nr.sheet?.rows_written > 0) && (
+                      <span className="px-2 py-1 bg-emerald-50 text-emerald-700 rounded-md">{nr.sheet.rows_written} written</span>
+                    )}
+                    {(nr.sheet?.cache_hits > 0) && (
+                      <span className="px-2 py-1 bg-amber-50 text-amber-700 rounded-md">{nr.sheet.cache_hits} cached</span>
+                    )}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        );
+      })()}
+
       {/* ═══ History ═══ */}
       <HistorySection history={executionHistory} load={loadExecution} loading={loadingExec} refresh={onRefreshHistory} show={showHistory} setShow={setShowHistory} />
 

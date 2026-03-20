@@ -272,6 +272,15 @@ export const documentService = {
     return response.data;
   },
 
+  /**
+   * Get distinct metadata keys + sample values for the metadata filter builder.
+   * Returns: [{ key: "parties", sample_values: ["Acme Corp", "Widget Inc"] }, …]
+   */
+  getDocumentMetadataKeys: async () => {
+    const response = await api.get('/documents/dashboard/metadata-keys/');
+    return response.data;
+  },
+
   // ---------------------------------------------------------------------------
   // Image slots (placeholder mapping)
   // ---------------------------------------------------------------------------
