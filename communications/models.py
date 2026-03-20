@@ -47,6 +47,9 @@ CATEGORY_CHOICES = [
     ('clm.contract_expiring', 'Contract Expiring'),
     ('clm.task_assigned', 'CLM Task Assigned'),
     ('clm.task_completed', 'CLM Task Completed'),
+    ('clm.validation_assigned', 'Assigned as Validator'),
+    ('clm.validation_pending', 'Approval Requested'),
+    ('clm.validation_resolved', 'Validation Decision Made'),
     # Viewer
     ('viewer.invitation_sent', 'Viewer Invitation Sent'),
     ('viewer.document_shared', 'Document Shared via Viewer'),

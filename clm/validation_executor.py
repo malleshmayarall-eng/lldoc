@@ -134,8 +134,9 @@ def _evaluate_document(node, doc_id, validators) -> str:
 
 def _create_pending_decisions(node, doc_id, validators):
     """Create pending ValidationDecision rows for a document."""
+    created_for = []
     for vu in validators:
-        ValidationDecision.objects.get_or_create(
+        decision, created = ValidationDecision.objects.get_or_create(
             node=node,
             document_id=doc_id,
             assigned_to=vu.user,
@@ -144,6 +145,42 @@ def _create_pending_decisions(node, doc_id, validators):
                 'status': 'pending',
             },
         )
+        if created:
+            created_for.append(vu.user)
+
+    # ── Send "approval requested" alerts to newly-assigned users ──────
+    if created_for:
+        try:
+            from communications.dispatch import send_alert
+            doc = WorkflowDocument.objects.filter(id=doc_id).first()
+            doc_title = doc.title if doc else str(doc_id)
+            workflow = node.workflow
+            for recipient in created_for:
+                send_alert(
+                    category='clm.validation_pending',
+                    recipient=recipient,
+                    title='Approval requested',
+                    message=(
+                        f'Document "{doc_title}" is waiting for your review '
+                        f'in workflow "{workflow.name}" '
+                        f'({node.label or "Validator"}).'
+                    ),
+                    priority='high',
+                    target_type='workflow',
+                    target_id=str(workflow.id),
+                    metadata={
+                        'workflow_id': str(workflow.id),
+                        'workflow_name': workflow.name,
+                        'node_id': str(node.id),
+                        'node_label': node.label,
+                        'document_id': str(doc_id),
+                        'document_title': doc_title,
+                        'action_url': f'/clm/validation/{workflow.id}',
+                    },
+                    email=True,
+                )
+        except Exception as e:
+            logger.warning(f"Failed to send validation-pending alerts: {e}")
 
 
 # ---------------------------------------------------------------------------
@@ -238,6 +275,78 @@ def resolve_validation(
             )
 
     _update_node_cache(node)
+
+    # ── Send "validation resolved" alerts ─────────────────────────────
+    try:
+        from communications.dispatch import send_alert
+        doc_title = decision.document.title
+        workflow = node.workflow
+        action_label = 'approved' if action == 'approve' else 'rejected'
+        user_display = user.get_full_name() or user.username
+
+        # Notify the workflow creator about the decision
+        owner = workflow.created_by
+        if owner and owner.id != user.id:
+            send_alert(
+                category='clm.validation_resolved',
+                recipient=owner,
+                title=f'Document {action_label}',
+                message=(
+                    f'{user_display} has {action_label} "{doc_title}" '
+                    f'in workflow "{workflow.name}" '
+                    f'({node.label or "Validator"}).'
+                ),
+                actor=user,
+                priority='medium',
+                target_type='workflow',
+                target_id=str(workflow.id),
+                metadata={
+                    'workflow_id': str(workflow.id),
+                    'workflow_name': workflow.name,
+                    'node_id': str(node.id),
+                    'node_label': node.label,
+                    'document_id': str(doc_id),
+                    'document_title': doc_title,
+                    'decision_id': str(decision.id),
+                    'action': action_label,
+                    'action_url': f'/clm/validation/{workflow.id}',
+                },
+                email=True,
+            )
+
+        # Notify other validators assigned to the same doc (excluding actor)
+        other_validators = (
+            ValidationDecision.objects
+            .filter(node=node, document_id=doc_id)
+            .exclude(assigned_to=user)
+            .select_related('assigned_to')
+        )
+        for other_decision in other_validators:
+            send_alert(
+                category='clm.validation_resolved',
+                recipient=other_decision.assigned_to,
+                title=f'Document {action_label}',
+                message=(
+                    f'{user_display} has {action_label} "{doc_title}" '
+                    f'in workflow "{workflow.name}" '
+                    f'({node.label or "Validator"}).'
+                ),
+                actor=user,
+                priority='low',
+                target_type='workflow',
+                target_id=str(workflow.id),
+                metadata={
+                    'workflow_id': str(workflow.id),
+                    'node_id': str(node.id),
+                    'document_id': str(doc_id),
+                    'document_title': doc_title,
+                    'action': action_label,
+                    'action_url': f'/clm/validation/{workflow.id}',
+                },
+            )
+    except Exception as e:
+        logger.warning(f"Failed to send validation-resolved alerts: {e}")
+
     return result
 
 

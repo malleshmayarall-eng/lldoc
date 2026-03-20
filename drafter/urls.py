@@ -43,6 +43,7 @@ urlpatterns = [
     path('api/fileshare/', include('fileshare.urls')),
     path('api/clm/', include('clm.urls')),  # Contract Lifecycle Management
     path('api/alerts/', include('communications.urls')),  # Centralized communications & alerts
+    path('api/sheets/', include('sheets.urls')),  # Spreadsheet / data tables
     path('documents/', include('exporter.urls')),
 ]
 

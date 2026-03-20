@@ -688,12 +688,32 @@ def _execute_input_node(node: WorkflowNode, workflow: Workflow, triggered_by=Non
 
     elif source_type == 'sheets':
         # Sheets import: import rows from a Sheet (sheets app) as documents.
+        # Uses update-or-create by (sheet_id, row_order) so that:
+        #   - New rows create new WorkflowDocuments
+        #   - Updated rows update existing WorkflowDocuments (new hash)
+        #   - This prevents orphan docs when row content changes
         sheet_id = config.get('sheet_id', '')
         if sheet_id:
             try:
                 from sheets.models import Sheet
                 sheet = Sheet.objects.get(id=sheet_id, organization=organization)
                 rows = sheet.rows.prefetch_related('cells').order_by('order')
+
+                # Pre-load existing docs for this sheet to enable update-or-create
+                existing_docs = {}
+                for doc in WorkflowDocument.objects.filter(
+                    workflow=workflow,
+                    input_node=node,
+                    global_metadata___source='sheets',
+                    global_metadata___sheet_id=str(sheet_id),
+                ):
+                    row_order = (doc.global_metadata or {}).get('_row_order')
+                    if row_order is not None:
+                        existing_docs[row_order] = doc
+
+                imported_count = 0
+                updated_count = 0
+
                 for row in rows:
                     # Build metadata from cells
                     row_meta = {}
@@ -705,39 +725,63 @@ def _execute_input_node(node: WorkflowNode, workflow: Workflow, triggered_by=Non
                         label = col_def.get('label', cell.column_key) if col_def else cell.column_key
                         row_meta[label] = cell.computed_value or cell.raw_value or ''
 
+                    if not any(v for v in row_meta.values()):
+                        continue  # skip empty rows
+
                     # Title from first column value or row order
                     title_val = list(row_meta.values())[0] if row_meta else ''
                     title = str(title_val)[:200] or f"Sheet Row {row.order + 1}"
 
-                    # Dedup by hash of row content
+                    # Content hash for dedup/change detection
                     import hashlib, json as _json
                     row_hash = hashlib.sha256(
                         _json.dumps(row_meta, sort_keys=True, default=str).encode()
                     ).hexdigest()
-                    if WorkflowDocument.objects.filter(
-                        workflow=workflow, file_hash=row_hash,
-                    ).exists():
-                        continue
 
-                    doc = WorkflowDocument.objects.create(
-                        workflow=workflow,
-                        organization=organization,
-                        title=title,
-                        file_type='other',
-                        file_hash=row_hash,
-                        uploaded_by=triggered_by,
-                        input_node=node,
-                        extracted_metadata=row_meta,
-                        global_metadata={
-                            '_source': 'sheets',
-                            '_sheet_id': str(sheet_id),
-                            '_row_order': row.order,
-                            **row_meta,
-                        },
-                        extraction_status='completed',
-                    )
+                    global_meta = {
+                        '_source': 'sheets',
+                        '_sheet_id': str(sheet_id),
+                        '_row_order': row.order,
+                        '_row_id': str(row.id),
+                        **row_meta,
+                    }
+
+                    # Check if we already have a doc for this row (by order)
+                    existing = existing_docs.get(row.order)
+                    if existing:
+                        if existing.file_hash == row_hash:
+                            # No change — skip
+                            continue
+                        # Row content changed — update the existing doc
+                        existing.title = title
+                        existing.file_hash = row_hash
+                        existing.extracted_metadata = row_meta
+                        existing.global_metadata = global_meta
+                        existing.extraction_status = 'completed'
+                        existing.save(update_fields=[
+                            'title', 'file_hash', 'extracted_metadata',
+                            'global_metadata', 'extraction_status', 'updated_at',
+                        ])
+                        updated_count += 1
+                    else:
+                        # New row — create doc
+                        WorkflowDocument.objects.create(
+                            workflow=workflow,
+                            organization=organization,
+                            title=title,
+                            file_type='other',
+                            file_hash=row_hash,
+                            uploaded_by=triggered_by,
+                            input_node=node,
+                            extracted_metadata=row_meta,
+                            global_metadata=global_meta,
+                            extraction_status='completed',
+                        )
+                        imported_count += 1
+
                 logger.info(
-                    f"Input node sheets: imported {rows.count()} rows from sheet {sheet_id}"
+                    f"Input node sheets: {rows.count()} rows from sheet {sheet_id} "
+                    f"(imported={imported_count}, updated={updated_count})"
                 )
             except Exception as e:
                 logger.error(f"Input node sheets import failed: {e}")
@@ -1590,11 +1634,21 @@ def _execute_workflow_body(
                         _changed_row_ids = _trigger_ctx.get('changed_row_ids') or None
                         _changed_row_orders = _trigger_ctx.get('changed_row_orders') or None
 
+                        logger.info(
+                            f"[sheet-node] Node {node_id}: trigger_context has "
+                            f"changed_row_ids={_changed_row_ids}, "
+                            f"changed_row_orders={_changed_row_orders}"
+                        )
+
                         # Only apply the filter if this sheet node's sheet
                         # matches the sheet that fired the event.
                         _ctx_sheet_id = _trigger_ctx.get('sheet_id', '')
                         _node_sheet_id = str((node.config or {}).get('sheet_id', ''))
                         if _ctx_sheet_id and _node_sheet_id and str(_ctx_sheet_id) != _node_sheet_id:
+                            logger.info(
+                                f"[sheet-node] Sheet mismatch: trigger={_ctx_sheet_id}, "
+                                f"node={_node_sheet_id} — processing all rows"
+                            )
                             _changed_row_ids = None
                             _changed_row_orders = None
 
@@ -1608,6 +1662,20 @@ def _execute_workflow_body(
                         sheet_mode = (node.config or {}).get('mode', 'storage')
                         if sheet_mode == 'input' and sheet_result.get('status') == 'completed':
                             import hashlib as _hl, json as _js
+
+                            # Pre-load existing docs for this sheet node
+                            # to enable update-or-create by row identity
+                            _sheet_node_id = str(sheet_result.get('sheet_id', ''))
+                            _existing_sheet_docs = {}
+                            for _ed in WorkflowDocument.objects.filter(
+                                workflow=workflow,
+                                input_node=node,
+                                global_metadata___source='sheet_node',
+                            ):
+                                _ed_row_order = (_ed.global_metadata or {}).get('_row_order')
+                                if _ed_row_order is not None:
+                                    _existing_sheet_docs[_ed_row_order] = _ed
+
                             row_doc_ids = []
                             for row_entry in sheet_result.get('rows', []):
                                 row_meta = row_entry.get('metadata', {})
@@ -1616,33 +1684,42 @@ def _execute_workflow_body(
                                 row_hash = _hl.sha256(
                                     _js.dumps(row_meta, sort_keys=True, default=str).encode()
                                 ).hexdigest()
-                                existing = WorkflowDocument.objects.filter(
-                                    workflow=workflow, file_hash=row_hash,
-                                ).first()
+                                row_order = row_entry.get('row_order', 0)
+
+                                global_meta = {
+                                    '_source': 'sheet_node',
+                                    '_sheet_id': _sheet_node_id,
+                                    '_row_order': row_order,
+                                    '_row_id': row_entry.get('row_id', ''),
+                                    **row_meta,
+                                }
+
+                                # Check for existing doc by row_order
+                                existing = _existing_sheet_docs.get(row_order)
                                 if existing:
                                     row_doc_ids.append(existing.id)
-                                    existing.extracted_metadata = row_meta
-                                    existing.global_metadata = {
-                                        '_source': 'sheet_node',
-                                        '_sheet_id': sheet_result.get('sheet_id', ''),
-                                        '_row_order': row_entry.get('row_order', 0),
-                                        **row_meta,
-                                    }
-                                    existing.save(update_fields=['extracted_metadata', 'global_metadata', 'updated_at'])
+                                    if existing.file_hash != row_hash:
+                                        # Content changed — update
+                                        existing.title = str(list(row_meta.values())[0])[:200] if row_meta else f"Sheet Row {row_order + 1}"
+                                        existing.file_hash = row_hash
+                                        existing.extracted_metadata = row_meta
+                                        existing.global_metadata = global_meta
+                                        existing.extraction_status = 'completed'
+                                        existing.save(update_fields=[
+                                            'title', 'file_hash', 'extracted_metadata',
+                                            'global_metadata', 'extraction_status', 'updated_at',
+                                        ])
                                     continue
+
+                                # New row — create doc
                                 title_val = list(row_meta.values())[0] if row_meta else ''
-                                title = str(title_val)[:200] or f"Sheet Row {row_entry.get('row_order', 0) + 1}"
+                                title = str(title_val)[:200] or f"Sheet Row {row_order + 1}"
                                 doc = WorkflowDocument.objects.create(
                                     workflow=workflow, organization=organization,
                                     title=title, file_type='other', file_hash=row_hash,
                                     uploaded_by=triggered_by, input_node=node,
                                     extracted_metadata=row_meta,
-                                    global_metadata={
-                                        '_source': 'sheet_node',
-                                        '_sheet_id': sheet_result.get('sheet_id', ''),
-                                        '_row_order': row_entry.get('row_order', 0),
-                                        **row_meta,
-                                    },
+                                    global_metadata=global_meta,
                                     extraction_status='completed',
                                 )
                                 row_doc_ids.append(doc.id)

@@ -390,7 +390,7 @@ TRIGGER_EVALUATORS = {
 # Email Inbox Checker — polls IMAP for attachments
 # ---------------------------------------------------------------------------
 
-def check_email_inbox(node: WorkflowNode, user=None) -> dict:
+def check_email_inbox(node: WorkflowNode, user=None, auto_execute_override=None) -> dict:
     """
     Poll an IMAP mailbox for new emails.
 
@@ -405,6 +405,18 @@ def check_email_inbox(node: WorkflowNode, user=None) -> dict:
       1. Run AI extraction (if template exists)
       2. Optionally trigger the workflow DAG for that single document
 
+    Dedup strategy (cached):
+      The node's ``document_state.email_state.seen_message_ids`` list is used
+      as the primary O(1) dedup set so we don't need a DB query on every poll.
+      If the cache is empty (first run / migration) we fall back to a DB query
+      and warm the cache.  After processing, the cache is updated in-place and
+      ``sync_document_state()`` is called to persist it.
+
+    Args:
+      auto_execute_override: If not None, overrides the node config's
+          ``auto_execute`` setting.  Pass ``False`` when calling from
+          ``_execute_input_node`` to prevent recursive DAG execution.
+
     Returns { "found": N, "documents_created": [...], "errors": [...] }
     """
     import email as email_lib
@@ -413,6 +425,7 @@ def check_email_inbox(node: WorkflowNode, user=None) -> dict:
     from email.utils import parseaddr, parsedate_to_datetime
 
     from django.core.files.base import ContentFile
+    from django.utils import timezone as _tz
 
     config = node.config or {}
     host = config.get('email_host', '')
@@ -422,7 +435,7 @@ def check_email_inbox(node: WorkflowNode, user=None) -> dict:
     subject_filter = config.get('email_filter_subject', '')
     sender_filter = config.get('email_filter_sender', '')
     auto_extract = config.get('auto_extract', True)
-    auto_execute = config.get('auto_execute', True)
+    auto_execute = auto_execute_override if auto_execute_override is not None else config.get('auto_execute', True)
     include_body = config.get('include_body_as_document', True)
     include_attachments = config.get('include_attachments', True)
 
@@ -435,14 +448,26 @@ def check_email_inbox(node: WorkflowNode, user=None) -> dict:
     skipped_count = 0
     errors = []
 
-    # Pre-load all known Message-IDs for this workflow for fast O(1) lookups
-    _existing_message_ids = set(
-        WorkflowDocument.objects.filter(
-            workflow=workflow,
+    # ── Build dedup set from cached email_state (fast path) ──────────
+    ds = node.document_state or {}
+    email_state = ds.get('email_state', {})
+    _cached_ids = set(email_state.get('seen_message_ids', []))
+
+    if _cached_ids:
+        # Use the cached set — no DB query needed
+        _existing_message_ids = _cached_ids
+    else:
+        # Cold start / cache empty — warm from DB (one-time).
+        # Query workflow-wide (not just this node) so we also catch
+        # message IDs from legacy docs created before input_node FK
+        # was set, or from other email nodes sharing the same mailbox.
+        _existing_message_ids = set(
+            WorkflowDocument.objects.filter(
+                workflow=workflow,
+            )
+            .exclude(email_message_id='')
+            .values_list('email_message_id', flat=True)
         )
-        .exclude(email_message_id='')
-        .values_list('email_message_id', flat=True)
-    )
 
     def _decode_header_value(raw_header):
         """Decode RFC-2047 encoded header into a plain string."""
@@ -520,15 +545,74 @@ def check_email_inbox(node: WorkflowNode, user=None) -> dict:
         mail.login(email_user, email_pass)
         mail.select(folder)
 
-        # Search for unseen messages
-        search_criteria = '(UNSEEN)'
+        # Build IMAP search criteria.
+        # We do NOT filter by UNSEEN — instead we fetch all emails
+        # (read and unread) within a date window and rely on the
+        # Message-ID dedup cache for skipping already-processed ones.
+        # This ensures emails that were opened/read externally (e.g.
+        # in a mail client) are still ingested.
+        criteria_parts = []
+
+        # ── Date window: SINCE last successful check or node creation ─
+        # This prevents pulling the entire mailbox on every poll while
+        # still catching emails read before our last check.
+        last_checked = (config.get('email_last_checked_at') or '').strip()
+        since_dt = None
+        if last_checked:
+            try:
+                from django.utils.dateparse import parse_datetime
+                since_dt = parse_datetime(last_checked)
+            except (ValueError, TypeError):
+                pass
+
+        if not since_dt and hasattr(node, 'created_at') and node.created_at:
+            since_dt = node.created_at
+
+        if since_dt:
+            # Go back 1 day before last check to catch any edge cases
+            # (timezone differences, emails arriving during the check)
+            from datetime import timedelta
+            safe_since = since_dt - timedelta(days=1)
+            criteria_parts.append(f'SINCE {safe_since.strftime("%d-%b-%Y")}')
+
         if subject_filter:
-            search_criteria = f'(UNSEEN SUBJECT "{subject_filter}")'
+            criteria_parts.append(f'SUBJECT "{subject_filter}"')
         if sender_filter:
-            search_criteria = f'(UNSEEN FROM "{sender_filter}")'
+            criteria_parts.append(f'FROM "{sender_filter}"')
+
+        # If no criteria at all, use ALL (fetch everything in the folder)
+        if not criteria_parts:
+            criteria_parts.append('ALL')
+        search_criteria = f'({" ".join(criteria_parts)})'
 
         _, msg_ids = mail.search(None, search_criteria)
         msg_id_list = msg_ids[0].split()
+
+        # ── Sort by INTERNALDATE so emails are processed chronologically ─
+        # IMAP SEARCH returns message sequence numbers in arbitrary order.
+        # Fetch INTERNALDATE for each and sort ascending (oldest first) so
+        # the document list appears in time order, not random.
+        if len(msg_id_list) > 1:
+            dated_msgs = []
+            for mid in msg_id_list:
+                try:
+                    _, date_data = mail.fetch(mid, '(INTERNALDATE)')
+                    raw_date = date_data[0].decode() if isinstance(date_data[0], bytes) else str(date_data[0])
+                    # Extract the INTERNALDATE string
+                    import re as _re_date
+                    m = _re_date.search(r'INTERNALDATE "([^"]+)"', raw_date)
+                    if m:
+                        from email.utils import parsedate_to_datetime as _pdt
+                        dt = _pdt(m.group(1))
+                        dated_msgs.append((dt, mid))
+                    else:
+                        # If we can't parse, put at the end
+                        dated_msgs.append((None, mid))
+                except Exception:
+                    dated_msgs.append((None, mid))
+            # Sort: oldest first, unknowns at end
+            dated_msgs.sort(key=lambda x: (x[0] is None, x[0] or ''))
+            msg_id_list = [mid for _, mid in dated_msgs]
 
         for msg_id in msg_id_list[:50]:  # cap at 50 per poll
             try:
@@ -539,8 +623,8 @@ def check_email_inbox(node: WorkflowNode, user=None) -> dict:
                 # ── Dedup via RFC Message-ID header ──────────────────
                 raw_message_id = (msg.get('Message-ID') or msg.get('Message-Id') or '').strip()
                 if raw_message_id and raw_message_id in _existing_message_ids:
-                    # Already processed — mark seen and skip
-                    mail.store(msg_id, '+FLAGS', '\\Seen')
+                    # Already processed — skip (no need to mark as Seen
+                    # since we no longer rely on UNSEEN for filtering)
                     skipped_count += 1
                     continue
 
@@ -560,6 +644,17 @@ def check_email_inbox(node: WorkflowNode, user=None) -> dict:
                     'email_date': email_date,
                     'email_source': email_user,
                 }
+
+                # Fire plugin hook: new email received
+                try:
+                    from .plugins import get_plugin_manager
+                    get_plugin_manager().hook.on_email_received(
+                        node=node, message_id=raw_message_id,
+                        subject=subject, sender=sender_email,
+                        email_date=email_date,
+                    )
+                except Exception:
+                    pass
 
                 has_attachments = False
 
@@ -583,6 +678,7 @@ def check_email_inbox(node: WorkflowNode, user=None) -> dict:
                         doc = WorkflowDocument.objects.create(
                             workflow=workflow,
                             organization=org,
+                            input_node=node,
                             title=fname,
                             file=ContentFile(payload, name=fname),
                             file_type=file_type,
@@ -608,6 +704,7 @@ def check_email_inbox(node: WorkflowNode, user=None) -> dict:
                         doc = WorkflowDocument.objects.create(
                             workflow=workflow,
                             organization=org,
+                            input_node=node,
                             title=title,
                             file=ContentFile(body_bytes, name=txt_filename),
                             file_type='txt',
@@ -636,6 +733,17 @@ def check_email_inbox(node: WorkflowNode, user=None) -> dict:
 
             except Exception as e:
                 errors.append(f"Message processing error: {str(e)}")
+                # Fire plugin hook: email processing failed
+                _fail_msg_id = raw_message_id if 'raw_message_id' in locals() else ''
+                try:
+                    from .plugins import get_plugin_manager
+                    get_plugin_manager().hook.on_email_failed(
+                        node=node,
+                        message_id=_fail_msg_id,
+                        error=str(e),
+                    )
+                except Exception:
+                    pass
 
         mail.logout()
 
@@ -664,6 +772,42 @@ def check_email_inbox(node: WorkflowNode, user=None) -> dict:
                 'skipped_duplicates': skipped_count,
             },
         )
+
+    # ── Sync document_state + email_state cache ───────────────────
+    # Always sync after an inbox poll so the cached seen_message_ids
+    # stays current.  sync_document_state() rebuilds from DB rows and
+    # also rebuilds the email_state sub-dict.
+    try:
+        node.sync_document_state()
+        # Overlay poll-specific stats that sync_document_state cannot know
+        ds = node.document_state or {}
+        es = ds.get('email_state', {})
+        es['last_checked_at'] = _tz.now().isoformat()
+        es['last_found'] = len(created_docs)
+        es['last_skipped'] = skipped_count
+        es['cumulative_found'] = es.get('cumulative_found', 0) + len(created_docs)
+        es['cumulative_skipped'] = es.get('cumulative_skipped', 0) + skipped_count
+        ds['email_state'] = es
+        ds['last_refresh_at'] = _tz.now().isoformat()
+        node.document_state = ds
+        node.save(update_fields=['document_state'])
+    except Exception as e:
+        logger.error(f"Email state sync failed for node {node.id}: {e}")
+
+    # ── Fire pluggy hooks ──────────────────────────────────────────
+    try:
+        from .plugins import get_plugin_manager
+        pm = get_plugin_manager()
+        pm.hook.on_inbox_checked(
+            node=node,
+            found=len(created_docs),
+            skipped=skipped_count,
+            errors=errors,
+        )
+        for doc in created_docs:
+            pm.hook.on_email_processed(node=node, document=doc)
+    except Exception as e:
+        logger.debug(f"Plugin dispatch skipped: {e}")
 
     return {
         'found': len(created_docs),

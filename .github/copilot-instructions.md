@@ -179,40 +179,46 @@ python manage.py test documents  # Run tests
 python manage.py test clm        # CLM tests (model + API + condition eval)
 ```
 
-- **Env vars**: `env.env` in project root, loaded via `python-dotenv` in settings.py
-- **Settings module**: `drafter.settings`
-- **Celery** (for CLM): `celery -A drafter worker -l info` + `celery -A drafter beat -l info` (requires Redis on `127.0.0.1:6379`)
-- **Frontend**: React app in `frontend/`, runs on localhost:5173 (Vite)
-- **Tests use**: `APIClient` + `force_authenticate(user=...)`, create `Organization` + `UserProfile` in `setUp()` (see `clm/tests.py` `CLMTestMixin` for the pattern)
+# Copilot Instructions — LL-Doc Backend (Django/DRF)
 
-## When Adding New Features
+## Big picture
 
-1. **New model** → Use UUID PK, add `custom_metadata = JSONField(default=dict, blank=True)` if extensibility needed
-2. **New ViewSet in documents** → Add to the appropriate `*_views.py`, register in `documents/urls.py` router **before** the empty-prefix `DocumentViewSet`
-3. **New `@action` on DocumentViewSet** → Use `url_path='kebab-case'`, support both GET and PATCH where applicable, return `*_active` booleans for frontend state management
-4. **Config in processing_settings** → Use `_merge_config` pattern, honour `__removed__` sentinel, strip in `get_processing_defaults()`
-5. **New CLM node type** → Add to `WorkflowNode.NodeType` choices, implement executor in `clm/node_executor.py`, update `rebuild_extraction_template()` if it extracts fields
-6. **Alerts from new features** → Use `send_alert(category='app.event', recipient=user, ...)` from `communications.dispatch`
-7. **Frontend guides** → Create `FRONTEND_PROMPTING_*_GUIDE.md` in project root with API reference, request/response examples, and React component patterns
+- Monorepo: Django backend lives in `backend/`, React frontend in `backend/frontend/`.
+- Django 6 + DRF, SQLite dev DB (`db.sqlite3`), session-cookie auth (`rest_framework.authentication.SessionAuthentication`).
+- API surface is split by apps and mounted in `drafter/urls.py` under `/api/*`.
 
-## Key File Quick Reference
+## Key apps & boundaries
 
-| What | Where |
-|------|-------|
-| All document models (~6.5k lines) | `documents/models.py` |
-| Document API + ~30 actions | `documents/views.py` `DocumentViewSet` |
-| Structure CRUD (sections, paragraphs, tables) | `documents/structure_views.py` |
-| Partial save handler registry | `documents/partial_save/registry.py` |
-| PDF generation engine | `exporter/pdf_system.py` |
-| Config merge + `__removed__` logic | `documents/models.py` `get_processing_defaults()` |
-| Organization settings model | `user_management/models.py` `OrganizationDocumentSettings` |
-| Sharing permissions | `sharing/permissions.py` `HasSharePermission`, `IsOwnerOrSharedWith` |
-| CLM workflow models + DAG | `clm/models.py` (Workflow, WorkflowNode, NodeConnection) |
-| CLM workflow execution | `clm/node_executor.py`, `clm/tasks.py` |
-| Viewer token auth system | `viewer/authentication.py`, `viewer/permissions.py` |
-| Alert dispatch entry point | `communications/dispatch.py` `send_alert()` |
-| URL routing (order matters!) | `drafter/urls.py` + `documents/urls.py` |
-| Celery config | `drafter/celery.py` + `drafter/settings.py` (bottom) |
+- `documents/`: core document model + editor APIs (large `documents/models.py`, `documents/views.py`, `documents/structure_views.py`).
+- `exporter/`: PDF generation pipeline (`exporter/pdf_system.py`).
+- `clm/`: contract lifecycle workflows (DAG nodes + execution) and Celery tasks (`clm/models.py`, `clm/node_executor.py`, `clm/tasks.py`).
+- `dms/`: PDF ingestion/search (`dms/services.py`).
+- `sharing/`: generic GFK-based sharing permissions (`sharing/permissions.py`).
+- `viewer/`: external-viewer auth (non-Django `ViewerUser`) (`viewer/authentication.py`).
+- `communications/`: alerts/notifications entrypoint `send_alert()` (`communications/dispatch.py`).
 
+## Repo-specific conventions (don’t fight them)
 
-Never create migration files manually. Django auto-generates them based on model changes. If you need to modify a migration, edit the generated file in `documents/migrations/` (or the relevant app) and then run `python manage.py migrate --fake <app_name> <migration_name>` to sync the migration state without reapplying it.
+- UUID primary keys everywhere; routes typically use `<uuid:pk>`.
+- Org scoping is via `request.user.profile.organization` (see `user_management/models.py`). Some CLM views use `_get_org()` with a dev fallback.
+- **URL ordering matters**:
+  - In `documents/urls.py`, `DocumentViewSet` is registered **last** with an empty prefix: `router.register(r'', DocumentViewSet, ...)`.
+  - In `drafter/urls.py`, document metadata endpoints are defined **before** `path('api/documents/', include('documents.urls'))` to avoid being swallowed.
+- **Optimistic concurrency uses ETags** in `documents/views.py` (`_get_document_etag()`, `_check_if_match()`); return `412` on mismatch. CORS exposes `ETag` in `drafter/settings.py`.
+- **Partial-save is the main editor write path**: `POST /api/documents/<id>/partial-save/` routes to typed handlers in `documents/partial_save/` (registry in `documents/partial_save/registry.py`).
+- Export config is stored in `Document.custom_metadata.processing_settings` and deep-merged with org defaults; explicit removals use the sentinel string `"__removed__"` (see `documents/models.py` `get_processing_defaults()`).
+
+## Dev workflows (local)
+
+- Env vars are loaded from `env.env` in project root (`drafter/settings.py`).
+- Run server: `python manage.py migrate` then `python manage.py runserver 8000`.
+- Tests: `python manage.py test documents` and `python manage.py test clm` (tests commonly use `APIClient` + `force_authenticate`).
+- Celery (CLM): worker + beat (Redis on `127.0.0.1:6379`) configured via `drafter/celery.py`.
+
+## Viewer auth gotcha
+
+- Viewer endpoints don’t use Django sessions: they authenticate via `Authorization: ViewerSession <token>` / `Authorization: ViewerToken <token>` or query params (`viewer/authentication.py`).
+
+## Migrations
+
+- Don’t hand-write migrations; generate via Django. If editing a generated migration, follow existing guidance in repo docs.

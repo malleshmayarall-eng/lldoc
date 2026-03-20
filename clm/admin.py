@@ -11,6 +11,7 @@ from .models import (
     ExtractedField,
     ListenerEvent,
     NodeConnection,
+    SheetNodeQuery,
     ValidatorUser,
     ValidationDecision,
     Workflow,
@@ -154,3 +155,18 @@ class ValidationDecisionAdmin(admin.ModelAdmin):
         'document__title', 'note',
     ]
     readonly_fields = ['decided_at']
+
+
+# ---------------------------------------------------------------------------
+# Sheet Node Query admin
+# ---------------------------------------------------------------------------
+
+@admin.register(SheetNodeQuery)
+class SheetNodeQueryAdmin(admin.ModelAdmin):
+    list_display = [
+        'operation', 'status', 'sheet', 'node',
+        'row_order', 'hit_count', 'created_at',
+    ]
+    list_filter = ['operation', 'status']
+    search_fields = ['content_hash', 'sheet__title', 'node__label']
+    readonly_fields = ['row_data', 'content_hash', 'last_hit_at']

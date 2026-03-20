@@ -198,23 +198,43 @@ def dispatch_live_workflows():
     checks if enough time has elapsed since the last execution (based on
     ``live_interval``), and dispatches async execution tasks.
 
-    Each workflow runs as an independent async function (Celery task).
-    Cache locks prevent overlapping executions of the same workflow.
+    **Important**: Workflows that are fully event-driven (all input sources
+    are sheets or webhooks) are SKIPPED here — they're triggered by
+    handle_sheet_update() or process_webhook() instead.  This prevents
+    duplicate/conflicting executions.
     """
     from django.core.cache import cache
 
-    from .models import Workflow, WorkflowExecution
+    from .models import EventSubscription, Workflow, WorkflowExecution
 
     now = timezone.now()
     due_count = 0
+    skipped_event_driven = 0
 
     live_workflows = Workflow.objects.filter(
         is_active=True,
         is_live=True,
     ).select_related('organization')
 
+    # Event-driven source types — workflows using ONLY these don't need
+    # cron-based polling.
+    _EVENT_DRIVEN_TYPES = {'sheet', 'webhook'}
+
     for workflow in live_workflows:
         wf_id = str(workflow.id)
+
+        # ── Check if this workflow is fully event-driven ─────────
+        # If ALL active subscriptions are event-driven (sheets/webhooks),
+        # skip — they're handled by real-time events, not this cron.
+        active_subs = list(
+            EventSubscription.objects.filter(
+                workflow=workflow,
+                status='active',
+            ).values_list('source_type', flat=True)
+        )
+        if active_subs and all(st in _EVENT_DRIVEN_TYPES for st in active_subs):
+            skipped_event_driven += 1
+            continue
 
         # ── Interval check — has enough time elapsed? ────────────
         interval = workflow.live_interval or 60
@@ -249,8 +269,11 @@ def dispatch_live_workflows():
         due_count += 1
         logger.info(f'[live-dispatch] Dispatched async exec for "{workflow.name}"')
 
-    if due_count:
-        logger.info(f'[live-dispatch] Dispatched {due_count} live workflow(s)')
+    if due_count or skipped_event_driven:
+        logger.info(
+            f'[live-dispatch] Dispatched {due_count} live workflow(s), '
+            f'skipped {skipped_event_driven} event-driven workflow(s)'
+        )
 
 
 @shared_task(name='clm.tasks.dispatch_email_checks')

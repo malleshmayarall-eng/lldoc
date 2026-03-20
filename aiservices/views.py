@@ -1056,7 +1056,7 @@ def ai_chat(request):
 		else:
 			contents.insert(0, {'role': 'user', 'parts': [{'text': system_prompt}]})
 
-	model = os.environ.get('GEN_MODEL', 'gemini-2.0-flash')
+	model = os.environ.get('GEN_MODEL', 'gemini-2.5-flash')
 	payload = {
 		'contents': contents,
 		'generationConfig': {
@@ -1269,7 +1269,7 @@ def ai_chat_edit(request):
 	# Add the edit request
 	contents.append({'role': 'user', 'parts': [{'text': edit_system_prompt}]})
 
-	model = os.environ.get('GEN_MODEL', 'gemini-2.0-flash')
+	model = os.environ.get('GEN_MODEL', 'gemini-2.5-flash')
 	payload = {
 		'contents': contents,
 		'generationConfig': {

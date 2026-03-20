@@ -26,6 +26,20 @@ try:  # HTML → PDF conversion
 except ImportError:  # pragma: no cover
     pisa = None
 
+try:
+    from exporter.pdf_system import (
+        PDFLayoutOptions,
+        _overlay_header_footer_pdf,
+        apply_pdf_layout,
+        _rasterize_pdf_bytes,
+        _resolve_text_protection,
+        _resolve_pdf_passwords,
+    )
+    from exporter.pdf_metadata import build_pdf_metadata
+    _HAS_PDF_SYSTEM = True
+except ImportError:
+    _HAS_PDF_SYSTEM = False
+
 
 PGFPLOTS_OPTIMIZATION_SETTINGS = """\\pgfplotsset{
   /pgfplots/samples=40,
@@ -540,11 +554,210 @@ def sanitize_ai_latex_code(latex_code: str) -> str:
     return latex_code
 
 
+# ── Margin / page-size helpers for processing_settings ──────────────────
+
+_PAGE_SIZE_MAP = {
+    'a4': 'a4paper',
+    'a3': 'a3paper',
+    'a5': 'a5paper',
+    'letter': 'letterpaper',
+    'legal': 'legalpaper',
+}
+
+_MARGIN_PRESETS = {
+    'narrow':  {'top': '1.27cm', 'bottom': '1.27cm', 'left': '1.27cm', 'right': '1.27cm'},
+    'normal':  {'top': '2.54cm', 'bottom': '2.54cm', 'left': '2.54cm', 'right': '2.54cm'},
+    'wide':    {'top': '2.54cm', 'bottom': '2.54cm', 'left': '3.18cm', 'right': '3.18cm'},
+    'none':    {'top': '0cm', 'bottom': '0cm', 'left': '0cm', 'right': '0cm'},
+}
+
+_FONT_FAMILY_MAP = {
+    'serif':     '',        # default LaTeX
+    'sans':      '\\renewcommand{\\familydefault}{\\sfdefault}\n',
+    'monospace': '\\renewcommand{\\familydefault}{\\ttdefault}\n',
+}
+
+_LINE_SPACING_MAP = {
+    '1':    '\\renewcommand{\\baselinestretch}{1.0}\n',
+    '1.15': '\\renewcommand{\\baselinestretch}{1.15}\n',
+    '1.5':  '\\renewcommand{\\baselinestretch}{1.5}\n',
+    '2':    '\\renewcommand{\\baselinestretch}{2.0}\n',
+}
+
+
+def _build_geometry_options(processing_settings: dict) -> str:
+    """Return a \\usepackage[...]{geometry} line from processing_settings.pdf_layout.
+
+    When a pdf_layout dict is present (indicating the user has opened
+    Export Studio), we always emit a geometry line — falling back to
+    sensible defaults (A4, normal margins) for any unset fields so that
+    the rendered preview matches what the full exporter would produce.
+    """
+    pdf_layout = processing_settings.get('pdf_layout') or {}
+    if not pdf_layout:
+        return ''
+
+    parts = []
+
+    # Page size — default to A4 when Export Studio is active but no explicit choice
+    page_size = (pdf_layout.get('page_size') or 'a4').lower()
+    paper = _PAGE_SIZE_MAP.get(page_size, 'a4paper')
+    parts.append(paper)
+
+    # Margins — default to "normal" when Export Studio is active but no explicit choice
+    margin_size = (pdf_layout.get('margin_size') or 'normal').lower()
+    margins = _MARGIN_PRESETS.get(margin_size, _MARGIN_PRESETS['normal'])
+    parts.append(f"top={margins['top']}")
+    parts.append(f"bottom={margins['bottom']}")
+    parts.append(f"left={margins['left']}")
+    parts.append(f"right={margins['right']}")
+
+    return f"\\usepackage[{','.join(parts)}]{{geometry}}\n"
+
+
+# ── Preamble conflict removal helpers ────────────────────────────────────
+
+# Regex patterns for packages/commands that Export Studio will inject and
+# that cause "Option clash" or duplicate-definition errors when present twice.
+_GEOMETRY_PKG_RE = re.compile(
+    r'\\usepackage\s*(?:\[[^\]]*\])?\s*\{geometry\}[^\n]*\n?'
+)
+_FANCYHDR_PKG_RE = re.compile(
+    r'\\usepackage\s*(?:\[[^\]]*\])?\s*\{fancyhdr\}[^\n]*\n?'
+)
+_BASELINESTRETCH_RE = re.compile(
+    r'\\renewcommand\s*\{\\baselinestretch\}\s*\{[^}]*\}[^\n]*\n?'
+)
+_PAGESTYLE_FANCY_RE = re.compile(
+    r'\\pagestyle\s*\{fancy\}[^\n]*\n?'
+)
+_FANCYHF_CLEAR_RE = re.compile(
+    r'\\fancyhf\s*\{[^}]*\}[^\n]*\n?'
+)
+_FANCYHDR_FIELD_RE = re.compile(
+    r'\\[lcr](?:head|foot)\s*\{[^}]*\}[^\n]*\n?'
+)
+_FAMILYDEFAULT_RE = re.compile(
+    r'\\renewcommand\s*\{\\familydefault\}\s*\{[^}]*\}[^\n]*\n?'
+)
+_GEOMETRY_CMD_RE = re.compile(
+    r'\\geometry\s*\{[^}]*\}[^\n]*\n?'
+)
+_NEWGEOMETRY_CMD_RE = re.compile(
+    r'\\newgeometry\s*\{[^}]*\}[^\n]*\n?'
+)
+
+
+def _strip_conflicting_packages(latex_code: str, processing_settings: dict) -> str:
+    """Remove existing geometry / fancyhdr / baselinestretch / familydefault
+    declarations from the preamble of a full LaTeX document when Export Studio
+    will inject its own versions.
+
+    Only strips from the **preamble** (before ``\\begin{document}``).
+    This prevents "Option clash for package geometry" and similar errors.
+    """
+    ps = processing_settings or {}
+    has_pdf_layout = bool(ps.get('pdf_layout'))
+    has_header_footer = bool(ps.get('header_footer'))
+
+    if not has_pdf_layout and not has_header_footer:
+        return latex_code  # nothing to inject, nothing to strip
+
+    marker = '\\begin{document}'
+    idx = latex_code.find(marker)
+    if idx == -1:
+        return latex_code  # no preamble boundary — handled by wrap mode
+
+    preamble = latex_code[:idx]
+    body = latex_code[idx:]
+
+    if has_pdf_layout:
+        # Strip geometry package (our injection will replace it)
+        preamble = _GEOMETRY_PKG_RE.sub('', preamble)
+        preamble = _GEOMETRY_CMD_RE.sub('', preamble)
+        preamble = _NEWGEOMETRY_CMD_RE.sub('', preamble)
+
+        # Strip baselinestretch (our layout preamble sets it)
+        preamble = _BASELINESTRETCH_RE.sub('', preamble)
+
+        # Strip familydefault (our layout preamble sets it)
+        preamble = _FAMILYDEFAULT_RE.sub('', preamble)
+
+    if has_header_footer:
+        # Strip fancyhdr package and all header/footer field commands
+        preamble = _FANCYHDR_PKG_RE.sub('', preamble)
+        preamble = _PAGESTYLE_FANCY_RE.sub('', preamble)
+        preamble = _FANCYHF_CLEAR_RE.sub('', preamble)
+        preamble = _FANCYHDR_FIELD_RE.sub('', preamble)
+
+    return preamble + body
+
+
+def _build_layout_preamble(processing_settings: dict) -> str:
+    """Build extra preamble lines from processing_settings.pdf_layout for fonts/spacing.
+
+    Falls back to sensible defaults when Export Studio is active (pdf_layout
+    dict exists) but individual fields are empty.
+    """
+    pdf_layout = processing_settings.get('pdf_layout') or {}
+    if not pdf_layout:
+        return ''
+
+    lines = ''
+
+    # Font family — default to serif
+    font_family = (pdf_layout.get('font_family') or 'serif').lower()
+    lines += _FONT_FAMILY_MAP.get(font_family, '')
+
+    # Line spacing — default to 1.5
+    line_spacing = str(pdf_layout.get('line_spacing') or '1.5').strip()
+    lines += _LINE_SPACING_MAP.get(line_spacing, '')
+
+    return lines
+
+
+def _build_header_footer_preamble(processing_settings: dict) -> str:
+    """Build fancyhdr preamble from processing_settings header/footer text config."""
+    hf = processing_settings.get('header_footer') or {}
+    header_left = hf.get('header_left', '')
+    header_center = hf.get('header_center', '')
+    header_right = hf.get('header_right', '')
+    footer_left = hf.get('footer_left', '')
+    footer_center = hf.get('footer_center', '')
+    footer_right = hf.get('footer_right', '')
+
+    has_any = any([header_left, header_center, header_right,
+                   footer_left, footer_center, footer_right])
+    if not has_any:
+        return ''
+
+    lines = '\\usepackage{fancyhdr}\n\\pagestyle{fancy}\n'
+    lines += '\\fancyhf{}\n'  # clear defaults
+    if header_left:
+        lines += f'\\lhead{{{header_left}}}\n'
+    if header_center:
+        lines += f'\\chead{{{header_center}}}\n'
+    if header_right:
+        lines += f'\\rhead{{{header_right}}}\n'
+    if footer_left:
+        lines += f'\\lfoot{{{footer_left}}}\n'
+    if footer_center:
+        lines += f'\\cfoot{{{footer_center}}}\n'
+    elif not any([footer_left, footer_right]):
+        # Default page numbers if no footer is set but headers exist
+        lines += '\\cfoot{\\thepage}\n'
+    if footer_right:
+        lines += f'\\rfoot{{{footer_right}}}\n'
+
+    return lines
+
+
 def _prepare_latex_document(
     latex_code: str,
     preamble: str | None,
     wrap_mode: str,
     optimize_pgfplots: bool,
+    processing_settings: dict | None = None,
 ) -> str:
     # ── Run AI-generated code sanitization as a safety net ──
     latex_code = sanitize_ai_latex_code(latex_code)
@@ -558,18 +771,60 @@ def _prepare_latex_document(
     )
 
     # Sanitize unresolved [[placeholder]] in preamble-critical commands.
-    # NOTE: This is a safety net — normally resolve_latex_metadata() handles
-    # preamble sanitisation + general escaping before this function runs.
-    # Only fires if _prepare_latex_document is called without prior resolution.
     latex_code = _sanitize_preamble_placeholders(latex_code)
     latex_code = _escape_unresolved_placeholders(latex_code)
 
+    ps = processing_settings or {}
+
     if "\\begin{document}" in latex_code:
-        # Ensure xcolor is available for red placeholder highlights
+        # Full document provided — inject geometry/layout before \begin{document}
         latex_code = _ensure_xcolor(latex_code)
+
+        # Strip existing geometry / fancyhdr / baselinestretch from the
+        # preamble so our Export Studio injection doesn't cause
+        # "Option clash for package geometry" or duplicate-command errors.
+        latex_code = _strip_conflicting_packages(latex_code, ps)
+
+        # Inject geometry and layout into existing preamble
+        geometry_line = _build_geometry_options(ps)
+        layout_lines = _build_layout_preamble(ps)
+        hf_lines = _build_header_footer_preamble(ps)
+        inject = geometry_line + layout_lines + hf_lines
+        if inject:
+            latex_code = latex_code.replace(
+                '\\begin{document}',
+                inject + '\\begin{document}',
+                1,
+            )
         return latex_code
 
     preamble_block = preamble.strip() if preamble else "\\usepackage{amsmath}\n\\usepackage{amssymb}"
+
+    # Strip packages from the user-provided preamble that Export Studio
+    # will inject (prevents "Option clash for package geometry" etc.)
+    if ps.get('pdf_layout'):
+        preamble_block = _GEOMETRY_PKG_RE.sub('', preamble_block)
+        preamble_block = _GEOMETRY_CMD_RE.sub('', preamble_block)
+        preamble_block = _BASELINESTRETCH_RE.sub('', preamble_block)
+        preamble_block = _FAMILYDEFAULT_RE.sub('', preamble_block)
+    if ps.get('header_footer'):
+        preamble_block = _FANCYHDR_PKG_RE.sub('', preamble_block)
+        preamble_block = _PAGESTYLE_FANCY_RE.sub('', preamble_block)
+        preamble_block = _FANCYHF_CLEAR_RE.sub('', preamble_block)
+        preamble_block = _FANCYHDR_FIELD_RE.sub('', preamble_block)
+
+    # Also strip from the latex_code body itself in case it contains
+    # preamble-like commands (common with AI-generated code)
+    if ps.get('pdf_layout'):
+        latex_code = _GEOMETRY_PKG_RE.sub('', latex_code)
+        latex_code = _GEOMETRY_CMD_RE.sub('', latex_code)
+        latex_code = _BASELINESTRETCH_RE.sub('', latex_code)
+        latex_code = _FAMILYDEFAULT_RE.sub('', latex_code)
+    if ps.get('header_footer'):
+        latex_code = _FANCYHDR_PKG_RE.sub('', latex_code)
+        latex_code = _PAGESTYLE_FANCY_RE.sub('', latex_code)
+        latex_code = _FANCYHF_CLEAR_RE.sub('', latex_code)
+        latex_code = _FANCYHDR_FIELD_RE.sub('', latex_code)
 
     # Always include xcolor for red placeholder highlights
     if "\\usepackage{xcolor}" not in preamble_block:
@@ -589,8 +844,27 @@ def _prepare_latex_document(
         if optimize_pgfplots:
             preamble_block = f"{preamble_block}\n{PGFPLOTS_OPTIMIZATION_SETTINGS}"
 
+    # ── Apply processing_settings layout options ──
+    geometry_line = _build_geometry_options(ps)
+    if geometry_line:
+        preamble_block = f"{preamble_block}\n{geometry_line}"
+
+    layout_lines = _build_layout_preamble(ps)
+    if layout_lines:
+        preamble_block = f"{preamble_block}\n{layout_lines}"
+
+    hf_lines = _build_header_footer_preamble(ps)
+    if hf_lines:
+        preamble_block = f"{preamble_block}\n{hf_lines}"
+
+    # ── Document class — use font size from processing_settings ──
+    pdf_layout = ps.get('pdf_layout') or {}
+    font_size = (pdf_layout.get('font_size') or '12pt').strip() if pdf_layout else ''
     if wrap_mode == "article":
-        document_class = "\\documentclass{article}"
+        if font_size and font_size in ('10pt', '11pt', '12pt', '14pt', '16pt'):
+            document_class = f"\\documentclass[{font_size}]{{article}}"
+        else:
+            document_class = "\\documentclass[12pt]{article}"
     else:
         document_class = "\\documentclass[varwidth]{standalone}"
 
@@ -601,6 +875,158 @@ def _prepare_latex_document(
         f"{latex_code}\n"
         "\\end{document}\n"
     )
+
+
+# ── Post-processing: apply Export Studio settings to compiled PDF ────────
+
+def _postprocess_pdf(pdf_bytes: bytes, document, processing_settings: dict, request=None) -> bytes:
+    """Apply Export Studio post-processing to a compiled PDF (from XeLaTeX or xhtml2pdf).
+
+    This mirrors what the main document exporter does after building the base PDF:
+    1. Header/footer PDF overlay (cropped regions from uploaded PDFs)
+    2. Text protection (rasterize + encrypted text)
+    3. Metadata, passwords, unprintable-area annotations via apply_pdf_layout
+
+    ``processing_settings`` is the same dict from custom_metadata.processing_settings.
+    """
+    if not _HAS_PDF_SYSTEM or not pdf_bytes:
+        return pdf_bytes
+
+    ps = processing_settings or {}
+
+    # ── Resolve processing_defaults from the document (org merge + removal strip) ──
+    proc_defaults = {}
+    if hasattr(document, 'get_processing_defaults'):
+        try:
+            proc_defaults = document.get_processing_defaults() or {}
+        except Exception:
+            proc_defaults = {}
+
+    # ── 1. Header/footer PDF overlay ─────────────────────────────────────
+    header_pdf_config = ps.get('header_pdf') or proc_defaults.get('header_pdf') or {}
+    footer_pdf_config = ps.get('footer_pdf') or proc_defaults.get('footer_pdf') or {}
+
+    if not isinstance(header_pdf_config, dict):
+        header_pdf_config = {}
+    if not isinstance(footer_pdf_config, dict):
+        footer_pdf_config = {}
+
+    header_file_id = header_pdf_config.get('file_id')
+    footer_file_id = footer_pdf_config.get('file_id')
+
+    def _parse_size(value, default=0):
+        if value is None:
+            return default
+        try:
+            raw = str(value).strip().lower()
+            if raw.endswith('mm'):
+                return float(raw[:-2]) * 2.834645669
+            if raw.endswith('pt'):
+                return float(raw[:-2])
+            if raw.endswith('px'):
+                return float(raw[:-2]) * 0.75
+            return float(raw)
+        except (ValueError, TypeError):
+            return default
+
+    header_height = _parse_size(header_pdf_config.get('height'), 0)
+    footer_height = _parse_size(header_pdf_config.get('footer_height'), 0)
+    if not footer_height and footer_pdf_config:
+        footer_height = _parse_size(footer_pdf_config.get('height'), 0)
+
+    def _resolve_overlay_path(file_id, config):
+        if not file_id:
+            return None, 0
+        try:
+            from .models import DocumentFile
+            df = DocumentFile.objects.get(id=file_id)
+            if df.file:
+                page_idx = max(int(config.get('page', 1)) - 1, 0) if config else 0
+                return df.file.path, page_idx
+        except Exception:
+            pass
+        return None, 0
+
+    _header_overlay_path, _header_page_idx = None, 0
+    _footer_overlay_path, _footer_page_idx = None, 0
+    _overlay_needed = False
+
+    if header_file_id and header_height > 0:
+        _header_overlay_path, _header_page_idx = _resolve_overlay_path(header_file_id, header_pdf_config)
+        if _header_overlay_path:
+            _overlay_needed = True
+
+    if footer_file_id and footer_height > 0:
+        _footer_overlay_path, _footer_page_idx = _resolve_overlay_path(footer_file_id, footer_pdf_config)
+        if _footer_overlay_path:
+            _overlay_needed = True
+
+    # Fallback: footer from same header_pdf file
+    if not _footer_overlay_path and header_file_id and footer_height > 0:
+        _footer_overlay_path = _header_overlay_path
+        _footer_page_idx = _header_page_idx
+
+    if _overlay_needed:
+        try:
+            pdf_bytes = _overlay_header_footer_pdf(
+                pdf_bytes,
+                header_pdf_path=_header_overlay_path,
+                footer_pdf_path=_footer_overlay_path,
+                header_height_pts=header_height,
+                footer_height_pts=footer_height,
+                header_page_index=_header_page_idx,
+                footer_page_index=_footer_page_idx,
+                header_config=header_pdf_config,
+                footer_config=footer_pdf_config,
+            )
+        except Exception:
+            pass  # graceful fallback — return PDF without overlay
+
+    # ── 2. Text protection (rasterize) ───────────────────────────────────
+    text_prot = ps.get('pdf_text_protection') or proc_defaults.get('pdf_text_protection') or {}
+    if isinstance(text_prot, dict) and text_prot.get('enabled'):
+        mode = text_prot.get('mode', 'rasterize')
+        if mode == 'rasterize' and fitz is not None:
+            try:
+                raster_dpi = int(text_prot.get('dpi') or 200)
+                pdf_bytes = _rasterize_pdf_bytes(pdf_bytes, raster_dpi)
+            except Exception:
+                pass
+
+    # ── 3. Metadata, passwords, unprintable area ─────────────────────────
+    pdf_layout = ps.get('pdf_layout') or proc_defaults.get('pdf_layout') or {}
+    options = PDFLayoutOptions(
+        page_size=pdf_layout.get('page_size', 'a4'),
+        font_family=pdf_layout.get('font_family', 'serif'),
+        font_size=pdf_layout.get('font_size', '12pt'),
+        line_spacing=pdf_layout.get('line_spacing', '1.5'),
+        margin_size=pdf_layout.get('margin_size', 'normal'),
+        image_size=pdf_layout.get('image_size', 'medium'),
+        caption_alignment=pdf_layout.get('caption_alignment', 'center'),
+        show_unprintable_area=bool(pdf_layout.get('show_unprintable_area', False)),
+        unprintable_area=pdf_layout.get('unprintable_area', 'standard'),
+    )
+
+    # PDF passwords
+    pdf_security = ps.get('pdf_security') or proc_defaults.get('pdf_security') or {}
+    passwords = {}
+    if isinstance(pdf_security, dict):
+        passwords = {
+            'user_password': pdf_security.get('user_password') or None,
+            'owner_password': pdf_security.get('owner_password') or None,
+        }
+
+    try:
+        pdf_bytes = apply_pdf_layout(
+            pdf_bytes,
+            options,
+            document,
+            passwords if any(passwords.values()) else None,
+        )
+    except Exception:
+        pass  # graceful fallback
+
+    return pdf_bytes
 
 
 class LatexRenderView(APIView):
@@ -661,6 +1087,24 @@ class LatexRenderView(APIView):
         uses_pgfplots = "\\begin{axis}" in latex_code
         can_optimize = "\\begin{document}" not in latex_code and uses_pgfplots
 
+        # ── Processing settings (margins, headers, footers, layout) ──
+        req_processing = request.data.get("processing_settings") or {}
+        # Fall back to the document's own saved processing_settings if none provided
+        if not req_processing:
+            cm = document.custom_metadata if isinstance(document.custom_metadata, dict) else {}
+            req_processing = cm.get('processing_settings') or {}
+
+        # If processing settings specify any page/layout/header/footer config
+        # or the document already has header/footer templates assigned, force
+        # article wrap mode so packages like geometry and fancyhdr behave
+        # correctly (standalone doesn't play well with those packages).
+        has_pdf_layout = bool(req_processing.get('pdf_layout'))
+        has_header_footer = bool(req_processing.get('header_footer'))
+        has_header_pdf = bool(req_processing.get('header_pdf'))
+        has_footer_pdf = bool(req_processing.get('footer_pdf'))
+        if has_pdf_layout or has_header_footer or has_header_pdf or has_footer_pdf or getattr(document, 'header_template_id', None) or getattr(document, 'footer_template_id', None):
+            wrap_mode = 'article'
+
         with tempfile.TemporaryDirectory() as tmp_dir:
             tmp_dir_path = Path(tmp_dir)
 
@@ -689,6 +1133,7 @@ class LatexRenderView(APIView):
                 preamble,
                 wrap_mode,
                 optimize_pgfplots=bool(optimize_graphs) if optimize_graphs is not None else False,
+                processing_settings=req_processing,
             )
             result = run_xelatex(document_text)
             optimization_applied = bool(optimize_graphs) if optimize_graphs is not None else False
@@ -705,6 +1150,7 @@ class LatexRenderView(APIView):
                         preamble,
                         wrap_mode,
                         optimize_pgfplots=True,
+                        processing_settings=req_processing,
                     )
                     result = run_xelatex(document_text)
                     optimization_applied = True
@@ -732,6 +1178,12 @@ class LatexRenderView(APIView):
                 )
 
             pdf_bytes = pdf_path.read_bytes()
+
+            # ── Post-process: apply Export Studio settings (header/footer
+            #    PDF overlays, watermarks, metadata, passwords, text
+            #    protection) — same pipeline the main document editor uses.
+            pdf_bytes = _postprocess_pdf(pdf_bytes, document, req_processing, request)
+
             pdf_b64 = base64.b64encode(pdf_bytes).decode("utf-8")
 
             preview_b64 = None
@@ -894,34 +1346,170 @@ def resolve_html_metadata(html_code: str, document, extra_metadata: dict | None 
     return pattern.sub(_replace, html_code)
 
 
-_DEFAULT_HTML_WRAPPER = """<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8"/>
-<style>
-  @page {{ size: A4; margin: 2.5cm; }}
-  body {{ font-family: "Helvetica Neue", Helvetica, Arial, sans-serif; font-size: 12pt; line-height: 1.5; color: #1a1a1a; }}
-  h1 {{ font-size: 22pt; margin-bottom: 0.4em; }}
-  h2 {{ font-size: 17pt; margin-bottom: 0.3em; }}
-  h3 {{ font-size: 14pt; margin-bottom: 0.2em; }}
-  table {{ border-collapse: collapse; width: 100%; margin: 1em 0; }}
-  th, td {{ border: 1px solid #d1d5db; padding: 8px 12px; text-align: left; }}
-  th {{ background: #f3f4f6; }}
-  ul, ol {{ padding-left: 1.5em; }}
-</style>
-</head>
-<body>
-{body}
-</body>
-</html>"""
+# ── HTML page-size and margin helpers ────────────────────────────────────
+
+_HTML_PAGE_SIZE_MAP = {
+    'a4': 'A4',
+    'a3': 'A3',
+    'a5': 'A5',
+    'letter': 'letter',
+    'legal': 'legal',
+}
+
+_HTML_MARGIN_PRESETS = {
+    'narrow': '1.27cm',
+    'normal': '2.5cm',
+    'wide':   '3.18cm',
+    'none':   '0cm',
+}
+
+_HTML_FONT_FAMILY_MAP = {
+    'serif':     '"Georgia", "Times New Roman", Times, serif',
+    'sans':      '"Helvetica Neue", Helvetica, Arial, sans-serif',
+    'monospace': '"Courier New", Courier, monospace',
+}
+
+_HTML_LINE_SPACING_MAP = {
+    '1':    '1.2',
+    '1.15': '1.38',
+    '1.5':  '1.8',
+    '2':    '2.4',
+}
 
 
-def _prepare_html_document(html_code: str) -> str:
-    """Wrap a fragment in a full HTML document if needed."""
-    lower = html_code.strip().lower()
-    if lower.startswith('<!doctype') or lower.startswith('<html'):
+def _build_html_page_style(processing_settings: dict) -> str:
+    """Build @page and body CSS from processing_settings.pdf_layout."""
+    pdf_layout = (processing_settings or {}).get('pdf_layout') or {}
+
+    page_size = _HTML_PAGE_SIZE_MAP.get((pdf_layout.get('page_size') or 'a4').lower(), 'A4')
+    margin = _HTML_MARGIN_PRESETS.get((pdf_layout.get('margin_size') or 'normal').lower(), '2.5cm')
+    font_family = _HTML_FONT_FAMILY_MAP.get((pdf_layout.get('font_family') or 'sans').lower(), '"Helvetica Neue", Helvetica, Arial, sans-serif')
+    font_size = (pdf_layout.get('font_size') or '12pt').strip() or '12pt'
+    line_height = _HTML_LINE_SPACING_MAP.get(str(pdf_layout.get('line_spacing') or '1.5').strip(), '1.5')
+
+    return (
+        f"@page {{ size: {page_size}; margin: {margin}; }}\n"
+        f"  body {{ font-family: {font_family}; font-size: {font_size}; "
+        f"line-height: {line_height}; color: #1a1a1a; }}"
+    )
+
+
+def _build_html_header_footer(processing_settings: dict) -> tuple[str, str]:
+    """Build header and footer HTML blocks from processing_settings.header_footer."""
+    hf = (processing_settings or {}).get('header_footer') or {}
+    header_parts = []
+    footer_parts = []
+
+    hl = hf.get('header_left', '')
+    hc = hf.get('header_center', '')
+    hr_ = hf.get('header_right', '')
+    fl = hf.get('footer_left', '')
+    fc = hf.get('footer_center', '')
+    fr = hf.get('footer_right', '')
+
+    if hl or hc or hr_:
+        header_parts.append(
+            '<div style="display:flex;justify-content:space-between;align-items:center;'
+            'padding:8px 0;border-bottom:1px solid #e5e7eb;margin-bottom:12px;font-size:10pt;color:#6b7280;">'
+            f'<span>{hl}</span><span>{hc}</span><span>{hr_}</span></div>'
+        )
+
+    if fl or fc or fr:
+        footer_parts.append(
+            '<div style="display:flex;justify-content:space-between;align-items:center;'
+            'padding:8px 0;border-top:1px solid #e5e7eb;margin-top:12px;font-size:10pt;color:#6b7280;">'
+            f'<span>{fl}</span><span>{fc}</span><span>{fr}</span></div>'
+        )
+
+    return '\n'.join(header_parts), '\n'.join(footer_parts)
+
+
+def _inject_processing_styles_into_html(html_code: str, processing_settings: dict) -> str:
+    """Inject Export Studio @page + body CSS into an existing full HTML document.
+
+    Inserts a ``<style>`` block just before ``</head>`` (or ``<body>`` if no
+    ``</head>``).  The injected ``@page`` and ``body`` rules use ``!important``
+    so they reliably override any inline styles already present in the HTML.
+    """
+    ps = processing_settings or {}
+    pdf_layout = ps.get('pdf_layout') or {}
+    if not pdf_layout and not ps.get('header_footer'):
+        return html_code  # nothing to inject
+
+    page_size = _HTML_PAGE_SIZE_MAP.get((pdf_layout.get('page_size') or '').lower(), '')
+    margin = _HTML_MARGIN_PRESETS.get((pdf_layout.get('margin_size') or '').lower(), '')
+    font_family = _HTML_FONT_FAMILY_MAP.get((pdf_layout.get('font_family') or '').lower(), '')
+    font_size = (pdf_layout.get('font_size') or '').strip()
+    line_height = _HTML_LINE_SPACING_MAP.get(str(pdf_layout.get('line_spacing') or '').strip(), '')
+
+    parts = []
+    # @page rule
+    page_parts = []
+    if page_size:
+        page_parts.append(f'size: {page_size} !important')
+    if margin:
+        page_parts.append(f'margin: {margin} !important')
+    if page_parts:
+        parts.append(f"@page {{ {'; '.join(page_parts)}; }}")
+
+    # body rule
+    body_parts = []
+    if font_family:
+        body_parts.append(f'font-family: {font_family} !important')
+    if font_size:
+        body_parts.append(f'font-size: {font_size} !important')
+    if line_height:
+        body_parts.append(f'line-height: {line_height} !important')
+    if body_parts:
+        parts.append(f"body {{ {'; '.join(body_parts)}; }}")
+
+    if not parts:
         return html_code
-    return _DEFAULT_HTML_WRAPPER.format(body=html_code)
+
+    style_block = '<style data-export-studio>\n' + '\n'.join(parts) + '\n</style>\n'
+
+    # Insert before </head> if present, otherwise before <body>
+    import re as _re
+    head_end = _re.search(r'</head\s*>', html_code, _re.IGNORECASE)
+    if head_end:
+        return html_code[:head_end.start()] + style_block + html_code[head_end.start():]
+
+    body_start = _re.search(r'<body[^>]*>', html_code, _re.IGNORECASE)
+    if body_start:
+        return html_code[:body_start.start()] + style_block + html_code[body_start.start():]
+
+    # Last resort — prepend
+    return style_block + html_code
+
+
+def _prepare_html_document(html_code: str, processing_settings: dict | None = None) -> str:
+    """Wrap a fragment in a full HTML document if needed, applying processing_settings."""
+    ps = processing_settings or {}
+    lower = html_code.strip().lower()
+
+    if lower.startswith('<!doctype') or lower.startswith('<html'):
+        # Already a full document — inject Export Studio styles into existing <head>
+        return _inject_processing_styles_into_html(html_code, ps)
+
+    page_style = _build_html_page_style(ps)
+    header_html, footer_html = _build_html_header_footer(ps)
+
+    return (
+        '<!DOCTYPE html>\n<html lang="en">\n<head>\n<meta charset="UTF-8"/>\n<style>\n'
+        f'  {page_style}\n'
+        '  h1 { font-size: 22pt; margin-bottom: 0.4em; }\n'
+        '  h2 { font-size: 17pt; margin-bottom: 0.3em; }\n'
+        '  h3 { font-size: 14pt; margin-bottom: 0.2em; }\n'
+        '  table { border-collapse: collapse; width: 100%; margin: 1em 0; }\n'
+        '  th, td { border: 1px solid #d1d5db; padding: 8px 12px; text-align: left; }\n'
+        '  th { background: #f3f4f6; }\n'
+        '  ul, ol { padding-left: 1.5em; }\n'
+        '</style>\n</head>\n<body>\n'
+        f'{header_html}\n'
+        f'{html_code}\n'
+        f'{footer_html}\n'
+        '</body>\n</html>'
+    )
 
 
 class HtmlRenderView(APIView):
@@ -976,8 +1564,14 @@ class HtmlRenderView(APIView):
         # Resolve [[placeholder]] metadata
         html_code = resolve_html_metadata(str(html_code), document, extra_metadata)
 
-        # Wrap fragment in full document if necessary
-        html_code = _prepare_html_document(html_code)
+        # ── Processing settings (margins, headers, footers, layout) ──
+        req_processing = request.data.get("processing_settings") or {}
+        if not req_processing:
+            cm = document.custom_metadata if isinstance(document.custom_metadata, dict) else {}
+            req_processing = cm.get('processing_settings') or {}
+
+        # Wrap fragment in full document if necessary (with processing_settings applied)
+        html_code = _prepare_html_document(html_code, processing_settings=req_processing)
 
         # ── HTML → PDF via xhtml2pdf ──────────────────────────────────
         pdf_buffer = io.BytesIO()
@@ -994,6 +1588,12 @@ class HtmlRenderView(APIView):
             )
 
         pdf_bytes = pdf_buffer.getvalue()
+
+        # ── Post-process: apply Export Studio settings (header/footer
+        #    PDF overlays, watermarks, metadata, passwords, text
+        #    protection) — same pipeline the main document editor uses.
+        pdf_bytes = _postprocess_pdf(pdf_bytes, document, req_processing, request)
+
         pdf_b64 = base64.b64encode(pdf_bytes).decode("utf-8")
 
         # ── PDF → PNG preview via PyMuPDF ─────────────────────────────

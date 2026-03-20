@@ -2,6 +2,211 @@ from django.db import models
 from django.contrib.auth.models import User
 from django.core.validators import EmailValidator
 import uuid
+import copy
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Domain Feature Registry
+# ──────────────────────────────────────────────────────────────────────
+
+DOMAIN_CHOICES = [
+    ('default', 'Default (All Features)'),
+    ('procurement', 'Procurement'),
+    ('legal', 'Legal'),
+    ('finance', 'Finance & Banking'),
+    ('healthcare', 'Healthcare'),
+    ('real_estate', 'Real Estate'),
+    ('insurance', 'Insurance'),
+    ('technology', 'Technology'),
+    ('education', 'Education'),
+    ('government', 'Government'),
+    ('consulting', 'Consulting'),
+]
+
+# Master feature schema — every flag that exists in the system.
+# True = enabled by default when no domain profile overrides it.
+ALL_FEATURES = {
+    'apps': {
+        'documents':      True,
+        'clm':            True,
+        'dms':            True,
+        'fileshare':      True,
+        'viewer':         True,
+        'communications': True,
+        'aiservices':     True,
+        'sharing':        True,
+        'workflows':      True,
+    },
+    'editor': {
+        'ai_chat':              True,
+        'ai_scoring':           True,
+        'ai_rewrite':           True,
+        'ai_paragraph_analyze': True,
+        'tables':               True,
+        'latex':                True,
+        'images':               True,
+        'file_components':      True,
+        'section_references':   True,
+        'branching':            True,
+        'quick_latex':          True,
+        'header_footer_pdf':    True,
+        'header_footer_text':   True,
+        'export_pdf':           True,
+        'change_tracking':      True,
+        'comments':             True,
+        'approval_workflow':    True,
+    },
+    'dashboard': {
+        'workflow_stats': True,
+        'clm_stats':     True,
+        'recent_docs':   True,
+        'team_activity':  True,
+        'ai_insights':    True,
+    },
+}
+
+# Per-domain default overrides — only list the flags that differ from
+# ALL_FEATURES.  Missing keys inherit the master defaults.
+DOMAIN_DEFAULTS = {
+    'procurement': {
+        # Procurement: Quick LaTeX is the PRIMARY document creation method.
+        # CLM workflows are a core feature.  Standard editor is secondary.
+        # Advanced/niche features hidden; easy features highlighted.
+        'apps': {
+            'dms':            True,   # PDF ingestion for vendor docs
+            'fileshare':      True,   # Vendor document storage
+            'viewer':         True,   # External vendor review links
+            'communications': True,   # Alerts on approvals
+        },
+        'editor': {
+            # Quick LaTeX is the primary mode — keep it on.
+            'quick_latex':          True,
+            # Standard LaTeX blocks inside standard editor — off (use quick-latex instead)
+            'latex':                False,
+            # Basic features that stay visible
+            'tables':               True,
+            'images':               True,
+            'comments':             True,
+            'export_pdf':           True,
+            'change_tracking':      True,
+            'header_footer_pdf':    True,
+            'header_footer_text':   True,
+            # CLM-related editor features
+            'approval_workflow':    True,
+            # Advanced / less relevant features hidden by default
+            'ai_chat':              True,    # AI assist for drafting
+            'ai_rewrite':           True,    # Rewrite suggestions
+            'ai_scoring':           False,   # Legal scoring — not primary
+            'ai_paragraph_analyze': False,   # Deep legal analysis — not primary
+            'branching':            False,   # Document branching — advanced
+            'section_references':   False,   # Cross-references — advanced
+            'file_components':      False,   # Embedded files — advanced
+        },
+        'dashboard': {
+            'workflow_stats': True,
+            'clm_stats':     True,
+            'recent_docs':   True,
+            'team_activity':  True,
+            'ai_insights':    False,  # Legal AI insights — not primary
+        },
+    },
+    'legal': {
+        # Legal firms get everything — the core use-case.
+    },
+    'finance': {
+        'editor': {
+            'latex': False,
+            'quick_latex': False,
+        },
+    },
+    'healthcare': {
+        'apps': {
+            'clm': False,
+        },
+        'editor': {
+            'latex': False,
+            'quick_latex': False,
+        },
+        'dashboard': {
+            'clm_stats': False,
+        },
+    },
+    'real_estate': {
+        'editor': {
+            'latex': False,
+            'quick_latex': False,
+            'ai_scoring': False,
+        },
+        'dashboard': {
+            'clm_stats': False,
+        },
+    },
+    'insurance': {
+        'editor': {
+            'latex': False,
+            'quick_latex': False,
+        },
+    },
+    'technology': {
+        # Tech companies get everything.
+    },
+    'education': {
+        'apps': {
+            'clm': False,
+        },
+        'editor': {
+            'branching': False,
+        },
+        'dashboard': {
+            'clm_stats': False,
+        },
+    },
+    'government': {
+        'editor': {
+            'latex': False,
+            'quick_latex': False,
+        },
+    },
+    'consulting': {
+        # Consulting firms get everything.
+    },
+    'default': {
+        # Default — everything enabled, the actual system without any domain-specific config.
+    },
+}
+
+
+def get_domain_feature_defaults(domain: str) -> dict:
+    """
+    Return the full feature-flag dict for *domain* by deep-merging
+    DOMAIN_DEFAULTS[domain] on top of ALL_FEATURES.
+    """
+    base = copy.deepcopy(ALL_FEATURES)
+    overrides = DOMAIN_DEFAULTS.get(domain, {})
+    for category, flags in overrides.items():
+        if category in base:
+            base[category].update(flags)
+    return base
+
+
+def resolve_feature_flags(domain: str, overrides: dict | None = None) -> dict:
+    """
+    Resolve the final feature flags for an organisation.
+
+    1. Start with domain defaults.
+    2. Deep-merge organisation-level overrides (if any).
+    3. Strip any ``__removed__`` sentinel values.
+    """
+    result = get_domain_feature_defaults(domain)
+    if overrides:
+        for category, flags in overrides.items():
+            if category in result and isinstance(flags, dict):
+                for key, value in flags.items():
+                    if value == '__removed__':
+                        # Revert to domain default — just skip.
+                        continue
+                    result[category][key] = value
+    return result
 
 
 class Organization(models.Model):
@@ -21,6 +226,19 @@ class Organization(models.Model):
         ('individual', 'Individual/Sole Practitioner'),
         ('other', 'Other'),
     ], default='corporation')
+    
+    # Domain — controls which features / editor tools are available.
+    domain = models.CharField(
+        max_length=50,
+        choices=DOMAIN_CHOICES,
+        default='default',
+        help_text="Industry domain — determines default feature flags",
+    )
+    feature_overrides = models.JSONField(
+        default=dict,
+        blank=True,
+        help_text="Per-org overrides on top of domain defaults. Use __removed__ to revert a flag.",
+    )
     
     # Contact Information
     email = models.EmailField(validators=[EmailValidator()], null=True, blank=True)
@@ -75,6 +293,21 @@ class Organization(models.Model):
     def get_active_users_count(self):
         """Get count of active users in this organization."""
         return self.user_profiles.filter(is_active=True).count()
+
+    def get_feature_flags(self) -> dict:
+        """Return the resolved feature flags for this organisation."""
+        return resolve_feature_flags(self.domain, self.feature_overrides)
+
+    def is_feature_enabled(self, category: str, feature: str) -> bool:
+        """Check if a specific feature is enabled.
+
+        Usage::
+
+            org.is_feature_enabled('apps', 'clm')
+            org.is_feature_enabled('editor', 'latex')
+        """
+        flags = self.get_feature_flags()
+        return flags.get(category, {}).get(feature, False)
 
 
 class Role(models.Model):

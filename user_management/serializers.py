@@ -8,6 +8,10 @@ from .models import (
     InvitationToken,
     OrganizationDocumentSettings,
     UserDocumentSettings,
+    DOMAIN_CHOICES,
+    ALL_FEATURES,
+    DOMAIN_DEFAULTS,
+    get_domain_feature_defaults,
 )
 
 
@@ -27,6 +31,7 @@ class UserSerializer(serializers.ModelSerializer):
 class OrganizationSerializer(serializers.ModelSerializer):
     """Serializer for Organization model."""
     active_users_count = serializers.SerializerMethodField()
+    feature_flags = serializers.SerializerMethodField()
     
     class Meta:
         model = Organization
@@ -36,13 +41,17 @@ class OrganizationSerializer(serializers.ModelSerializer):
     def get_active_users_count(self, obj):
         return obj.get_active_users_count()
 
+    def get_feature_flags(self, obj):
+        """Resolved feature flags (domain defaults + org overrides)."""
+        return obj.get_feature_flags()
+
 
 class OrganizationListSerializer(serializers.ModelSerializer):
     """Lightweight serializer for organization lists."""
     
     class Meta:
         model = Organization
-        fields = ['id', 'name', 'organization_type', 'subscription_plan', 'is_active', 'created_at']
+        fields = ['id', 'name', 'organization_type', 'domain', 'subscription_plan', 'is_active', 'created_at']
 
 
 class RoleSerializer(serializers.ModelSerializer):
@@ -219,3 +228,60 @@ class InvitationCreateSerializer(serializers.ModelSerializer):
         
         validated_data['token'] = token
         return super().create(validated_data)
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Domain & Feature-Flag Serializers
+# ──────────────────────────────────────────────────────────────────────
+
+class DomainChoiceSerializer(serializers.Serializer):
+    """Read-only: lists all available domains with their default feature flags."""
+    value = serializers.CharField(help_text="Internal domain key, e.g. 'legal'")
+    label = serializers.CharField(help_text="Human-readable label, e.g. 'Legal'")
+    description = serializers.CharField(help_text="Short description of the domain", required=False, default='')
+    default_features = serializers.DictField(help_text="Default feature flags for this domain")
+
+
+class DomainSettingsSerializer(serializers.Serializer):
+    """
+    For PATCH /organizations/current/domain-settings/
+    Accepts optional `domain` and/or `feature_overrides`.
+    """
+    domain = serializers.ChoiceField(choices=DOMAIN_CHOICES, required=False)
+    feature_overrides = serializers.JSONField(required=False, default=dict)
+
+    def validate_feature_overrides(self, value):
+        """Ensure overrides only contain known categories/flags."""
+        if not isinstance(value, dict):
+            raise serializers.ValidationError("feature_overrides must be a dict.")
+        for category, flags in value.items():
+            if category not in ALL_FEATURES:
+                raise serializers.ValidationError(
+                    f"Unknown feature category '{category}'. "
+                    f"Valid categories: {list(ALL_FEATURES.keys())}"
+                )
+            if not isinstance(flags, dict):
+                raise serializers.ValidationError(
+                    f"Flags for '{category}' must be a dict."
+                )
+            for flag_key, flag_val in flags.items():
+                if flag_key not in ALL_FEATURES[category]:
+                    raise serializers.ValidationError(
+                        f"Unknown flag '{flag_key}' in category '{category}'. "
+                        f"Valid flags: {list(ALL_FEATURES[category].keys())}"
+                    )
+                if flag_val not in (True, False, '__removed__'):
+                    raise serializers.ValidationError(
+                        f"Flag value for '{category}.{flag_key}' must be true, false, "
+                        f"or '__removed__'."
+                    )
+        return value
+
+
+class FeatureFlagsSerializer(serializers.Serializer):
+    """Read-only: the fully-resolved feature flags for the current org."""
+    domain = serializers.CharField()
+    domain_label = serializers.CharField()
+    feature_overrides = serializers.DictField()
+    domain_defaults = serializers.DictField(help_text="Raw domain defaults before overrides", required=False, default=dict)
+    resolved = serializers.DictField(help_text="Final merged flags after domain defaults + overrides")

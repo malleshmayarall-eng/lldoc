@@ -11,6 +11,9 @@ from .models import (
     InvitationToken,
     OrganizationDocumentSettings,
     UserDocumentSettings,
+    DOMAIN_CHOICES,
+    ALL_FEATURES,
+    get_domain_feature_defaults,
 )
 from .serializers import (
     OrganizationSerializer, OrganizationListSerializer,
@@ -21,6 +24,9 @@ from .serializers import (
     UserSerializer,
     OrganizationDocumentSettingsSerializer,
     UserDocumentSettingsSerializer,
+    DomainChoiceSerializer,
+    DomainSettingsSerializer,
+    FeatureFlagsSerializer,
 )
 
 
@@ -114,6 +120,168 @@ class OrganizationViewSet(viewsets.ModelViewSet):
             'max_documents': organization.max_documents,
         }
         return Response(stats)
+
+    # ── Domain & Feature-Flag endpoints ──────────────────────────────
+
+    @action(detail=False, methods=['get'], url_path='domains')
+    def list_domains(self, request):
+        """
+        List all available domain choices with their default feature flags.
+        GET /api/organizations/domains/
+        """
+        DOMAIN_DESCRIPTIONS = {
+            'default': 'Full-featured system with all capabilities enabled. No domain-specific restrictions.',
+            'procurement': 'Purchase orders, vendor agreements, RFPs, and supply chain workflows.',
+            'legal': 'Contracts, NDAs, briefs, and legal review pipelines.',
+            'finance': 'Financial reports, compliance documents, and audit workflows.',
+            'healthcare': 'Clinical documentation, regulatory compliance, and patient records.',
+            'real_estate': 'Leases, purchase agreements, property documents, and closing workflows.',
+            'insurance': 'Policies, claims documentation, and underwriting workflows.',
+            'technology': 'Technical specs, SOWs, SLAs, and software licensing.',
+            'education': 'Curriculum documents, policies, and academic administration.',
+            'government': 'Regulatory filings, public records, and inter-agency agreements.',
+            'consulting': 'Proposals, engagement letters, and deliverable tracking.',
+        }
+        data = []
+        for value, label in DOMAIN_CHOICES:
+            data.append({
+                'value': value,
+                'label': label,
+                'description': DOMAIN_DESCRIPTIONS.get(value, f'{label} document workflows.'),
+                'default_features': get_domain_feature_defaults(value),
+            })
+        serializer = DomainChoiceSerializer(data, many=True)
+        return Response(serializer.data)
+
+    @action(detail=False, methods=['get'], url_path='feature-schema')
+    def feature_schema(self, request):
+        """
+        Return the master feature schema — every category and flag
+        that exists in the system, for building settings UIs.
+        GET /api/organizations/feature-schema/
+        """
+        return Response(ALL_FEATURES)
+
+    @action(detail=False, methods=['get', 'patch'], url_path='current/domain-settings')
+    def current_domain_settings(self, request):
+        """
+        GET  → Resolved feature flags for the current user's org.
+        PATCH → Update domain and/or feature overrides.
+
+        PATCH body:
+            {"domain": "legal"}                          — change domain
+            {"feature_overrides": {"apps": {"clm": false}}}  — override a flag
+            {"domain": "finance", "feature_overrides": {"editor": {"latex": true}}}
+        """
+        try:
+            organization = request.user.profile.organization
+        except Exception:
+            return Response({'error': 'Organization not found'},
+                            status=status.HTTP_404_NOT_FOUND)
+
+        if request.method.upper() == 'PATCH':
+            serializer = DomainSettingsSerializer(data=request.data)
+            if not serializer.is_valid():
+                return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+            validated = serializer.validated_data
+            changed = False
+
+            if 'domain' in validated:
+                organization.domain = validated['domain']
+                changed = True
+
+            if 'feature_overrides' in validated:
+                # Deep-merge new overrides into existing ones.
+                current = organization.feature_overrides or {}
+                for cat, flags in validated['feature_overrides'].items():
+                    current.setdefault(cat, {}).update(flags)
+                organization.feature_overrides = current
+                changed = True
+
+            if changed:
+                organization.save(update_fields=['domain', 'feature_overrides', 'updated_at'])
+
+            # Return the resolved state after save.
+            return self._domain_settings_response(organization)
+
+        return self._domain_settings_response(organization)
+
+    @action(detail=False, methods=['post'], url_path='current/reset-feature-overrides')
+    def reset_feature_overrides(self, request):
+        """
+        Reset all feature overrides back to domain defaults.
+        POST /api/organizations/current/reset-feature-overrides/
+        """
+        try:
+            organization = request.user.profile.organization
+        except Exception:
+            return Response({'error': 'Organization not found'},
+                            status=status.HTTP_404_NOT_FOUND)
+
+        organization.feature_overrides = {}
+        organization.save(update_fields=['feature_overrides', 'updated_at'])
+        return self._domain_settings_response(organization)
+
+    @action(detail=False, methods=['get'], url_path='current/feature-flags')
+    def current_feature_flags(self, request):
+        """
+        Lightweight endpoint: returns *only* the resolved boolean flags.
+        Designed for the frontend to call on app bootstrap.
+        GET /api/organizations/current/feature-flags/
+        """
+        try:
+            organization = request.user.profile.organization
+        except Exception:
+            return Response({'error': 'Organization not found'},
+                            status=status.HTTP_404_NOT_FOUND)
+
+        return Response({
+            'domain': organization.domain,
+            'flags': organization.get_feature_flags(),
+        })
+
+    # ── helpers ──────────────────────────────────────────────────────
+
+    @staticmethod
+    def _domain_settings_response(organization):
+        """Build the standard domain-settings response payload."""
+        domain_label = dict(DOMAIN_CHOICES).get(organization.domain, organization.domain)
+        data = {
+            'domain': organization.domain,
+            'domain_label': domain_label,
+            'feature_overrides': organization.feature_overrides,
+            'domain_defaults': get_domain_feature_defaults(organization.domain),
+            'resolved': organization.get_feature_flags(),
+        }
+        return Response(FeatureFlagsSerializer(data).data)
+
+    @action(detail=False, methods=['get'], url_path='current/domain-config')
+    def current_domain_config(self, request):
+        """
+        Return domain-specific configuration for the current org.
+        Currently only 'procurement' has a rich config; other domains
+        return an empty dict.
+
+        GET /api/organizations/current/domain-config/
+        """
+        try:
+            organization = request.user.profile.organization
+        except Exception:
+            return Response({'error': 'Organization not found'},
+                            status=status.HTTP_404_NOT_FOUND)
+
+        if organization.domain == 'procurement':
+            from documents.procurement.domain_config import get_procurement_config
+            return Response(get_procurement_config())
+
+        return Response({
+            'domain': organization.domain,
+            'categories': [],
+            'quick_actions': [],
+            'workflow_presets': [],
+            'ui_hints': {},
+        })
 
 
 class RoleViewSet(viewsets.ModelViewSet):

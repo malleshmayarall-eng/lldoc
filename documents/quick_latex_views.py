@@ -1161,6 +1161,131 @@ class QuickLatexDocumentViewSet(viewsets.ModelViewSet):
             'document': QuickLatexDocumentSerializer(doc).data,
         })
 
+    # ── EXPORT SETTINGS ──────────────────────────────────────────────────
+
+    @action(detail=True, methods=['get', 'patch'], url_path='export-settings')
+    def export_settings(self, request, pk=None):
+        """
+        GET/PATCH /api/documents/quick-latex/<uuid>/export-settings/
+
+        Mirrors the DocumentViewSet.export_settings endpoint for quick-latex
+        documents so the frontend can use the quick-latex URL namespace.
+
+        GET  → returns current processing_settings + org defaults
+        PATCH → deep-merges incoming processing_settings into custom_metadata
+        """
+        doc = self.get_object()
+
+        def _safe_dict(value):
+            if not isinstance(value, dict):
+                return {}
+            return value
+
+        def _clean_processing_settings(ps):
+            if not isinstance(ps, dict):
+                return {}
+            return {k: v for k, v in ps.items() if v != '__removed__' and v is not None}
+
+        custom_metadata = doc.custom_metadata if isinstance(doc.custom_metadata, dict) else {}
+        processing_settings = custom_metadata.get('processing_settings')
+        if not isinstance(processing_settings, dict):
+            processing_settings = {}
+
+        if request.method.lower() == 'get':
+            org_defaults = {}
+            try:
+                from user_management.models import OrganizationDocumentSettings
+                organization = request.user.profile.organization
+                settings_obj, _ = OrganizationDocumentSettings.objects.get_or_create(
+                    organization=organization
+                )
+                preferences = settings_obj.preferences if isinstance(settings_obj.preferences, dict) else {}
+                org_defaults = preferences.get('processing_defaults') or {}
+            except Exception:
+                org_defaults = {}
+
+            # Ensure pdf_layout has defaults
+            try:
+                from exporter.pdf_system import PDFLayoutOptions
+                if not isinstance(processing_settings.get('pdf_layout'), dict):
+                    processing_settings['pdf_layout'] = PDFLayoutOptions().to_metadata_dict()
+            except ImportError:
+                pass
+
+            return Response({
+                'document_id': str(doc.id),
+                'processing_settings': _clean_processing_settings(processing_settings),
+                'custom_metadata': _safe_dict(custom_metadata),
+                'organization_defaults': _safe_dict(org_defaults),
+                'header_template': str(doc.header_template_id) if doc.header_template_id else None,
+                'footer_template': str(doc.footer_template_id) if doc.footer_template_id else None,
+                'header_config': doc.header_config or {},
+                'footer_config': doc.footer_config or {},
+                'effective_header_config': doc.get_rendered_header_config() if hasattr(doc, 'get_rendered_header_config') else {},
+                'effective_footer_config': doc.get_rendered_footer_config() if hasattr(doc, 'get_rendered_footer_config') else {},
+            })
+
+        # ── PATCH ──────────────────────────────────────────────────────
+        data = request.data or {}
+        errors = {}
+
+        incoming_settings = data.get('processing_settings')
+        if incoming_settings is not None and not isinstance(incoming_settings, dict):
+            errors['processing_settings'] = 'processing_settings must be a JSON object.'
+
+        if 'header_template' in data:
+            header_template_id = data.get('header_template') or None
+            if hasattr(doc, 'set_header_template'):
+                if not doc.set_header_template(header_template_id, user=request.user):
+                    errors['header_template'] = 'Header template not found or no access.'
+
+        if 'footer_template' in data:
+            footer_template_id = data.get('footer_template') or None
+            if hasattr(doc, 'set_footer_template'):
+                if not doc.set_footer_template(footer_template_id, user=request.user):
+                    errors['footer_template'] = 'Footer template not found or no access.'
+
+        if 'header_config' in data:
+            header_config = data.get('header_config') or {}
+            if not isinstance(header_config, dict):
+                errors['header_config'] = 'Header config must be a JSON object.'
+            else:
+                doc.header_config = header_config
+
+        if 'footer_config' in data:
+            footer_config = data.get('footer_config') or {}
+            if not isinstance(footer_config, dict):
+                errors['footer_config'] = 'Footer config must be a JSON object.'
+            else:
+                doc.footer_config = footer_config
+
+        if errors:
+            return Response({'errors': errors}, status=status.HTTP_400_BAD_REQUEST)
+
+        if isinstance(incoming_settings, dict):
+            processing_settings.update(incoming_settings)
+            custom_metadata['processing_settings'] = processing_settings
+
+        doc.custom_metadata = custom_metadata
+        update_fields = ['custom_metadata', 'updated_at']
+        if 'header_config' in data:
+            update_fields.append('header_config')
+        if 'footer_config' in data:
+            update_fields.append('footer_config')
+        doc.save(update_fields=update_fields)
+
+        return Response({
+            'document_id': str(doc.id),
+            'processing_settings': _clean_processing_settings(processing_settings),
+            'custom_metadata': _safe_dict(custom_metadata),
+            'header_template': str(doc.header_template_id) if doc.header_template_id else None,
+            'footer_template': str(doc.footer_template_id) if doc.footer_template_id else None,
+            'header_config': doc.header_config or {},
+            'footer_config': doc.footer_config or {},
+            'effective_header_config': doc.get_rendered_header_config() if hasattr(doc, 'get_rendered_header_config') else {},
+            'effective_footer_config': doc.get_rendered_footer_config() if hasattr(doc, 'get_rendered_footer_config') else {},
+        })
+
     # ── AI CHAT HISTORY ──────────────────────────────────────────────────
 
     @action(detail=True, methods=['get', 'post', 'delete'], url_path='chat-history')

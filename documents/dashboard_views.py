@@ -389,6 +389,45 @@ class DashboardViewSet(viewsets.ViewSet):
                 Q(category__icontains=search_query)
             )
         
+        # Metadata filters — supports metadata_key_N / metadata_value_N / metadata_op_N
+        # Operators: eq (default), neq, lt, gt, contains
+        idx = 0
+        while True:
+            mk = request.query_params.get(f'metadata_key_{idx}')
+            mv = request.query_params.get(f'metadata_value_{idx}')
+            if mk is None or mv is None:
+                break
+            if mk.strip() and mv.strip():
+                op = request.query_params.get(f'metadata_op_{idx}', 'contains').strip()
+                key = mk.strip()
+                val = mv.strip()
+                if op == 'eq':
+                    queryset = queryset.filter(
+                        Q(**{f'document_metadata__{key}': val}) |
+                        Q(**{f'custom_metadata__{key}': val})
+                    )
+                elif op == 'neq':
+                    queryset = queryset.exclude(
+                        Q(**{f'document_metadata__{key}': val}) |
+                        Q(**{f'custom_metadata__{key}': val})
+                    )
+                elif op == 'lt':
+                    queryset = queryset.filter(
+                        Q(**{f'document_metadata__{key}__lt': val}) |
+                        Q(**{f'custom_metadata__{key}__lt': val})
+                    )
+                elif op == 'gt':
+                    queryset = queryset.filter(
+                        Q(**{f'document_metadata__{key}__gt': val}) |
+                        Q(**{f'custom_metadata__{key}__gt': val})
+                    )
+                else:  # contains (default)
+                    queryset = queryset.filter(
+                        Q(**{f'document_metadata__{key}__icontains': val}) |
+                        Q(**{f'custom_metadata__{key}__icontains': val})
+                    )
+            idx += 1
+        
         # Sorting
         sort_field = request.query_params.get('sort', 'updated_at')
         sort_order = request.query_params.get('order', 'desc')
@@ -424,6 +463,78 @@ class DashboardViewSet(viewsets.ViewSet):
             'documents': DashboardDocumentSerializer.serialize_many(documents, extras_map=extras_map),
         })
     
+    @action(detail=False, methods=['get'], url_path='metadata-keys')
+    def metadata_keys(self, request):
+        """
+        Return distinct top-level keys from document_metadata and custom_metadata
+        JSONFields across all documents accessible to the user, plus sample values
+        for each key (up to 20). This powers the metadata filter builder UI.
+
+        GET /api/dashboard/metadata-keys/
+        Returns: [{ key: "parties", sample_values: ["Acme Corp", …] }, …]
+        """
+        user = request.user
+        from django.contrib.contenttypes.models import ContentType
+        from sharing.models import Share
+        import uuid as uuid_module
+
+        # Build accessible queryset (same logic as my_documents)
+        created_docs = Document.objects.filter(created_by=user)
+        workflow_doc_ids = DocumentWorkflow.objects.filter(
+            assigned_to=user
+        ).values_list('document_id', flat=True)
+        content_type = ContentType.objects.get_for_model(Document)
+        share_doc_ids = Share.objects.filter(
+            content_type=content_type,
+            is_active=True,
+            shared_with_user=user
+        ).filter(
+            Q(expires_at__isnull=True) | Q(expires_at__gt=timezone.now())
+        ).values_list('object_id', flat=True)
+        share_doc_uuids = []
+        for obj_id in share_doc_ids:
+            try:
+                share_doc_uuids.append(uuid_module.UUID(obj_id) if isinstance(obj_id, str) else obj_id)
+            except Exception:
+                pass
+
+        qs = (
+            created_docs
+            | Document.objects.filter(id__in=workflow_doc_ids)
+            | Document.objects.filter(id__in=share_doc_uuids)
+        ).distinct()
+
+        key_values: dict[str, set] = {}
+        limit = 500
+        for doc_meta, custom_meta in qs.values_list('document_metadata', 'custom_metadata')[:limit]:
+            for meta in (doc_meta, custom_meta):
+                if not isinstance(meta, dict):
+                    continue
+                for key, val in meta.items():
+                    if key.startswith('_') or key == 'processing_settings':
+                        continue
+                    if key not in key_values:
+                        key_values[key] = set()
+                    if len(key_values[key]) >= 20:
+                        continue
+                    if isinstance(val, list):
+                        for item in val:
+                            s = str(item).strip()
+                            if s:
+                                key_values[key].add(s)
+                    elif val is not None:
+                        s = str(val).strip()
+                        if s:
+                            key_values[key].add(s)
+
+        result = []
+        for key in sorted(key_values.keys()):
+            result.append({
+                'key': key,
+                'sample_values': sorted(key_values[key])[:20],
+            })
+        return Response(result)
+
     @action(detail=False, methods=['get'], url_path='workflows')
     def workflows(self, request):
         """
@@ -768,6 +879,278 @@ class DashboardViewSet(viewsets.ViewSet):
         return Response({
             'activities': activities,
             'count': len(activities)
+        })
+
+    @action(detail=False, methods=['get'], url_path='procurement')
+    def procurement(self, request):
+        """
+        Procurement-specific dashboard endpoint.
+        Returns KPIs, workflow funnel, alerts/exceptions, document workspace data,
+        and activity feed optimized for procurement monitoring.
+
+        GET /api/documents/dashboard/procurement/
+        Query Parameters:
+        - vendor: Filter by vendor name
+        - department: Filter by department
+        - document_type: Filter by procurement document type
+        - status: Filter by status
+        - amount_min / amount_max: Amount range filter
+        - date_from / date_to: Date range
+        - expiry_days: Contracts expiring within N days (default 30)
+        - limit: Max items per section (default 20)
+        """
+        user = request.user
+        limit = int(request.query_params.get('limit', 20))
+        expiry_days = int(request.query_params.get('expiry_days', 30))
+
+        # ── Build accessible queryset ────────────────────────────────
+        from django.contrib.contenttypes.models import ContentType
+        from sharing.models import Share
+        import uuid as uuid_module
+
+        created_docs = Document.objects.filter(created_by=user)
+        workflow_doc_ids = DocumentWorkflow.objects.filter(
+            assigned_to=user
+        ).values_list('document_id', flat=True)
+        content_type = ContentType.objects.get_for_model(Document)
+        share_doc_ids = Share.objects.filter(
+            content_type=content_type, is_active=True, shared_with_user=user
+        ).filter(
+            Q(expires_at__isnull=True) | Q(expires_at__gt=timezone.now())
+        ).values_list('object_id', flat=True)
+        share_doc_uuids = []
+        for obj_id in share_doc_ids:
+            try:
+                share_doc_uuids.append(uuid_module.UUID(obj_id) if isinstance(obj_id, str) else obj_id)
+            except Exception:
+                pass
+
+        all_docs = (
+            created_docs
+            | Document.objects.filter(id__in=workflow_doc_ids)
+            | Document.objects.filter(id__in=share_doc_uuids)
+        ).select_related('created_by').distinct()
+
+        # ── Apply query param filters ────────────────────────────────
+        vendor = request.query_params.get('vendor', '').strip()
+        department = request.query_params.get('department', '').strip()
+        doc_type = request.query_params.get('document_type', '').strip()
+        doc_status = request.query_params.get('status', '').strip()
+        date_from = request.query_params.get('date_from', '').strip()
+        date_to = request.query_params.get('date_to', '').strip()
+        amount_min = request.query_params.get('amount_min', '').strip()
+        amount_max = request.query_params.get('amount_max', '').strip()
+
+        filtered = all_docs
+        if doc_type:
+            filtered = filtered.filter(document_type=doc_type)
+        if doc_status:
+            filtered = filtered.filter(status=doc_status)
+        if date_from:
+            filtered = filtered.filter(created_at__gte=date_from)
+        if date_to:
+            filtered = filtered.filter(created_at__lte=date_to)
+        if vendor:
+            filtered = filtered.filter(
+                Q(document_metadata__vendor__icontains=vendor)
+                | Q(custom_metadata__vendor__icontains=vendor)
+                | Q(title__icontains=vendor)
+            )
+        if department:
+            filtered = filtered.filter(
+                Q(document_metadata__department__icontains=department)
+                | Q(custom_metadata__department__icontains=department)
+                | Q(category__icontains=department)
+            )
+        if amount_min:
+            try:
+                filtered = filtered.filter(
+                    Q(document_metadata__amount__gte=float(amount_min))
+                    | Q(custom_metadata__amount__gte=float(amount_min))
+                )
+            except (ValueError, TypeError):
+                pass
+        if amount_max:
+            try:
+                filtered = filtered.filter(
+                    Q(document_metadata__amount__lte=float(amount_max))
+                    | Q(custom_metadata__amount__lte=float(amount_max))
+                )
+            except (ValueError, TypeError):
+                pass
+
+        # ── 1. KPI Cards ─────────────────────────────────────────────
+        total_documents = all_docs.count()
+        pending_approval = WorkflowApproval.objects.filter(
+            approver=user, status='pending', workflow__is_active=True
+        ).count()
+
+        # Contracts expiring soon — check metadata or document_metadata
+        expiry_cutoff = timezone.now() + timedelta(days=expiry_days)
+        # We estimate using updated_at for documents that are contracts
+        contracts_expiring = all_docs.filter(
+            Q(document_type__in=['vendor_agreement', 'contract', 'nda', 'amendment'])
+        ).filter(
+            Q(document_metadata__expiry_date__lte=str(expiry_cutoff.date()))
+            | Q(custom_metadata__expiry_date__lte=str(expiry_cutoff.date()))
+        ).count()
+
+        # Invoices awaiting payment
+        invoices_awaiting = all_docs.filter(
+            document_type='invoice',
+            status__in=['draft', 'under_review', 'review']
+        ).count()
+
+        # Conflicts — documents with issues or rejected approvals
+        from viewer.models import ViewerApproval
+        rejected_doc_ids = ViewerApproval.objects.filter(
+            document_id__in=all_docs.values_list('id', flat=True),
+            status='rejected'
+        ).values_list('document_id', flat=True).distinct()
+        conflicts_count = len(set(rejected_doc_ids))
+
+        # Compliance missing — documents without compliance metadata
+        compliance_missing = all_docs.filter(
+            Q(document_type__in=['vendor_agreement', 'contract', 'purchase_order'])
+        ).filter(
+            Q(document_metadata__compliance_status__isnull=True)
+            & Q(custom_metadata__compliance_status__isnull=True)
+        ).count()
+
+        kpis = {
+            'total_documents': total_documents,
+            'pending_approval': pending_approval,
+            'contracts_expiring': contracts_expiring,
+            'expiry_days': expiry_days,
+            'invoices_awaiting': invoices_awaiting,
+            'conflicts': conflicts_count,
+            'compliance_missing': compliance_missing,
+        }
+
+        # ── 2. Workflow Funnel ────────────────────────────────────────
+        status_counts = dict(
+            all_docs.values('status').annotate(count=Count('id')).values_list('status', 'count')
+        )
+        funnel = {
+            'draft': status_counts.get('draft', 0),
+            'submitted': status_counts.get('under_review', 0) + status_counts.get('review', 0),
+            'under_review': status_counts.get('analyzed', 0),
+            'approved': status_counts.get('approved', 0),
+            'completed': status_counts.get('finalized', 0) + status_counts.get('executed', 0),
+        }
+
+        # ── 3. Alerts & Exceptions ────────────────────────────────────
+        alerts = []
+
+        # Expiring contracts
+        expiring_contracts = all_docs.filter(
+            document_type__in=['vendor_agreement', 'contract', 'nda', 'amendment']
+        ).filter(
+            Q(document_metadata__expiry_date__lte=str(expiry_cutoff.date()))
+            | Q(custom_metadata__expiry_date__lte=str(expiry_cutoff.date()))
+        )[:5]
+        for doc in expiring_contracts:
+            expiry = (
+                (doc.document_metadata or {}).get('expiry_date')
+                or (doc.custom_metadata or {}).get('expiry_date', '')
+            )
+            alerts.append({
+                'severity': 'red',
+                'type': 'contract_expiry',
+                'message': f'Contract expires {expiry} — {doc.title}',
+                'document_id': str(doc.id),
+                'document_title': doc.title,
+            })
+
+        # Rejected / conflict documents
+        rejected_docs = all_docs.filter(id__in=rejected_doc_ids)[:5]
+        for doc in rejected_docs:
+            alerts.append({
+                'severity': 'red',
+                'type': 'conflict',
+                'message': f'Rejection detected — {doc.title}',
+                'document_id': str(doc.id),
+                'document_title': doc.title,
+            })
+
+        # Overdue workflows
+        overdue_workflows = DocumentWorkflow.objects.filter(
+            Q(assigned_to=user) | Q(assigned_by=user),
+            due_date__lt=timezone.now(),
+            is_completed=False,
+            is_active=True,
+        ).select_related('document')[:5]
+        for wf in overdue_workflows:
+            alerts.append({
+                'severity': 'amber',
+                'type': 'overdue',
+                'message': f'Overdue workflow — {wf.document.title}',
+                'document_id': str(wf.document.id),
+                'document_title': wf.document.title,
+            })
+
+        # ── 4. Document Workspace (paginated table) ──────────────────
+        page = int(request.query_params.get('page', 1))
+        page_size = int(request.query_params.get('page_size', limit))
+        sort_field = request.query_params.get('sort', 'updated_at')
+        sort_order = request.query_params.get('order', 'desc')
+
+        valid_sort = ['created_at', 'updated_at', 'title', 'status']
+        order_prefix = '' if sort_order == 'asc' else '-'
+        if sort_field in valid_sort:
+            filtered = filtered.order_by(f'{order_prefix}{sort_field}')
+        else:
+            filtered = filtered.order_by('-updated_at')
+
+        workspace_total = filtered.count()
+        start = (page - 1) * page_size
+        workspace_docs = filtered[start:start + page_size]
+
+        doc_ids = [d.id for d in workspace_docs]
+        extras_map = DashboardDocumentSerializer.build_extras_map(doc_ids, user=user) if doc_ids else {}
+
+        workspace = {
+            'total': workspace_total,
+            'page': page,
+            'page_size': page_size,
+            'total_pages': (workspace_total + page_size - 1) // page_size if page_size else 1,
+            'documents': DashboardDocumentSerializer.serialize_many(workspace_docs, extras_map=extras_map),
+        }
+
+        # ── 5. Activity Feed ─────────────────────────────────────────
+        activity = self._get_recent_activity(user, limit=10)
+
+        # ── 6. Filter Options (for sidebar) ──────────────────────────
+        vendor_values = set()
+        dept_values = set()
+        for meta_field in ('document_metadata', 'custom_metadata'):
+            for row in all_docs.values_list(meta_field, flat=True)[:200]:
+                if isinstance(row, dict):
+                    v = row.get('vendor', '')
+                    d = row.get('department', '')
+                    if v and isinstance(v, str):
+                        vendor_values.add(v)
+                    if d and isinstance(d, str):
+                        dept_values.add(d)
+
+        type_counts = dict(
+            all_docs.values('document_type').annotate(count=Count('id')).values_list('document_type', 'count')
+        )
+
+        filter_options = {
+            'vendors': sorted(vendor_values)[:50],
+            'departments': sorted(dept_values)[:50],
+            'document_types': type_counts,
+            'statuses': status_counts,
+        }
+
+        return Response({
+            'kpis': kpis,
+            'funnel': funnel,
+            'alerts': alerts,
+            'workspace': workspace,
+            'activity': activity,
+            'filter_options': filter_options,
         })
     
     # Helper methods
