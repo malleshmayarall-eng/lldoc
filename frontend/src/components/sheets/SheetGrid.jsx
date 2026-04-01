@@ -67,6 +67,9 @@ export default function SheetGrid({ onScrollEnd }) {
   const scrollToTarget = useSheetsStore((s) => s.scrollToTarget);
   const clearScrollTarget = useSheetsStore((s) => s.clearScrollTarget);
 
+  // AI pending changes
+  const pendingAIChanges = useSheetsStore((s) => s.pendingAIChanges);
+
   // ── Local state ────────────────────────────────────────────────────
   const [editValue, setEditValue] = useState('');
   const [contextMenu, setContextMenu] = useState(null);
@@ -127,6 +130,28 @@ export default function SheetGrid({ onScrollEnd }) {
     for (const col of columns) { if (col.formula) s.add(col.key); }
     return s;
   }, [columns]);
+
+  // Build a Set of "rowOrder_colKey" for cells with pending AI changes
+  const pendingChangeKeys = useMemo(() => {
+    const s = new Set();
+    if (pendingAIChanges?.changes) {
+      for (const ch of pendingAIChanges.changes) {
+        s.add(`${ch.row_order}_${ch.column_key}`);
+      }
+    }
+    return s;
+  }, [pendingAIChanges]);
+
+  // Build a map of pending new values for tooltip display
+  const pendingChangeMap = useMemo(() => {
+    const m = {};
+    if (pendingAIChanges?.changes) {
+      for (const ch of pendingAIChanges.changes) {
+        m[`${ch.row_order}_${ch.column_key}`] = ch.new_value;
+      }
+    }
+    return m;
+  }, [pendingAIChanges]);
 
   const isFormulaCol = useCallback((colKey) => formulaColKeys.has(colKey), [formulaColKeys]);
 
@@ -284,8 +309,14 @@ export default function SheetGrid({ onScrollEnd }) {
       if ((e.ctrlKey || e.metaKey) && e.key === 's') { e.preventDefault(); saveAllCells(); return; }
       if ((e.ctrlKey || e.metaKey) && e.key === 'z') { e.preventDefault(); undo(); return; }
       if ((e.ctrlKey || e.metaKey) && e.key === 'y') { e.preventDefault(); redo(); return; }
-      if ((e.ctrlKey || e.metaKey) && e.key === 'c') { if (!editingCell) { e.preventDefault(); copySelection(); } return; }
-      if ((e.ctrlKey || e.metaKey) && e.key === 'v') { if (!editingCell) { e.preventDefault(); pasteSelection(); } return; }
+      if ((e.ctrlKey || e.metaKey) && e.key === 'c') {
+        if (!editingCell) { e.preventDefault(); copySelection(); }
+        return;
+      }
+      if ((e.ctrlKey || e.metaKey) && e.key === 'v') {
+        if (!editingCell) { e.preventDefault(); pasteSelection(); }
+        return;
+      }
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
@@ -397,6 +428,7 @@ export default function SheetGrid({ onScrollEnd }) {
       default:
         if (e.key.length === 1 && !e.ctrlKey && !e.metaKey) {
           if (isFormulaCol(selectedCell.colKey)) break;
+          e.preventDefault();
           startEditing(selectedCell.row, selectedCell.colKey);
           setEditValue(e.key);
         }
@@ -642,6 +674,16 @@ export default function SheetGrid({ onScrollEnd }) {
           <button onClick={clearAllFilters} className="ml-auto text-amber-600 hover:text-amber-800 font-medium transition-colors">Clear all</button>
         </div>
       )}
+      {pendingAIChanges && pendingAIChanges.changes?.length > 0 && (
+        <div className="flex items-center gap-2 px-3 py-1.5 bg-purple-50 border-b border-purple-200 text-xs">
+          <span className="text-purple-600 text-sm">✦</span>
+          <span className="text-purple-700 font-medium">
+            {pendingAIChanges.changes.length} AI-proposed change{pendingAIChanges.changes.length !== 1 ? 's' : ''} highlighted
+          </span>
+          <span className="text-purple-500">{pendingAIChanges.summary || ''}</span>
+          <span className="ml-auto text-purple-500 text-[10px]">Accept or reject in the AI panel →</span>
+        </div>
+      )}
 
       <div ref={scrollContainerRef} className="flex-1 overflow-auto" onScroll={handleScroll} tabIndex={0} onKeyDown={handleCellKeyDown}>
         <div style={{ minWidth: totalWidth, position: 'relative' }}>
@@ -666,7 +708,8 @@ export default function SheetGrid({ onScrollEnd }) {
                 <div key={col.key}
                   className={'flex items-center bg-white border-b border-r border-gray-200 text-xs font-medium text-gray-600 relative select-none group/col' + (selectedCell?.col === colIdx ? ' bg-blue-50/60 text-blue-700' : '') + (columnMenu?.colIdx === colIdx ? ' bg-blue-50 ring-1 ring-blue-300 ring-inset' : '')}
                   style={{ width: getColWidth(colIdx), minWidth: 50, height: HEADER_HEIGHT }}>
-                  <button className="flex items-center gap-1 px-2 h-full flex-1 text-left min-w-0" onClick={(e) => openColumnMenu(colIdx, e)}>
+                  <button className="flex items-center gap-1 px-2 h-full flex-1 text-left min-w-0"
+                    onClick={(e) => openColumnMenu(colIdx, e)}>
                     <span className="truncate font-semibold text-[12px]">{col.label}</span>
                     {col.type !== 'text' && <span className={'text-[9px] font-medium px-1 py-0.5 rounded flex-shrink-0 ' + typeColor}>{col.type === 'formula' ? '\u0192' : col.type}</span>}
                     <ChevronDown className="h-3 w-3 text-gray-300 group-hover/col:text-gray-500 ml-auto flex-shrink-0 transition-colors" />
@@ -703,7 +746,7 @@ export default function SheetGrid({ onScrollEnd }) {
               const rowTop = visibleIdx * ROW_HEIGHT;
               return (
                 <div key={realRowIdx} className="flex absolute left-0" style={{ top: rowTop, height: ROW_HEIGHT, minWidth: totalWidth }}>
-                  <div className={'sticky left-0 z-[5] flex items-center justify-center bg-gray-50 border-b border-r border-gray-200 text-[11px] text-gray-400 font-medium select-none' + (selectedCell?.row === visibleIdx ? ' bg-blue-50 text-blue-700' : '')}
+                  <div className={'sticky left-0 z-[5] flex items-center justify-center border-b border-r border-gray-200 text-[11px] font-medium select-none' + (selectedCell?.row === visibleIdx ? ' bg-blue-50 text-blue-700' : ' bg-gray-50 text-gray-400')}
                     style={{ width: ROW_NUM_WIDTH, minWidth: ROW_NUM_WIDTH, height: ROW_HEIGHT }}
                     onContextMenu={(e) => handleContextMenu(e, visibleIdx, -1)}>
                     {realRowIdx + 1}
@@ -747,10 +790,13 @@ export default function SheetGrid({ onScrollEnd }) {
                     const showFillHandle = !isFilling && (selectedRange
                       ? (() => { const r = normalizeRange(selectedRange); return visibleIdx === r.endRow && colIdx === r.endCol; })()
                       : isSelected);
+                    const hasPendingChange = pendingChangeKeys.has(key);
+                    const pendingNewVal = hasPendingChange ? pendingChangeMap[key] : null;
                     return (
                       <div key={col.key}
-                        className={'relative border-b border-r border-gray-200 transition-colors ' + (isSelected ? 'outline outline-2 outline-blue-500 outline-offset-[-1px] z-[4]' : inRange ? 'bg-blue-50/60' : inFill ? 'bg-green-50/60 border-green-300' : 'hover:bg-blue-50/30') + (matchesSearch ? ' bg-yellow-100' : '') + (isColFormula ? ' bg-blue-50/40' : '') + (cellError ? ' bg-red-50' : '')}
+                        className={'relative border-b border-r border-gray-200 transition-colors ' + (hasPendingChange ? 'bg-purple-100/70 ring-1 ring-inset ring-purple-300 ' : '') + (isSelected ? 'outline outline-2 outline-blue-500 outline-offset-[-1px] z-[4]' : inRange ? 'bg-blue-50/60' : inFill ? 'bg-green-50/60 border-green-300' : (hasPendingChange ? '' : 'hover:bg-blue-50/30')) + (matchesSearch ? ' bg-yellow-100' : '') + (isColFormula && !hasPendingChange ? ' bg-blue-50/40' : '') + (cellError ? ' bg-red-50' : '')}
                         style={{ width: getColWidth(colIdx), minWidth: 50, height: ROW_HEIGHT }}
+                        title={hasPendingChange ? `AI: ${pendingNewVal}` : undefined}
                         onMouseDown={(e) => handleCellMouseDown(e, visibleIdx, colIdx)}
                         onMouseEnter={() => handleCellMouseEnter(visibleIdx, colIdx)}
                         onClick={() => {
@@ -779,15 +825,18 @@ export default function SheetGrid({ onScrollEnd }) {
                         }}
                         onContextMenu={(e) => handleContextMenu(e, visibleIdx, colIdx)}>
                         {isEditing && !isColFormula ? renderEditInput() : (
-                          <div className={'px-2 h-full flex items-center text-sm truncate ' + (isFormula || isColFormula ? 'text-gray-800' : 'text-gray-700') + (colType === 'number' || colType === 'currency' ? ' justify-end font-mono' : '') + (colType === 'boolean' ? ' justify-center' : '')}
+                          <div className={'px-2 h-full flex items-center text-sm truncate ' + (hasPendingChange ? 'text-purple-700 font-medium ' : '') + (isFormula || isColFormula ? 'text-gray-800' : (hasPendingChange ? '' : 'text-gray-700')) + (colType === 'number' || colType === 'currency' ? ' justify-end font-mono' : '') + (colType === 'boolean' ? ' justify-center' : '')}
                             style={{ fontSize: '13px' }}>
-                            {colType === 'boolean' ? (
+                            {hasPendingChange ? (
+                              <span className="truncate">{String(pendingNewVal)}</span>
+                            ) : colType === 'boolean' ? (
                               <span className={'inline-block w-4 h-4 rounded border ' + (['true','1','yes'].includes(String(displayVal).toLowerCase()) ? 'bg-blue-500 border-blue-500 text-white text-[10px] leading-4 text-center' : 'border-gray-300 bg-white')}>
                                 {['true','1','yes'].includes(String(displayVal).toLowerCase()) ? '\u2713' : ''}
                               </span>
                             ) : typeof displayVal === 'number' ? displayVal.toLocaleString() : String(displayVal)}
-                            {isColFormula && <span className="absolute top-0 left-0.5 text-[8px] text-blue-400 leading-none">{'\u0192'}</span>}
-                            {cellError && <span className="absolute top-0 right-0.5 text-[8px] text-red-500 leading-none cursor-help" title={cellError}>{'\u26A0'}</span>}
+                            {isColFormula && !hasPendingChange && <span className="absolute top-0 left-0.5 text-[8px] text-blue-400 leading-none">{'\u0192'}</span>}
+                            {hasPendingChange && <span className="absolute top-0 right-0.5 text-[8px] text-purple-500 leading-none">✦</span>}
+                            {cellError && !hasPendingChange && <span className="absolute top-0 right-0.5 text-[8px] text-red-500 leading-none cursor-help" title={cellError}>{'\u26A0'}</span>}
                           </div>
                         )}
                         {showFillHandle && (

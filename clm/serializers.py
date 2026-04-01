@@ -24,6 +24,7 @@ from .models import (
     WorkflowChatMessage,
     WorkflowCompilation,
     WorkflowDocument,
+    WorkflowEventTrigger,
     WorkflowNode,
     WorkflowUploadLink,
 )
@@ -161,6 +162,8 @@ class WorkflowSerializer(serializers.ModelSerializer):
     connections = NodeConnectionSerializer(many=True, read_only=True)
     document_count = serializers.SerializerMethodField()
     derived_field_count = serializers.SerializerMethodField()
+    created_by_name = serializers.SerializerMethodField()
+    event_trigger_count = serializers.SerializerMethodField()
 
     class Meta:
         model = Workflow
@@ -168,9 +171,12 @@ class WorkflowSerializer(serializers.ModelSerializer):
             'id', 'name', 'description', 'is_active',
             'extraction_template', 'canvas_state',
             'auto_execute_on_upload', 'is_live', 'live_interval',
+            'compilation_status',
             'execution_state', 'current_execution_id',
+            'workflow_settings', 'trigger_mode',
             'nodes', 'connections', 'document_count',
-            'derived_field_count',
+            'derived_field_count', 'event_trigger_count',
+            'created_by', 'created_by_name', 'team',
             'last_executed_at', 'created_at', 'updated_at',
         ]
         read_only_fields = [
@@ -185,19 +191,33 @@ class WorkflowSerializer(serializers.ModelSerializer):
     def get_derived_field_count(self, obj):
         return obj.derived_fields.count()
 
+    def get_event_trigger_count(self, obj):
+        return obj.event_triggers.count()
+
+    def get_created_by_name(self, obj):
+        if obj.created_by:
+            return obj.created_by.get_full_name() or obj.created_by.username
+        return ''
+
 
 class WorkflowListSerializer(serializers.ModelSerializer):
     """Lightweight serializer for list views."""
     node_count = serializers.SerializerMethodField()
     document_count = serializers.SerializerMethodField()
+    created_by_name = serializers.SerializerMethodField()
+    team_id = serializers.UUIDField(source='team.id', read_only=True, default=None)
+    team_name = serializers.CharField(source='team.name', read_only=True, default='')
 
     class Meta:
         model = Workflow
         fields = [
             'id', 'name', 'description', 'is_active',
             'auto_execute_on_upload', 'is_live', 'live_interval',
+            'compilation_status', 'trigger_mode',
             'execution_state', 'current_execution_id',
             'node_count', 'document_count',
+            'created_by', 'created_by_name',
+            'team_id', 'team_name',
             'last_executed_at', 'created_at', 'updated_at',
         ]
 
@@ -206,6 +226,11 @@ class WorkflowListSerializer(serializers.ModelSerializer):
 
     def get_document_count(self, obj):
         return obj.documents.count()
+
+    def get_created_by_name(self, obj):
+        if obj.created_by:
+            return obj.created_by.get_full_name() or obj.created_by.username
+        return ''
 
 
 # ---------------------------------------------------------------------------
@@ -279,7 +304,7 @@ class TextExtractionRequestSerializer(serializers.Serializer):
         help_text='The raw text to extract metadata from.',
     )
     template = serializers.JSONField(
-        help_text='NuExtract template: {"field_name": "", ...}',
+        help_text='Extraction template: {"field_name": "", ...}',
     )
 
 
@@ -685,7 +710,7 @@ class WorkflowExecutionDetailSerializer(serializers.ModelSerializer):
             'id', 'workflow', 'status', 'mode',
             'total_documents', 'included_document_ids',
             'excluded_document_ids', 'output_document_ids',
-            'result_data', 'node_summary', 'duration_ms',
+            'result_data', 'config_snapshot', 'node_summary', 'duration_ms',
             'started_at', 'completed_at',
             'triggered_by', 'triggered_by_name',
         ]
@@ -783,7 +808,7 @@ class WorkflowChatMessageSerializer(serializers.ModelSerializer):
 class WorkflowChatSendSerializer(serializers.Serializer):
     """Input serializer for sending a chat message."""
     message = serializers.CharField(max_length=4000)
-    model = serializers.CharField(max_length=100, required=False, default='gemini-2.0-flash')
+    model = serializers.CharField(max_length=100, required=False, default='gemini-2.5-flash')
 
 
 # ---------------------------------------------------------------------------
@@ -1021,4 +1046,45 @@ class WorkflowCompilationSerializer(serializers.ModelSerializer):
     def get_compiled_by_name(self, obj):
         if obj.compiled_by:
             return obj.compiled_by.get_full_name() or obj.compiled_by.username
+        return None
+
+
+# ---------------------------------------------------------------------------
+# WorkflowEventTrigger — event-based workflow triggers
+# ---------------------------------------------------------------------------
+
+class WorkflowEventTriggerSerializer(serializers.ModelSerializer):
+    created_by_name = serializers.SerializerMethodField()
+    trigger_type_display = serializers.CharField(
+        source='get_trigger_type_display', read_only=True,
+    )
+    webhook_url = serializers.SerializerMethodField()
+
+    class Meta:
+        model = WorkflowEventTrigger
+        fields = [
+            'id', 'workflow', 'name', 'trigger_type', 'trigger_type_display',
+            'is_active', 'config',
+            'webhook_token', 'webhook_secret', 'webhook_url',
+            'next_run_at', 'last_triggered_at',
+            'total_triggers', 'total_executions',
+            'consecutive_failures', 'last_error',
+            'created_by', 'created_by_name',
+            'created_at', 'updated_at',
+        ]
+        read_only_fields = [
+            'id', 'webhook_token', 'webhook_url',
+            'last_triggered_at', 'total_triggers', 'total_executions',
+            'consecutive_failures', 'last_error',
+            'created_at', 'updated_at',
+        ]
+
+    def get_created_by_name(self, obj):
+        if obj.created_by:
+            return obj.created_by.get_full_name() or obj.created_by.username
+        return None
+
+    def get_webhook_url(self, obj):
+        if obj.trigger_type == 'webhook' and obj.webhook_token:
+            return f'/api/clm/triggers/{obj.webhook_token}/'
         return None

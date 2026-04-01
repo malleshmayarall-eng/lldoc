@@ -11,7 +11,6 @@ import os
 import re
 import uuid
 import logging
-import threading
 from django.db import models as db_models, transaction, connection
 from .analytics import build_analytics_report as full_sheet_analytics
 from .analytics import extract_sheet_data
@@ -36,6 +35,7 @@ from .serializers import (
     SheetCellSerializer,
     BulkCellUpdateSerializer,
     AIGenerateSheetSerializer,
+    AIEditSheetSerializer,
     ImportWorkflowDataSerializer,
     ImportDocumentTableSerializer,
     ImportLatexTableSerializer,
@@ -53,148 +53,95 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# Helper: flush debounced cells (called from background thread or manual flush)
+# Helper: per-row workflow triggering with hash-based change tracking
 # ---------------------------------------------------------------------------
 
-def _flush_debounced_cells(sheet, cells_data: list, user_id=None):
+def _trigger_workflows_for_changed_rows(sheet, changed_rows, row_map, user=None):
     """
-    Applies a batch of cell changes to a sheet with row-hash change
-    detection and fires the CLM event only for rows that actually changed.
+    For every changed row, find subscribed workflows and trigger execution.
 
-    This is the shared "save" logic used by both the delayed debounce
-    flush and the immediate debounce-flush endpoint.
+    Each row is treated as a form-data record.  On success the
+    ``RowExecutionTracker`` is updated with the current row_hash so
+    subsequent saves with the same data are no-ops.  On failure the
+    tracker records the error — the ``reconcile-pending`` endpoint
+    can later pick up unprocessed rows.
+
+    Also fires a batch ``handle_sheet_update`` event for backward
+    compatibility with existing CLM event subscriptions.
     """
-    import hashlib
+    from .models import RowExecutionTracker
+    from clm.event_system import handle_sheet_update, dispatch_event
+    from clm.models import EventSubscription, WorkflowExecution
 
-    formula_col_keys = {
-        c['key'] for c in (sheet.columns or []) if c.get('formula')
-    }
+    # Find all live workflows subscribed to this sheet
+    subscriptions = EventSubscription.objects.filter(
+        source_type='sheet',
+        source_id=str(sheet.pk),
+        status='active',
+        workflow__is_active=True,
+        workflow__is_live=True,
+        workflow__compilation_status='compiled',
+    ).select_related('workflow')
 
-    changed_rows = []
+    if not subscriptions.exists():
+        return
 
-    with transaction.atomic():
-        existing_orders = set(sheet.rows.values_list('order', flat=True))
-        new_rows = []
-        for cell_data in cells_data:
-            order = cell_data.get('row_order')
-            if order is not None and order not in existing_orders:
-                new_rows.append(SheetRow(sheet=sheet, order=order))
-                existing_orders.add(order)
-        if new_rows:
-            SheetRow.objects.bulk_create(new_rows, ignore_conflicts=True)
+    for sub in subscriptions:
+        workflow = sub.workflow
 
-        row_map = {r.order: r for r in sheet.rows.all()}
-        col_type_map = sheet.get_col_type_map()
-
-        existing_cells = {
-            (c.row_id, c.column_key): c
-            for c in SheetCell.objects.filter(row__sheet=sheet)
-                .only('id', 'row_id', 'column_key', 'raw_value',
-                      'formula', 'value_type', 'metadata', 'computed_value')
-        }
-
-        cells_to_update = []
-        cells_to_create = []
-
-        for cell_data in cells_data:
-            col_key = cell_data.get('column_key', '')
-            if col_key in formula_col_keys:
-                continue
-            row = row_map.get(cell_data.get('row_order'))
+        for cr in changed_rows:
+            row_id = cr['row_id']
+            row_order = cr['row_order']
+            row = row_map.get(row_order)
             if not row:
                 continue
 
-            raw_value = cell_data.get('raw_value', '')
-            is_formula = raw_value.startswith('=')
-            col_type = col_type_map.get(col_key, 'text')
-            if is_formula:
-                value_type = 'formula'
-            else:
-                _clean, value_type, err = Sheet.validate_cell_value(raw_value, col_type)
-                if err:
-                    value_type = 'error'
-
-            cell = existing_cells.get((row.id, col_key))
-            if cell:
-                cell.raw_value = raw_value
-                cell.formula = raw_value if is_formula else ''
-                cell.value_type = value_type
-                cells_to_update.append(cell)
-            else:
-                cells_to_create.append(SheetCell(
-                    row=row, column_key=col_key,
-                    raw_value=raw_value,
-                    formula=raw_value if is_formula else '',
-                    value_type=value_type,
-                ))
-
-        if cells_to_create:
-            BATCH = 400
-            for i in range(0, len(cells_to_create), BATCH):
-                SheetCell.objects.bulk_create(cells_to_create[i:i + BATCH], ignore_conflicts=True)
-        if cells_to_update:
-            BATCH = 400
-            for i in range(0, len(cells_to_update), BATCH):
-                SheetCell.objects.bulk_update(
-                    cells_to_update[i:i + BATCH],
-                    ['raw_value', 'formula', 'value_type'],
+            try:
+                # Dispatch per-row event
+                result = dispatch_event(
+                    event_type='sheet_row_saved',
+                    source_type='sheet',
+                    source_id=str(sheet.pk),
+                    payload={
+                        'sheet_id': str(sheet.pk),
+                        'row_id': str(row_id),
+                        'row_order': row_order,
+                        'row_hash': row.row_hash,
+                        'changed_data': {
+                            'changed_rows': [cr],
+                            'changed_row_orders': [row_order],
+                            'changed_row_ids': [str(row_id)],
+                            'total_changed': 1,
+                        },
+                        'updated_by': user.username if user else None,
+                    },
                 )
 
-        # Formulas
-        sheet.apply_column_formulas()
-        engine = FormulaEngine(sheet)
-        engine.evaluate_all()
+                # If dispatched successfully, update tracker
+                if result.get('dispatched', 0) > 0:
+                    exec_id = None
+                    if result.get('events'):
+                        exec_id = result['events'][0].get('execution_id')
+                    RowExecutionTracker.mark_triggered(
+                        sheet=sheet, row=row, workflow=workflow,
+                        execution_id=exec_id,
+                    )
+                else:
+                    # Dispatch returned 0 — no matching subscription or workflow not live
+                    # Still mark the hash so we don't re-trigger on identical data
+                    RowExecutionTracker.mark_triggered(
+                        sheet=sheet, row=row, workflow=workflow,
+                    )
 
-        # Sync computed_value for non-formula cells
-        non_formula = list(
-            SheetCell.objects.filter(row__sheet=sheet).exclude(raw_value__startswith='=')
-        )
-        needing_sync = [c for c in non_formula if c.computed_value != c.raw_value]
-        for c in needing_sync:
-            c.computed_value = c.raw_value
-        if needing_sync:
-            BATCH = 400
-            for i in range(0, len(needing_sync), BATCH):
-                SheetCell.objects.bulk_update(needing_sync[i:i + BATCH], ['computed_value'])
-
-        # Row-hash change detection
-        touched_orders = {cd.get('row_order') for cd in cells_data if cd.get('row_order') is not None}
-        touched_rows = [row_map[o] for o in touched_orders if o in row_map]
-        rows_to_hash_update = []
-
-        for row in touched_rows:
-            new_hash = row.compute_row_hash()
-            if new_hash != row.row_hash:
-                changed_rows.append({
-                    'row_id': str(row.id),
-                    'row_order': row.order,
-                })
-                row.row_hash = new_hash
-                rows_to_hash_update.append(row)
-
-        if rows_to_hash_update:
-            BATCH = 400
-            for i in range(0, len(rows_to_hash_update), BATCH):
-                SheetRow.objects.bulk_update(rows_to_hash_update[i:i + BATCH], ['row_hash'])
-
-    # Fire CLM event only if rows changed
-    if changed_rows:
-        try:
-            from clm.event_system import handle_sheet_update
-            handle_sheet_update(
-                sheet_id=str(sheet.pk),
-                changed_data={
-                    'changed_rows': changed_rows,
-                    'changed_row_orders': [r['row_order'] for r in changed_rows],
-                    'changed_row_ids': [r['row_id'] for r in changed_rows],
-                    'total_changed': len(changed_rows),
-                },
-                user=None,  # Background flush — no request user
-            )
-        except Exception as e:
-            logger.error(f'[debounce-flush] CLM event dispatch failed: {e}')
-
-    return {'changed_rows': len(changed_rows)}
+            except Exception as e:
+                logger.error(
+                    f'[row-trigger] Failed to trigger workflow {workflow.id} '
+                    f'for row {row_id}: {e}'
+                )
+                RowExecutionTracker.mark_failed(
+                    sheet=sheet, row=row, workflow=workflow,
+                    error_msg=str(e),
+                )
 
 
 class SheetViewSet(viewsets.ModelViewSet):
@@ -212,11 +159,11 @@ class SheetViewSet(viewsets.ModelViewSet):
         if self.action == 'list':
             return qs
 
-        # For detail views, prefetch rows + cells
+        # For detail views, prefetch rows + cells (descending so latest rows come first)
         return qs.prefetch_related(
             Prefetch(
                 'rows',
-                queryset=SheetRow.objects.order_by('order').prefetch_related('cells'),
+                queryset=SheetRow.objects.order_by('-order').prefetch_related('cells'),
             ),
         )
 
@@ -236,6 +183,85 @@ class SheetViewSet(viewsets.ModelViewSet):
             sheet.ensure_columns(sheet.col_count or 5)
         sheet.row_count = 0
         sheet.save()
+
+    def perform_update(self, serializer):
+        """Override to handle PATCH /api/sheets/<id>/ correctly.
+
+        The default ModelViewSet.perform_update works, but we add
+        guard-rails: if 'columns' is updated we sync col_count, and
+        we ensure row_count stays consistent.
+        """
+        sheet = serializer.save()
+        changed = False
+        if 'columns' in serializer.validated_data:
+            sheet.col_count = len(sheet.columns or [])
+            changed = True
+        if changed:
+            sheet.save(update_fields=['col_count', 'updated_at'])
+
+    # ── Unique columns management ───────────────────────────────────
+
+    @action(detail=True, methods=['get', 'patch'], url_path='unique-columns')
+    def unique_columns(self, request, pk=None):
+        """
+        GET  /api/sheets/<id>/unique-columns/
+        PATCH /api/sheets/<id>/unique-columns/
+        { "unique_columns": ["col_2"] }
+
+        Manage which columns form the unique key for this sheet.
+        The unique key is used by CLM workflow sheet nodes for upsert
+        logic (update-or-insert) instead of always appending rows.
+        It also prevents duplicate email sends and document creation
+        for the same entity.
+        """
+        sheet = self.get_object()
+
+        if request.method == 'GET':
+            valid_keys = {c['key'] for c in (sheet.columns or [])}
+            key_to_label = {c['key']: c.get('label', c['key']) for c in (sheet.columns or [])}
+            return Response({
+                'unique_columns': sheet.unique_columns or [],
+                'unique_column_labels': [key_to_label.get(k, k) for k in (sheet.unique_columns or [])],
+                'available_columns': [
+                    {'key': c['key'], 'label': c.get('label', c['key']), 'type': c.get('type', 'text')}
+                    for c in (sheet.columns or [])
+                    if c.get('type', 'text') != 'formula'  # formulas can't be unique keys
+                ],
+            })
+
+        # PATCH — set unique columns
+        new_unique = request.data.get('unique_columns', [])
+        if not isinstance(new_unique, list):
+            return Response({'error': 'unique_columns must be a list of column keys'},
+                            status=status.HTTP_400_BAD_REQUEST)
+
+        # Validate all keys exist in current columns
+        valid_keys = {c['key'] for c in (sheet.columns or [])}
+        invalid = [k for k in new_unique if k not in valid_keys]
+        if invalid:
+            return Response(
+                {'error': f'Invalid column keys: {", ".join(invalid)}',
+                 'valid_keys': sorted(valid_keys)},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        # Don't allow formula columns as unique keys
+        formula_keys = {c['key'] for c in (sheet.columns or []) if c.get('type') == 'formula'}
+        formula_conflict = [k for k in new_unique if k in formula_keys]
+        if formula_conflict:
+            return Response(
+                {'error': f'Formula columns cannot be unique keys: {", ".join(formula_conflict)}'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        sheet.unique_columns = new_unique
+        sheet.save(update_fields=['unique_columns', 'updated_at'])
+
+        key_to_label = {c['key']: c.get('label', c['key']) for c in (sheet.columns or [])}
+        return Response({
+            'unique_columns': sheet.unique_columns,
+            'unique_column_labels': [key_to_label.get(k, k) for k in sheet.unique_columns],
+        })
 
     # ── Bulk cell update ────────────────────────────────────────────
 
@@ -409,151 +435,138 @@ class SheetViewSet(viewsets.ModelViewSet):
         if type_errors:
             data['type_errors'] = type_errors
 
-        # ── Fire CLM event for subscribed workflows (only if rows changed) ──
+        # ── Per-row workflow execution + hash tracking ──────────────────
+        # Each changed row is treated as a form-data submission.
+        # We trigger the workflow per-row and record the hash so that
+        # even if the event/webhook fails, the stale hash will be caught
+        # by the reconcile-pending endpoint on the next check.
         if changed_rows:
-            try:
-                from clm.event_system import handle_sheet_update
-                handle_sheet_update(
-                    sheet_id=str(sheet.pk),
-                    changed_data={
-                        'changed_rows': changed_rows,
-                        'changed_row_orders': [r['row_order'] for r in changed_rows],
-                        'changed_row_ids': [r['row_id'] for r in changed_rows],
-                        'total_changed': len(changed_rows),
-                        'cells_updated': len(cells_to_update),
-                        'cells_created': len(cells_to_create),
-                    },
-                    user=request.user if request.user.is_authenticated else None,
-                )
-            except Exception:
-                pass  # CLM event dispatch is best-effort — never block sheet saves
+            _trigger_workflows_for_changed_rows(
+                sheet, changed_rows, row_map,
+                user=request.user if request.user.is_authenticated else None,
+            )
 
         return Response(data)
 
-    # ── Debounced save (buffer + flush) ─────────────────────────────
+    # ── Debounce endpoints removed ──────────────────────────────────
+    # debounce-save and debounce-flush have been removed.
+    # The frontend now uses bulk-update exclusively (save on explicit
+    # Save action).  Each saved row triggers a per-row workflow
+    # execution with hash-based change tracking.
 
-    @action(detail=True, methods=['post'], url_path='debounce-save')
-    def debounce_save(self, request, pk=None):
+    # ── Reconcile pending rows ──────────────────────────────────────
+
+    @action(detail=True, methods=['get', 'post'], url_path='reconcile-pending')
+    def reconcile_pending(self, request, pk=None):
         """
-        POST /api/sheets/<id>/debounce-save/
-        {
-            "cells": [ { "row_order": 0, "column_key": "col_0", "raw_value": "..." } ],
-            "debounce_ms": 2000
-        }
+        GET  /api/sheets/<id>/reconcile-pending/
+             → Returns rows where row_hash != last_executed_hash
+               (i.e. rows that changed but whose workflow trigger failed).
 
-        Server-side debounce: buffers cell changes in cache and flushes
-        them to the DB after `debounce_ms` of inactivity (default 2s).
-        The CLM workflow event fires **once** on flush, not on every keystroke.
+        POST /api/sheets/<id>/reconcile-pending/
+             → Re-triggers workflows for all pending rows.
 
-        How it works:
-          1. Cell changes are appended to a cache buffer keyed by sheet ID.
-          2. A timer key tracks when the next flush should happen.
-          3. If a new request arrives before the timer expires, the timer resets.
-          4. The flush happens via a background thread after debounce_ms.
-          5. The flush calls the real `bulk_update` logic with all buffered cells.
-
-        Returns immediately with { "buffered": N, "flush_at": "..." }.
+        This is the safety net: even if webhooks / CLM events fail,
+        the hash-based tracker catches the gap.  The frontend can
+        call POST periodically or on a "Sync" button click.
         """
-        from django.core.cache import cache
+        from .models import RowExecutionTracker
+        from clm.models import EventSubscription
 
         sheet = self.get_object()
-        cells_data = request.data.get('cells', [])
-        debounce_ms = int(request.data.get('debounce_ms', 2000))
-        debounce_s = debounce_ms / 1000.0
 
-        if not cells_data:
-            return Response({'error': 'No cells provided'}, status=status.HTTP_400_BAD_REQUEST)
+        # Find all workflows subscribed to this sheet
+        subscriptions = EventSubscription.objects.filter(
+            source_type='sheet',
+            source_id=str(sheet.pk),
+            status='active',
+            workflow__is_active=True,
+            workflow__is_live=True,
+            workflow__compilation_status='compiled',
+        ).select_related('workflow')
 
-        sheet_id = str(sheet.pk)
-        buffer_key = f'sheet:debounce_buffer:{sheet_id}'
-        timer_key = f'sheet:debounce_timer:{sheet_id}'
+        if not subscriptions.exists():
+            return Response({
+                'pending_rows': 0,
+                'workflows': 0,
+                'message': 'No live workflows subscribed to this sheet.',
+            })
 
-        # Append to buffer (cache-based list)
-        existing_buffer = cache.get(buffer_key) or []
-        existing_buffer.extend(cells_data)
+        all_pending = []
+        for sub in subscriptions:
+            wf = sub.workflow
+            pending_rows = RowExecutionTracker.find_pending_rows(sheet, wf)
+            for row in pending_rows:
+                all_pending.append({
+                    'row_id': str(row.id),
+                    'row_order': row.order,
+                    'row_hash': row.row_hash,
+                    'workflow_id': str(wf.id),
+                    'workflow_name': wf.name,
+                })
 
-        # Deduplicate: last write wins per (row_order, column_key)
-        seen = {}
-        for cell in existing_buffer:
-            key = (cell.get('row_order'), cell.get('column_key'))
-            seen[key] = cell
-        deduped = list(seen.values())
+        if request.method == 'GET':
+            return Response({
+                'pending_rows': len(all_pending),
+                'rows': all_pending[:100],  # Cap to avoid huge payloads
+                'workflows': subscriptions.count(),
+            })
 
-        # Store buffer with TTL = debounce + 30s safety margin
-        cache.set(buffer_key, deduped, timeout=int(debounce_s + 30))
+        # POST — re-trigger
+        triggered = 0
+        errors = []
+        for sub in subscriptions:
+            wf = sub.workflow
+            pending_rows = RowExecutionTracker.find_pending_rows(sheet, wf)
 
-        # Set/reset the flush timer
-        import time
-        flush_at = time.time() + debounce_s
-        cache.set(timer_key, flush_at, timeout=int(debounce_s + 30))
-
-        # Schedule the flush in a background thread
-        user_id = request.user.pk if request.user.is_authenticated else None
-
-        def _delayed_flush():
-            """Wait for debounce period, then flush if no newer timer."""
-            import time as _time
-            _time.sleep(debounce_s + 0.1)  # slight extra margin
-
-            # Check if the timer was reset (newer request came in)
-            current_timer = cache.get(timer_key)
-            if current_timer and current_timer > flush_at:
-                return  # A newer debounce was scheduled — let that one handle it
-
-            # Pop the buffer atomically
-            buffered_cells = cache.get(buffer_key)
-            if not buffered_cells:
-                return
-            cache.delete(buffer_key)
-            cache.delete(timer_key)
-
-            # Perform the actual save by calling bulk_update internally
-            try:
-                from sheets.models import Sheet as _Sheet
-                _sheet = _Sheet.objects.get(pk=sheet_id)
-                _flush_debounced_cells(_sheet, buffered_cells, user_id)
-            except Exception as e:
-                logger.error(f'[debounce-flush] Sheet {sheet_id} flush failed: {e}')
-
-        t = threading.Thread(target=_delayed_flush, daemon=True)
-        t.start()
-
-        return Response({
-            'buffered': len(deduped),
-            'flush_at_epoch': flush_at,
-            'debounce_ms': debounce_ms,
-        })
-
-    # ── Debounce: immediate flush ───────────────────────────────────
-
-    @action(detail=True, methods=['post'], url_path='debounce-flush')
-    def debounce_flush(self, request, pk=None):
-        """
-        POST /api/sheets/<id>/debounce-flush/
-
-        Force-flush any buffered debounce cells immediately.
-        Call this when the user navigates away or explicitly saves.
-        """
-        from django.core.cache import cache
-
-        sheet = self.get_object()
-        sheet_id = str(sheet.pk)
-        buffer_key = f'sheet:debounce_buffer:{sheet_id}'
-        timer_key = f'sheet:debounce_timer:{sheet_id}'
-
-        buffered_cells = cache.get(buffer_key)
-        if not buffered_cells:
-            return Response({'flushed': 0, 'message': 'No buffered changes.'})
-
-        cache.delete(buffer_key)
-        cache.delete(timer_key)
-
-        user_id = request.user.pk if request.user.is_authenticated else None
-        result = _flush_debounced_cells(sheet, buffered_cells, user_id)
+            for row in pending_rows:
+                try:
+                    from clm.event_system import dispatch_event
+                    result = dispatch_event(
+                        event_type='sheet_row_saved',
+                        source_type='sheet',
+                        source_id=str(sheet.pk),
+                        payload={
+                            'sheet_id': str(sheet.pk),
+                            'row_id': str(row.id),
+                            'row_order': row.order,
+                            'row_hash': row.row_hash,
+                            'reconcile': True,
+                            'changed_data': {
+                                'changed_rows': [{
+                                    'row_id': str(row.id),
+                                    'row_order': row.order,
+                                }],
+                                'changed_row_orders': [row.order],
+                                'changed_row_ids': [str(row.id)],
+                                'total_changed': 1,
+                            },
+                        },
+                    )
+                    if result.get('dispatched', 0) > 0:
+                        exec_id = None
+                        if result.get('events'):
+                            exec_id = result['events'][0].get('execution_id')
+                        RowExecutionTracker.mark_triggered(
+                            sheet=sheet, row=row, workflow=wf,
+                            execution_id=exec_id,
+                        )
+                        triggered += 1
+                except Exception as e:
+                    errors.append({
+                        'row_id': str(row.id),
+                        'workflow': wf.name,
+                        'error': str(e),
+                    })
+                    RowExecutionTracker.mark_failed(
+                        sheet=sheet, row=row, workflow=wf,
+                        error_msg=str(e),
+                    )
 
         return Response({
-            'flushed': len(buffered_cells),
-            'changed_rows': result.get('changed_rows', 0),
+            'triggered': triggered,
+            'errors': errors,
+            'total_pending': len(all_pending),
         })
 
     # ── Evaluate all formulas ───────────────────────────────────────
@@ -659,9 +672,9 @@ class SheetViewSet(viewsets.ModelViewSet):
                 _sort_val=Subquery(sort_cell_sq)
             )
             order_field = '-_sort_val' if sort_dir == 'desc' else '_sort_val'
-            all_rows = all_rows.order_by(order_field, 'order')
+            all_rows = all_rows.order_by(order_field, '-order')
         else:
-            all_rows = all_rows.order_by('order')
+            all_rows = all_rows.order_by('-order')
 
         # ── Count after filters ──────────────────────────────────
         total_rows = all_rows.count()
@@ -1460,6 +1473,304 @@ class SheetViewSet(viewsets.ModelViewSet):
             'columns': columns,
             'rows': row_data,
         }
+
+    # ── AI-assisted sheet editing (Gemini) ──────────────────────────
+
+    @action(detail=True, methods=['post'], url_path='ai-edit')
+    def ai_edit(self, request, pk=None):
+        """
+        POST /api/sheets/<id>/ai-edit/
+        { "prompt": "Fill with sample vendor data", "conversation_history": [...] }
+
+        Uses Gemini to propose cell changes on an existing sheet.
+        Returns proposed changes WITHOUT saving — frontend must approve first.
+        """
+        sheet = self.get_object()
+        serializer = AIEditSheetSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        prompt = serializer.validated_data['prompt']
+        conversation_history = serializer.validated_data.get('conversation_history', [])
+
+        try:
+            result = self._call_gemini_for_sheet_edit(sheet, prompt, conversation_history)
+            return Response(result)
+        except ValueError as e:
+            return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
+        except Exception as e:
+            logger.exception('AI edit failed for sheet %s', sheet.pk)
+            return Response(
+                {'error': f'AI processing failed: {str(e)}'},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+
+    def _call_gemini_for_sheet_edit(self, sheet, prompt, conversation_history=None):
+        """
+        Call Gemini to propose cell edits on an existing sheet.
+        Returns { changes: [...], message: str, summary: str }.
+        """
+        import requests as http_requests
+
+        api_key = os.environ.get('GEMINI_API')
+        if not api_key:
+            raise ValueError('GEMINI_API key not configured')
+
+        # Build current sheet data snapshot
+        columns = sheet.columns or []
+        col_info = [{'key': c['key'], 'label': c.get('label', c['key']), 'type': c.get('type', 'text')} for c in columns]
+
+        rows_qs = sheet.rows.prefetch_related('cells').order_by('order')
+        current_data = []
+        for row in rows_qs[:200]:  # Cap at 200 rows for prompt size
+            row_data = {'_row_order': row.order}
+            for cell in row.cells.all():
+                row_data[cell.column_key] = cell.raw_value or ''
+            current_data.append(row_data)
+
+        system_prompt = (
+            "You are a spreadsheet AI assistant. The user has an existing spreadsheet and wants to edit it.\n\n"
+            "SHEET STRUCTURE:\n"
+            f"Columns: {json.dumps(col_info)}\n"
+            f"Current row count: {sheet.row_count}\n\n"
+            "CURRENT DATA (up to 200 rows):\n"
+            f"{json.dumps(current_data, indent=1)}\n\n"
+            "INSTRUCTIONS:\n"
+            "Based on the user's request, return a JSON object with:\n"
+            "1. `changes` — array of cell changes: each object has:\n"
+            "   - `row_order` (int): 0-based row index. Use existing row orders for edits, or new sequential orders for new rows.\n"
+            "   - `column_key` (string): one of the column keys listed above.\n"
+            "   - `new_value` (string): the new cell value.\n"
+            "   - `old_value` (string): the previous value (empty string if new row/cell).\n"
+            "2. `new_columns` — (optional) array of new columns to add: each has `key`, `label`, `type`, `width`.\n"
+            "   Use keys like `col_N` where N is the next available number.\n"
+            "3. `message` — a brief message describing what was changed.\n"
+            "4. `summary` — a one-line summary of the changes (e.g., \"Filled 10 rows with vendor data\").\n\n"
+            "5. `action_required` — (optional, boolean) set to true ONLY when you need "
+            "   more information from the user before you can proceed. In that case set "
+            "   `changes` to an empty array and put your clarifying question in `message`.\n\n"
+            "RULES:\n"
+            "- Return ONLY the JSON object, no markdown fences.\n"
+            "- For 'fill' requests, generate realistic sample data.\n"
+            "- For 'edit' requests, modify only the cells that need changing.\n"
+            "- Always include `old_value` so the frontend can show a diff.\n"
+            "- Numbers should be plain strings (no currency symbols unless the column type is 'currency').\n"
+            "- Formulas start with '=' (e.g., '=B1+C1').\n"
+            "- Keep changes minimal and focused on the user's request.\n"
+            "- If the user's request is ambiguous or you need clarification, set "
+            "  `action_required` to true and ask a specific question in `message`.\n"
+        )
+
+        # Build conversation contents for multi-turn
+        contents = []
+        if conversation_history:
+            for msg in conversation_history[-10:]:  # Last 10 messages
+                role = 'user' if msg.get('role') == 'user' else 'model'
+                contents.append({
+                    'role': role,
+                    'parts': [{'text': msg.get('text', '')}],
+                })
+
+        # Add current user prompt
+        contents.append({
+            'role': 'user',
+            'parts': [
+                {'text': system_prompt},
+                {'text': f"USER REQUEST: {prompt}"},
+            ],
+        })
+
+        model = os.environ.get('GEN_MODEL', 'gemini-2.5-flash')
+        url = os.environ.get(
+            'GEN_API_URL',
+            'https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent',
+        ).format(model=model)
+
+        payload = {
+            'contents': contents,
+            'generationConfig': {
+                'temperature': 0.3,
+                'topP': 0.9,
+                'topK': 40,
+                'maxOutputTokens': 16000,
+            },
+        }
+
+        resp = http_requests.post(
+            url, params={'key': api_key},
+            headers={'Content-Type': 'application/json'},
+            json=payload, timeout=120,
+        )
+        resp.raise_for_status()
+        result = resp.json()
+
+        # Extract JSON from Gemini response
+        candidates = result.get('candidates', [])
+        for c in candidates:
+            parts = c.get('content', {}).get('parts', [])
+            for part in parts:
+                text = part.get('text', '')
+                # Try to parse JSON (may be wrapped in ```json fences)
+                fence = re.search(r'```(?:json)?\s*(\{.*\})\s*```', text, re.DOTALL)
+                if fence:
+                    parsed = json.loads(fence.group(1))
+                    return self._validate_ai_edit_response(parsed, sheet)
+                m = re.search(r'(\{.*\})', text, re.DOTALL)
+                if m:
+                    parsed = json.loads(m.group(1))
+                    return self._validate_ai_edit_response(parsed, sheet)
+
+        raise ValueError('Could not extract JSON from AI response')
+
+    def _validate_ai_edit_response(self, data, sheet):
+        """Validate and normalize the AI response."""
+        changes = data.get('changes', [])
+        new_columns = data.get('new_columns', [])
+        message = data.get('message', 'AI suggested changes')
+        summary = data.get('summary', f'{len(changes)} cell(s) changed')
+        action_required = bool(data.get('action_required', False))
+
+        valid_col_keys = {c['key'] for c in (sheet.columns or [])}
+        # Also accept new column keys
+        for nc in new_columns:
+            valid_col_keys.add(nc.get('key', ''))
+
+        validated_changes = []
+        for ch in changes:
+            if not isinstance(ch, dict):
+                continue
+            row_order = ch.get('row_order')
+            col_key = ch.get('column_key', '')
+            if row_order is None or col_key not in valid_col_keys:
+                continue
+            validated_changes.append({
+                'row_order': int(row_order),
+                'column_key': col_key,
+                'new_value': str(ch.get('new_value', '')),
+                'old_value': str(ch.get('old_value', '')),
+            })
+
+        # If AI returned zero changes without explicitly setting
+        # action_required, treat it as needing user clarification.
+        if not validated_changes and not new_columns and not action_required:
+            action_required = True
+            if message == 'AI suggested changes':
+                message = "I wasn't sure what to change. Could you provide more details about what you'd like me to do?"
+
+        result = {
+            'changes': validated_changes,
+            'new_columns': new_columns,
+            'message': message,
+            'summary': summary,
+        }
+        if action_required:
+            result['action_required'] = True
+        return result
+
+    @action(detail=True, methods=['post'], url_path='ai-apply')
+    def ai_apply(self, request, pk=None):
+        """
+        POST /api/sheets/<id>/ai-apply/
+        { "changes": [...], "new_columns": [...] }
+
+        Apply approved AI changes to the sheet (bulk-update wrapper).
+        """
+        sheet = self.get_object()
+        changes = request.data.get('changes', [])
+        new_columns = request.data.get('new_columns', [])
+
+        if not changes and not new_columns:
+            return Response({'error': 'No changes to apply'}, status=status.HTTP_400_BAD_REQUEST)
+
+        with transaction.atomic():
+            # Add new columns if any
+            if new_columns:
+                cols = list(sheet.columns or [])
+                existing_keys = {c['key'] for c in cols}
+                for nc in new_columns:
+                    if nc.get('key') and nc['key'] not in existing_keys:
+                        cols.append({
+                            'key': nc['key'],
+                            'label': nc.get('label', nc['key']),
+                            'type': nc.get('type', 'text'),
+                            'width': nc.get('width', 120),
+                        })
+                        existing_keys.add(nc['key'])
+                sheet.columns = cols
+                sheet.col_count = len(cols)
+                sheet.save(update_fields=['columns', 'col_count', 'updated_at'])
+
+            # Ensure rows exist
+            existing_orders = set(sheet.rows.values_list('order', flat=True))
+            new_rows = []
+            for ch in changes:
+                order = ch.get('row_order')
+                if order is not None and order not in existing_orders:
+                    new_rows.append(SheetRow(sheet=sheet, order=order))
+                    existing_orders.add(order)
+            if new_rows:
+                SheetRow.objects.bulk_create(new_rows, ignore_conflicts=True)
+
+            # Map order -> row
+            row_map = {r.order: r for r in sheet.rows.all()}
+
+            # Prefetch existing cells
+            existing_cells = {
+                (c.row_id, c.column_key): c
+                for c in SheetCell.objects.filter(row__sheet=sheet)
+                    .only('id', 'row_id', 'column_key', 'raw_value',
+                          'formula', 'value_type', 'metadata', 'computed_value')
+            }
+
+            cells_to_update = []
+            cells_to_create = []
+
+            for ch in changes:
+                row = row_map.get(ch.get('row_order'))
+                if not row:
+                    continue
+
+                raw_value = str(ch.get('new_value', ''))
+                col_key = ch.get('column_key', '')
+                is_formula = raw_value.startswith('=')
+                value_type = 'formula' if is_formula else 'text'
+
+                cell = existing_cells.get((row.id, col_key))
+                if cell:
+                    cell.raw_value = raw_value
+                    cell.formula = raw_value if is_formula else ''
+                    cell.value_type = value_type
+                    cells_to_update.append(cell)
+                else:
+                    cells_to_create.append(SheetCell(
+                        row=row,
+                        column_key=col_key,
+                        raw_value=raw_value,
+                        formula=raw_value if is_formula else '',
+                        value_type=value_type,
+                    ))
+
+            if cells_to_create:
+                BATCH = 400
+                for i in range(0, len(cells_to_create), BATCH):
+                    SheetCell.objects.bulk_create(cells_to_create[i:i + BATCH], ignore_conflicts=True)
+            if cells_to_update:
+                BATCH = 400
+                for i in range(0, len(cells_to_update), BATCH):
+                    SheetCell.objects.bulk_update(
+                        cells_to_update[i:i + BATCH],
+                        ['raw_value', 'formula', 'value_type'],
+                    )
+
+            # Re-evaluate formulas
+            sheet.apply_column_formulas()
+            engine = FormulaEngine(sheet)
+            engine.evaluate_all()
+
+            # Update row count
+            sheet.row_count = sheet.rows.count()
+            sheet.save(update_fields=['row_count', 'updated_at'])
+
+        return Response(SheetDetailSerializer(sheet).data)
 
     # ── Import workflow data ────────────────────────────────────────
 
@@ -3398,6 +3709,7 @@ class PublicSheetFormView(APIView):
             return Response({'error': f'Form is {reason}'}, status=410)
 
         columns = link.get_form_columns()
+        output_columns = link.get_output_columns()
 
         return Response({
             'token': str(link.token),
@@ -3406,6 +3718,7 @@ class PublicSheetFormView(APIView):
             'description': link.description,
             'access_type': link.access_type,
             'columns': columns,
+            'output_columns': output_columns,
             'submission_count': link.submission_count,
             'max_submissions': link.max_submissions,
         })
@@ -3429,8 +3742,12 @@ class PublicSheetFormView(APIView):
         col_map = {c['key']: c for c in sheet.columns}
 
         # ── Validate every submitted value against its column type ──
+        # Skip formula columns — they are computed, not user-submitted
+        formula_keys = {c['key'] for c in sheet.columns if c.get('type') == 'formula' or c.get('formula')}
         errors = {}
         for col_key, value in form_data.items():
+            if col_key in formula_keys:
+                continue  # formula columns are output-only
             col_def = col_map.get(col_key)
             if not col_def:
                 continue
@@ -3507,6 +3824,11 @@ class PublicSheetFormView(APIView):
                 submitter_ip=self._get_client_ip(request),
             )
 
+            # Compute + persist row hash for change-tracking
+            new_hash = row.compute_row_hash()
+            row.row_hash = new_hash
+            row.save(update_fields=['row_hash'])
+
             # Update counters
             link.submission_count = (link.submission_count or 0) + 1
             link.save(update_fields=['submission_count', 'updated_at'])
@@ -3514,10 +3836,39 @@ class PublicSheetFormView(APIView):
             sheet.row_count = sheet.rows.count()
             sheet.save(update_fields=['row_count', 'updated_at'])
 
+        # ── Trigger per-row workflow execution for the new submission ──
+        try:
+            _trigger_workflows_for_changed_rows(
+                sheet,
+                changed_rows=[{
+                    'row_id': str(row.id),
+                    'row_order': row.order,
+                }],
+                row_map={row.order: row},
+                user=None,
+            )
+        except Exception as e:
+            logger.error(f'[form-submit] CLM workflow trigger failed: {e}')
+
+        # ── Build computed output values for formula columns ──
+        computed_outputs = {}
+        output_columns = link.get_output_columns()
+        if output_columns:
+            row.refresh_from_db()
+            for oc in output_columns:
+                cell = row.cells.filter(column_key=oc['key']).first()
+                if cell:
+                    computed_outputs[oc['key']] = {
+                        'label': oc.get('label', oc['key']),
+                        'value': cell.computed_value or cell.raw_value,
+                        'formula': oc.get('formula', ''),
+                    }
+
         return Response({
             'status': 'submitted',
             'submission_id': str(submission.id),
             'message': 'Thank you! Your response has been recorded.',
+            'computed_outputs': computed_outputs,
         }, status=status.HTTP_201_CREATED)
 
     @staticmethod

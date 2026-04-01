@@ -11,12 +11,14 @@ export function getDocumentEditorRoute(documentOrId, options = {}) {
     return `/drafter/${documentOrId}`;
   }
 
-  const documentId = documentOrId.id || documentOrId.document_id;
+  const documentId = documentOrId.id || documentOrId.document_id || documentOrId.object_id;
   if (!documentId) {
     return fallback;
   }
 
-  if (documentOrId.document_mode === 'quick_latex') {
+  const documentMode = documentOrId.document_mode || documentOrId.mode || documentOrId.documentMode;
+
+  if (documentMode === 'quick_latex') {
     return `${QUICK_LATEX_ROUTE}?document=${documentId}`;
   }
 

@@ -23,7 +23,7 @@ import {
   AlertCircle,
   Trash2,
 } from 'lucide-react';
-import quickLatexService from '../../services/quickLatexService';
+import attachmentService from '../../services/attachmentService';
 import { fixImageUrl } from '../../utils/imageUtils';
 
 /* ── Image type options ───────────────────────────────────────────── */
@@ -76,11 +76,19 @@ const QuickLatexImageSidebar = ({
     setLoading(true);
     setError(null);
     try {
-      const params = { include_public: true };
+      const params = { file_kind: 'image' };
       if (search.trim()) params.search = search.trim();
-      if (type) params.type = type;
-      const data = await quickLatexService.getImages(documentId, params);
-      setImages(data.images || []);
+      if (type) params.image_type = type;
+      const response = await attachmentService.list(params);
+      const list = Array.isArray(response) ? response : response?.results || [];
+      // Normalise to the shape the grid expects: { id, name, url, thumbnail_url, image_type, placeholder }
+      const images = list.map((a) => ({
+        ...a,
+        url: a.url || a.file,
+        thumbnail_url: a.thumbnail_url || a.url || a.file,
+        placeholder: `[[image:${a.id}]]`,
+      }));
+      setImages(images);
     } catch (err) {
       setError('Failed to load images');
       console.error('Error loading images:', err);
@@ -129,10 +137,17 @@ const QuickLatexImageSidebar = ({
     if (!documentId) return;
     setLoadingSlotImages(true);
     try {
-      const params = { include_public: true };
+      const params = { file_kind: 'image' };
       if (search.trim()) params.search = search.trim();
-      const data = await quickLatexService.getImages(documentId, params);
-      setSlotImages(data.images || []);
+      const response = await attachmentService.list(params);
+      const list = Array.isArray(response) ? response : response?.results || [];
+      const images = list.map((a) => ({
+        ...a,
+        url: a.url || a.file,
+        thumbnail_url: a.thumbnail_url || a.url || a.file,
+        placeholder: `[[image:${a.id}]]`,
+      }));
+      setSlotImages(images);
     } catch {
       // silent
     } finally {
@@ -178,20 +193,30 @@ const QuickLatexImageSidebar = ({
     setUploading(true);
     setError(null);
     try {
-      const result = await quickLatexService.uploadImage(documentId, file, {
+      const result = await attachmentService.upload(file, {
         name: file.name,
+        file_kind: 'image',
         image_type: 'picture',
+        document: documentId,
+        scope: 'document',
       });
 
-      const img = result.image;
-      if (img) {
+      // Normalise the response — attachmentService.upload returns { status, attachment } or the attachment directly
+      const attachment = result?.attachment || result;
+      if (attachment?.id) {
+        const img = {
+          ...attachment,
+          url: attachment.url || attachment.file,
+          thumbnail_url: attachment.thumbnail_url || attachment.url || attachment.file,
+          placeholder: `[[image:${attachment.id}]]`,
+        };
         // Add to local list
         setImages((prev) => [img, ...prev]);
         // Auto-insert the placeholder
         onInsertPlaceholder?.(img.placeholder);
       }
     } catch (err) {
-      setError(err.response?.data?.error || 'Upload failed');
+      setError(err.response?.data?.error || err.response?.data?.detail || 'Upload failed');
       console.error('Image upload error:', err);
     } finally {
       setUploading(false);

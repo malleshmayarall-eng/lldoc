@@ -345,7 +345,7 @@ def _eval_condition(
     Properly handles:
       - Typed coercion (number, date, boolean, list, string)
       - List fields (e.g. technical_skills: ["Python", "React"])
-      - Date strings from AI/NuExtract output
+      - Date strings from AI node output
       - Currency/suffix numbers ($50K, 1.2M)
     """
     # ── Existence operators (don't need a value) ─────────────────
@@ -442,7 +442,7 @@ def _eval_condition(
 # Per-node executors
 # ---------------------------------------------------------------------------
 
-def _execute_input_node(node: WorkflowNode, workflow: Workflow, triggered_by=None) -> list[str]:
+def _execute_input_node(node: WorkflowNode, workflow: Workflow, triggered_by=None, execution=None) -> list[str]:
     """
     Input node: returns document IDs for this workflow.
 
@@ -464,6 +464,9 @@ def _execute_input_node(node: WorkflowNode, workflow: Workflow, triggered_by=Non
       • Extraction/OCR results are cached — the source_hash dedup in
         _already_ingested() prevents re-downloading identical files, and
         completed extraction results persist across re-executions.
+      • For sheets source: only rows that actually changed (new or updated
+        content hash) are returned as output IDs — unchanged rows are
+        skipped so downstream nodes don't re-process them.
     """
     config = node.config or {}
     source_type = config.get('source_type', 'upload')
@@ -488,9 +491,13 @@ def _execute_input_node(node: WorkflowNode, workflow: Workflow, triggered_by=Non
         if _source_tags:
             stale_qs = stale_qs.filter(global_metadata___source__in=_source_tags)
         else:
-            # Old upload docs: _source='upload' or missing (legacy)
-            stale_qs = stale_qs.exclude(
-                global_metadata___source__in=_ALL_NON_UPLOAD_SOURCES
+            # Old upload docs: _source='upload' or missing (legacy).
+            # Use positive filter instead of exclude to avoid NULL-in-NOT-IN
+            # SQL pitfall on SQLite/Postgres with missing JSON keys.
+            from django.db.models import Q
+            stale_qs = stale_qs.filter(
+                Q(global_metadata___source='upload') |
+                Q(global_metadata___source__isnull=True)
             )
 
         archived_count = stale_qs.update(extraction_status='archived')
@@ -508,13 +515,10 @@ def _execute_input_node(node: WorkflowNode, workflow: Workflow, triggered_by=Non
     # Fetch fresh documents from the current source
     # ------------------------------------------------------------------
 
-    # Ensure extraction template is built (same as upload flow) so that
-    # _run_extraction inside source handlers can actually run AI extraction.
-    if not workflow.extraction_template:
-        try:
-            workflow.rebuild_extraction_template()
-        except Exception as e:
-            logger.warning(f"Could not rebuild extraction template: {e}")
+    # Track changed doc IDs for sheets source — only these will be
+    # returned as output (not all ready docs).  None means "not sheets
+    # source" — the normal ready_ids path will be used.
+    _sheets_changed_doc_ids = None
 
     if source_type == 'email_inbox':
         email_host = config.get('email_host', '')
@@ -610,19 +614,11 @@ def _execute_input_node(node: WorkflowNode, workflow: Workflow, triggered_by=Non
                         input_node=node,
                         global_metadata={'_source': 'folder_upload', '_folder_id': str(folder_id)},
                     )
-                    # Run extraction
-                    if workflow.extraction_template:
-                        try:
-                            from .ai_inference import extract_document
-                            extract_document(doc, workflow.extraction_template,
-                                             document_type=workflow.document_type)
-                        except Exception as e:
-                            logger.error(f"Extraction failed for folder doc {doc.id}: {e}")
-                            doc.extraction_status = 'failed'
-                            doc.save(update_fields=['extraction_status'])
-                    else:
-                        doc.extraction_status = 'completed'
-                        doc.save(update_fields=['extraction_status'])
+                    # Mark as completed — extraction will be handled by
+                    # a dedicated extract node in the workflow, not the
+                    # input node.
+                    doc.extraction_status = 'completed'
+                    doc.save(update_fields=['extraction_status'])
                 logger.info(f"Input node folder_upload: processed folder {folder_id}")
             except Exception as e:
                 logger.error(f"Input node folder_upload failed: {e}")
@@ -670,49 +666,64 @@ def _execute_input_node(node: WorkflowNode, workflow: Workflow, triggered_by=Non
                             '_dms_document_id': str(dms_doc.id),
                         },
                     )
-                    if workflow.extraction_template:
-                        try:
-                            from .ai_inference import extract_document
-                            extract_document(doc, workflow.extraction_template,
-                                             document_type=workflow.document_type)
-                        except Exception as e:
-                            logger.error(f"Extraction failed for DMS doc {doc.id}: {e}")
-                            doc.extraction_status = 'failed'
-                            doc.save(update_fields=['extraction_status'])
-                    else:
-                        doc.extraction_status = 'completed'
-                        doc.save(update_fields=['extraction_status'])
+                    # Mark as completed — extraction will be handled by
+                    # a dedicated extract node in the workflow.
+                    doc.extraction_status = 'completed'
+                    doc.save(update_fields=['extraction_status'])
                 logger.info(f"Input node dms_import: imported from DMS")
             except Exception as e:
                 logger.error(f"Input node dms_import failed: {e}")
 
     elif source_type == 'sheets':
         # Sheets import: import rows from a Sheet (sheets app) as documents.
-        # Uses update-or-create by (sheet_id, row_order) so that:
-        #   - New rows create new WorkflowDocuments
-        #   - Updated rows update existing WorkflowDocuments (new hash)
-        #   - This prevents orphan docs when row content changes
+        #
+        # PRODUCTION DEDUP via InputNodeRow:
+        # On first execution, all rows are ingested and tracked in InputNodeRow.
+        # On subsequent executions:
+        #   - InputNodeRow.load_hash_map() gives us {row_id: (hash, doc_id)}
+        #   - For event-triggered runs, only changed_row_ids are checked
+        #   - For manual runs, ALL rows are compared against stored hashes
+        #   - Unchanged rows are SKIPPED at the comparison level
+        #   - Changed rows UPDATE the existing WorkflowDocument + InputNodeRow
+        #   - New rows CREATE a WorkflowDocument + InputNodeRow
+        #
+        # Only created/updated doc IDs are returned so downstream nodes
+        # don't re-process unchanged rows.
+        _sheets_changed_doc_ids = []
         sheet_id = config.get('sheet_id', '')
         if sheet_id:
             try:
                 from sheets.models import Sheet
-                sheet = Sheet.objects.get(id=sheet_id, organization=organization)
-                rows = sheet.rows.prefetch_related('cells').order_by('order')
+                from .models import InputNodeRow
 
-                # Pre-load existing docs for this sheet to enable update-or-create
-                existing_docs = {}
-                for doc in WorkflowDocument.objects.filter(
-                    workflow=workflow,
-                    input_node=node,
-                    global_metadata___source='sheets',
-                    global_metadata___sheet_id=str(sheet_id),
-                ):
-                    row_order = (doc.global_metadata or {}).get('_row_order')
-                    if row_order is not None:
-                        existing_docs[row_order] = doc
+                sheet = Sheet.objects.get(id=sheet_id, organization=organization)
+
+                # ── Filter to only changed rows when event-triggered ──
+                _trigger_ctx = getattr(execution, 'trigger_context', None) or {} if execution else {}
+                _ctx_changed_row_ids = _trigger_ctx.get('changed_data', {}).get('changed_row_ids') or _trigger_ctx.get('changed_row_ids')
+                _ctx_changed_row_orders = _trigger_ctx.get('changed_data', {}).get('changed_row_orders') or _trigger_ctx.get('changed_row_orders')
+
+                rows = sheet.rows.prefetch_related('cells').order_by('order')
+                if _ctx_changed_row_ids:
+                    rows = rows.filter(id__in=_ctx_changed_row_ids)
+                    logger.info(
+                        f"Input node sheets: filtering to {len(_ctx_changed_row_ids)} "
+                        f"changed row(s) by ID from trigger_context"
+                    )
+                elif _ctx_changed_row_orders:
+                    rows = rows.filter(order__in=_ctx_changed_row_orders)
+                    logger.info(
+                        f"Input node sheets: filtering to {len(_ctx_changed_row_orders)} "
+                        f"changed row(s) by order from trigger_context"
+                    )
+
+                # ── Load known-rows hash map from InputNodeRow ────────
+                # {row_id_str: (content_hash, doc_id_str)}
+                _known_rows = InputNodeRow.load_hash_map(node)
 
                 imported_count = 0
                 updated_count = 0
+                skipped_count = 0
 
                 for row in rows:
                     # Build metadata from cells
@@ -746,42 +757,78 @@ def _execute_input_node(node: WorkflowNode, workflow: Workflow, triggered_by=Non
                         **row_meta,
                     }
 
-                    # Check if we already have a doc for this row (by order)
-                    existing = existing_docs.get(row.order)
-                    if existing:
-                        if existing.file_hash == row_hash:
-                            # No change — skip
+                    _row_id_str = str(row.id)
+                    _known = _known_rows.get(_row_id_str)
+
+                    if _known:
+                        # Row already tracked
+                        _prev_hash, _prev_doc_id = _known
+                        if _prev_hash == row_hash:
+                            # Unchanged — skip entirely
+                            skipped_count += 1
                             continue
-                        # Row content changed — update the existing doc
-                        existing.title = title
-                        existing.file_hash = row_hash
-                        existing.extracted_metadata = row_meta
-                        existing.global_metadata = global_meta
-                        existing.extraction_status = 'completed'
-                        existing.save(update_fields=[
-                            'title', 'file_hash', 'extracted_metadata',
-                            'global_metadata', 'extraction_status', 'updated_at',
-                        ])
-                        updated_count += 1
+
+                        # Content changed — update existing WorkflowDocument
+                        try:
+                            existing = WorkflowDocument.objects.get(id=_prev_doc_id)
+                            existing.title = title
+                            existing.file_hash = row_hash
+                            existing.extracted_metadata = row_meta
+                            existing.global_metadata = global_meta
+                            existing.extraction_status = 'completed'
+                            existing.save(update_fields=[
+                                'title', 'file_hash', 'extracted_metadata',
+                                'global_metadata', 'extraction_status', 'updated_at',
+                            ])
+                            # Update InputNodeRow hash
+                            InputNodeRow.upsert(
+                                node=node, workflow=workflow,
+                                row_id=_row_id_str, content_hash=row_hash,
+                                document=existing, source_type='sheets',
+                                sheet_id=str(sheet_id), row_order=row.order,
+                            )
+                            updated_count += 1
+                            _sheets_changed_doc_ids.append(str(existing.id))
+                        except WorkflowDocument.DoesNotExist:
+                            # Doc was deleted — re-create
+                            new_doc = WorkflowDocument.objects.create(
+                                workflow=workflow, organization=organization,
+                                title=title, file_type='other', file_hash=row_hash,
+                                uploaded_by=triggered_by, input_node=node,
+                                extracted_metadata=row_meta, global_metadata=global_meta,
+                                extraction_status='completed',
+                            )
+                            InputNodeRow.upsert(
+                                node=node, workflow=workflow,
+                                row_id=_row_id_str, content_hash=row_hash,
+                                document=new_doc, source_type='sheets',
+                                sheet_id=str(sheet_id), row_order=row.order,
+                            )
+                            imported_count += 1
+                            _sheets_changed_doc_ids.append(str(new_doc.id))
                     else:
-                        # New row — create doc
-                        WorkflowDocument.objects.create(
-                            workflow=workflow,
-                            organization=organization,
-                            title=title,
-                            file_type='other',
-                            file_hash=row_hash,
-                            uploaded_by=triggered_by,
-                            input_node=node,
-                            extracted_metadata=row_meta,
-                            global_metadata=global_meta,
+                        # New row — create doc + track in InputNodeRow
+                        new_doc = WorkflowDocument.objects.create(
+                            workflow=workflow, organization=organization,
+                            title=title, file_type='other', file_hash=row_hash,
+                            uploaded_by=triggered_by, input_node=node,
+                            extracted_metadata=row_meta, global_metadata=global_meta,
                             extraction_status='completed',
                         )
+                        InputNodeRow.upsert(
+                            node=node, workflow=workflow,
+                            row_id=_row_id_str, content_hash=row_hash,
+                            document=new_doc, source_type='sheets',
+                            sheet_id=str(sheet_id), row_order=row.order,
+                        )
                         imported_count += 1
+                        _sheets_changed_doc_ids.append(str(new_doc.id))
 
                 logger.info(
-                    f"Input node sheets: {rows.count()} rows from sheet {sheet_id} "
-                    f"(imported={imported_count}, updated={updated_count})"
+                    f"Input node sheets: sheet {sheet_id} — "
+                    f"imported={imported_count}, updated={updated_count}, "
+                    f"skipped_unchanged={skipped_count}, "
+                    f"tracked_total={len(_known_rows) + imported_count}"
                 )
             except Exception as e:
                 logger.error(f"Input node sheets import failed: {e}")
@@ -802,16 +849,99 @@ def _execute_input_node(node: WorkflowNode, workflow: Workflow, triggered_by=Non
             global_metadata___source__in=current_tags,
         ).update(extraction_status='completed')
     else:
-        # upload: restore docs with _source='upload' or no _source tag (legacy)
+        # upload: restore docs with _source='upload' or no _source tag (legacy).
+        # Same NULL-safe approach as the fallback query below.
+        from django.db.models import Q
         restored = WorkflowDocument.objects.filter(
             workflow=workflow,
             extraction_status='archived',
-        ).exclude(
-            global_metadata___source__in=_ALL_NON_UPLOAD_SOURCES
+        ).filter(
+            Q(global_metadata___source='upload') |
+            Q(global_metadata___source__isnull=True)
         ).update(extraction_status='completed')
 
     if restored:
         logger.info(f"Restored {restored} cached docs for source {source_type}")
+
+    # ------------------------------------------------------------------
+    # For sheets source: return ONLY changed/new doc IDs so that
+    # downstream nodes only process rows that actually changed.
+    # This prevents re-executing every row on every trigger.
+    # ------------------------------------------------------------------
+    if _sheets_changed_doc_ids is not None:
+        # Still sync document_state so the node knows about all docs
+        node.sync_document_state()
+
+        if _sheets_changed_doc_ids:
+            logger.info(
+                f"Input node sheets: returning {len(_sheets_changed_doc_ids)} "
+                f"changed doc IDs (not all ready docs)"
+            )
+            return _sheets_changed_doc_ids
+        else:
+            # No rows changed — return empty list so downstream nodes
+            # don't re-process anything.
+            logger.info(
+                "Input node sheets: no rows changed, returning empty list"
+            )
+            return []
+
+    # ------------------------------------------------------------------
+    # Input plugin pipeline — run post-extraction hooks on completed
+    # documents that haven't been processed by the plugin pipeline yet.
+    # The pipeline runs: post_extract → validate → transform → ready
+    # Results are stored in global_metadata._plugin_issues.
+    # ------------------------------------------------------------------
+    try:
+        from .input_plugins.pipeline import run_post_pipeline, run_batch_complete
+
+        # Only run on docs that don't already have a _plugin_processed flag
+        plugin_candidates = WorkflowDocument.objects.filter(
+            workflow=workflow,
+            input_node=node,
+            extraction_status='completed',
+        ).exclude(
+            global_metadata___plugin_processed=True,
+        )
+
+        processed_docs = []
+        for doc in plugin_candidates:
+            try:
+                pipeline_result = run_post_pipeline(node=node, document=doc)
+                # Mark as plugin-processed to avoid re-running
+                gm = dict(doc.global_metadata or {})
+                gm['_plugin_processed'] = True
+                if pipeline_result.plugin_log:
+                    gm['_plugin_log'] = pipeline_result.plugin_log
+                doc.global_metadata = gm
+                doc.save(update_fields=['global_metadata'])
+                processed_docs.append(doc)
+            except Exception as e:
+                logger.debug(f"Input plugin pipeline error for doc {doc.id}: {e}")
+
+        if processed_docs:
+            run_batch_complete(
+                node=node,
+                documents=processed_docs,
+                stats={
+                    'total': len(processed_docs),
+                    'ready': sum(1 for d in processed_docs if d.extraction_status == 'completed'),
+                    'rejected': 0,
+                    'failed': sum(1 for d in processed_docs if d.extraction_status == 'failed'),
+                    'issues': sum(
+                        len((d.global_metadata or {}).get('_plugin_issues', []))
+                        for d in processed_docs
+                    ),
+                },
+            )
+            logger.info(
+                f"Input plugin pipeline: processed {len(processed_docs)} docs "
+                f"for node {node.id}"
+            )
+    except ImportError:
+        pass  # Plugin system not available
+    except Exception as e:
+        logger.debug(f"Input plugin pipeline error (non-fatal): {e}")
 
     # ------------------------------------------------------------------
     # Sync document_state on the node and return ready_ids.
@@ -835,9 +965,17 @@ def _execute_input_node(node: WorkflowNode, workflow: Workflow, triggered_by=Non
     if current_tags:
         qs = qs.filter(global_metadata___source__in=current_tags)
     else:
-        # upload: include docs with _source='upload' or legacy docs with no tag
-        qs = qs.exclude(
-            global_metadata___source__in=_ALL_NON_UPLOAD_SOURCES
+        # upload: include docs with _source='upload' or legacy docs with no tag.
+        # NOTE: We cannot use .exclude(global_metadata___source__in=...) because
+        # when the JSON key '_source' is missing, JSON_EXTRACT returns NULL,
+        # and NOT (NULL IN (...)) evaluates to NULL (not TRUE) in SQL, which
+        # incorrectly excludes docs that have no _source tag at all.
+        # Instead, we filter positively: _source is 'upload' OR _source key
+        # doesn't exist (isnull=True).
+        from django.db.models import Q
+        qs = qs.filter(
+            Q(global_metadata___source='upload') |
+            Q(global_metadata___source__isnull=True)
         )
 
     fallback_ids = [str(uid) for uid in qs.values_list('id', flat=True)]
@@ -988,11 +1126,10 @@ def _get_upstream_produced_fields(
                     produced.add(name)
 
         if n.node_type == 'input':
-            # Input nodes trigger NuExtract → all extraction_template fields
+            # Input nodes don't run extraction themselves — extraction
+            # is handled by dedicated extract (AI) nodes downstream.
+            # Include derived fields as they're workflow-level.
             workflow = n.workflow
-            for fname in (workflow.extraction_template or {}).keys():
-                produced.add(fname)
-            # Also include derived fields
             for df in workflow.derived_fields.all():
                 produced.add(df.name)
 
@@ -1341,6 +1478,39 @@ def _execute_workflow_body(
     nodes = {n.id: n for n in workflow.nodes.all()}
     connections = list(workflow.connections.all())
 
+    # ── Snapshot the workflow config at execution time ──────────────────
+    # This frozen copy is stored on the execution record so past runs
+    # are fully reproducible even after the canvas is later modified.
+    # The actual execution uses the LIVE node/connection objects (above),
+    # NOT the workflow.extraction_template stored on the model — we
+    # rebuild it fresh here to ensure it matches the current canvas.
+    workflow.rebuild_extraction_template()
+    current_hash = workflow.compute_nodes_config_hash(save=True)
+
+    config_snapshot = {
+        'nodes_config_hash': current_hash,
+        'extraction_template': workflow.extraction_template,
+        'node_configs': [
+            {
+                'id': str(n.id),
+                'type': n.node_type,
+                'label': n.label,
+                'config': n.config or {},
+            }
+            for n in nodes.values()
+        ],
+        'connections': [
+            {
+                'source': str(c.source_node_id),
+                'target': str(c.target_node_id),
+                'handle': c.source_handle or '',
+            }
+            for c in connections
+        ],
+    }
+    execution.config_snapshot = config_snapshot
+    execution.save(update_fields=['config_snapshot'])
+
     # Build adjacency + in-degree
     adj = defaultdict(list)
     in_degree = defaultdict(int)
@@ -1398,6 +1568,23 @@ def _execute_workflow_body(
     # ── Lifecycle: executing ───────────────────────────────────────────
     workflow.execution_state = 'executing'
     workflow.save(update_fields=['execution_state', 'updated_at'])
+
+    # ── Live event: execution started ─────────────────────────────────
+    from .live_events import (
+        emit_execution_completed,
+        emit_execution_started,
+        emit_node_completed,
+        emit_node_failed,
+        emit_node_progress,
+        emit_node_started,
+    )
+    _total_docs_estimate = (
+        WorkflowDocument.objects.filter(workflow=workflow).count()
+        if not single_document_ids
+        else len(single_document_ids)
+    )
+    emit_execution_started(workflow, execution, mode=mode, total_docs=_total_docs_estimate)
+    _live_events_buffer = []  # batch-persist at end
 
     # ── Rule merging optimisation ──────────────────────────────────────
     # When multiple rule nodes at the same level share identical parent
@@ -1473,6 +1660,18 @@ def _execute_workflow_body(
             local_type_results = {}  # {result_bucket_key: value}
             _node_start = timezone.now()
 
+            # ── Live event: node started ──────────────────────────────
+            _input_estimate = 0
+            if node.node_type != 'input':
+                for pid in incoming_map.get(node_id, []):
+                    pout = node_outputs.get(pid, [])
+                    if isinstance(pout, dict):
+                        for v in pout.values():
+                            _input_estimate += len(v) if isinstance(v, list) else 1
+                    elif isinstance(pout, list):
+                        _input_estimate += len(pout)
+            _ns_event = emit_node_started(workflow, execution, node, input_count=_input_estimate, dag_level=level_idx)
+
             if node.node_type == 'input':
                 if single_document_ids:
                     output_ids = [
@@ -1481,7 +1680,7 @@ def _execute_workflow_body(
                         and WorkflowDocument.objects.filter(id=did, workflow=workflow).exists()
                     ]
                 else:
-                    output_ids = _execute_input_node(node, workflow, triggered_by=triggered_by)
+                    output_ids = _execute_input_node(node, workflow, triggered_by=triggered_by, execution=execution)
                     if exclude_set:
                         output_ids = [did for did in output_ids if str(did) not in exclude_set]
             else:
@@ -1551,7 +1750,7 @@ def _execute_workflow_body(
                     output_ids = incoming_ids
                     if node.config and node.config.get('plugin'):
                         try:
-                            action_result = execute_action_node(node=node, incoming_document_ids=incoming_ids, triggered_by=triggered_by)
+                            action_result = execute_action_node(node=node, incoming_document_ids=incoming_ids, triggered_by=triggered_by, workflow_execution=execution)
                             local_type_results[f'action:{node_id}'] = action_result
                         except Exception as e:
                             logger.error(f"Action node {node_id} failed: {e}")
@@ -1609,7 +1808,7 @@ def _execute_workflow_body(
                 elif node.node_type == 'doc_create':
                     output_ids = incoming_ids
                     try:
-                        dc_result = execute_doc_create_node(node=node, incoming_document_ids=incoming_ids, triggered_by=triggered_by)
+                        dc_result = execute_doc_create_node(node=node, incoming_document_ids=incoming_ids, triggered_by=triggered_by, workflow_execution=execution)
                         local_type_results[f'doc_create:{node_id}'] = dc_result
                     except Exception as e:
                         logger.error(f"doc_create node {node_id} failed: {e}")
@@ -1662,22 +1861,23 @@ def _execute_workflow_body(
                         sheet_mode = (node.config or {}).get('mode', 'storage')
                         if sheet_mode == 'input' and sheet_result.get('status') == 'completed':
                             import hashlib as _hl, json as _js
+                            from .models import InputNodeRow
 
-                            # Pre-load existing docs for this sheet node
-                            # to enable update-or-create by row identity
+                            # ── InputNodeRow dedup (same pattern as source_type='sheets') ──
+                            # Instead of loading ALL existing WorkflowDocuments into
+                            # Python, we load the lightweight InputNodeRow hash map
+                            # and compare per-row.  Only new/changed rows hit the DB.
                             _sheet_node_id = str(sheet_result.get('sheet_id', ''))
-                            _existing_sheet_docs = {}
-                            for _ed in WorkflowDocument.objects.filter(
-                                workflow=workflow,
-                                input_node=node,
-                                global_metadata___source='sheet_node',
-                            ):
-                                _ed_row_order = (_ed.global_metadata or {}).get('_row_order')
-                                if _ed_row_order is not None:
-                                    _existing_sheet_docs[_ed_row_order] = _ed
+                            _known_rows = InputNodeRow.load_hash_map(node)
 
                             row_doc_ids = []
-                            for row_entry in sheet_result.get('rows', []):
+                            _all_rows = sheet_result.get('rows', [])
+                            _total_rows = len(_all_rows)
+                            _imported = 0
+                            _updated = 0
+                            _skipped = 0
+
+                            for _ri, row_entry in enumerate(_all_rows):
                                 row_meta = row_entry.get('metadata', {})
                                 if not row_meta:
                                     continue
@@ -1685,22 +1885,38 @@ def _execute_workflow_body(
                                     _js.dumps(row_meta, sort_keys=True, default=str).encode()
                                 ).hexdigest()
                                 row_order = row_entry.get('row_order', 0)
+                                _entry_row_id = str(row_entry.get('row_id', ''))
 
                                 global_meta = {
                                     '_source': 'sheet_node',
                                     '_sheet_id': _sheet_node_id,
                                     '_row_order': row_order,
-                                    '_row_id': row_entry.get('row_id', ''),
+                                    '_row_id': _entry_row_id,
                                     **row_meta,
                                 }
 
-                                # Check for existing doc by row_order
-                                existing = _existing_sheet_docs.get(row_order)
-                                if existing:
-                                    row_doc_ids.append(existing.id)
-                                    if existing.file_hash != row_hash:
-                                        # Content changed — update
-                                        existing.title = str(list(row_meta.values())[0])[:200] if row_meta else f"Sheet Row {row_order + 1}"
+                                title_val = list(row_meta.values())[0] if row_meta else ''
+                                title = str(title_val)[:200] or f"Sheet Row {row_order + 1}"
+
+                                _known = _known_rows.get(_entry_row_id) if _entry_row_id else None
+
+                                if _known:
+                                    _prev_hash, _prev_doc_id = _known
+                                    if _prev_hash == row_hash:
+                                        # Row unchanged — skip entirely
+                                        _skipped += 1
+                                        if _total_rows > 1 and (_ri % 5 == 0 or _ri == _total_rows - 1):
+                                            emit_node_progress(
+                                                workflow, execution, node,
+                                                processed=_ri + 1, total=_total_rows,
+                                                dag_level=level_idx,
+                                            )
+                                        continue
+
+                                    # Content changed — update existing WorkflowDocument
+                                    try:
+                                        existing = WorkflowDocument.objects.get(id=_prev_doc_id)
+                                        existing.title = title
                                         existing.file_hash = row_hash
                                         existing.extracted_metadata = row_meta
                                         existing.global_metadata = global_meta
@@ -1709,20 +1925,64 @@ def _execute_workflow_body(
                                             'title', 'file_hash', 'extracted_metadata',
                                             'global_metadata', 'extraction_status', 'updated_at',
                                         ])
-                                    continue
+                                        InputNodeRow.upsert(
+                                            node=node, workflow=workflow,
+                                            row_id=_entry_row_id, content_hash=row_hash,
+                                            document=existing, source_type='sheet_node',
+                                            sheet_id=_sheet_node_id, row_order=row_order,
+                                        )
+                                        _updated += 1
+                                        row_doc_ids.append(existing.id)
+                                    except WorkflowDocument.DoesNotExist:
+                                        # Doc deleted — re-create
+                                        doc = WorkflowDocument.objects.create(
+                                            workflow=workflow, organization=organization,
+                                            title=title, file_type='other', file_hash=row_hash,
+                                            uploaded_by=triggered_by, input_node=node,
+                                            extracted_metadata=row_meta, global_metadata=global_meta,
+                                            extraction_status='completed',
+                                        )
+                                        InputNodeRow.upsert(
+                                            node=node, workflow=workflow,
+                                            row_id=_entry_row_id, content_hash=row_hash,
+                                            document=doc, source_type='sheet_node',
+                                            sheet_id=_sheet_node_id, row_order=row_order,
+                                        )
+                                        _imported += 1
+                                        row_doc_ids.append(doc.id)
+                                else:
+                                    # New row — create doc + track
+                                    doc = WorkflowDocument.objects.create(
+                                        workflow=workflow, organization=organization,
+                                        title=title, file_type='other', file_hash=row_hash,
+                                        uploaded_by=triggered_by, input_node=node,
+                                        extracted_metadata=row_meta, global_metadata=global_meta,
+                                        extraction_status='completed',
+                                    )
+                                    InputNodeRow.upsert(
+                                        node=node, workflow=workflow,
+                                        row_id=_entry_row_id, content_hash=row_hash,
+                                        document=doc, source_type='sheet_node',
+                                        sheet_id=_sheet_node_id, row_order=row_order,
+                                    )
+                                    _imported += 1
+                                    row_doc_ids.append(doc.id)
 
-                                # New row — create doc
-                                title_val = list(row_meta.values())[0] if row_meta else ''
-                                title = str(title_val)[:200] or f"Sheet Row {row_order + 1}"
-                                doc = WorkflowDocument.objects.create(
-                                    workflow=workflow, organization=organization,
-                                    title=title, file_type='other', file_hash=row_hash,
-                                    uploaded_by=triggered_by, input_node=node,
-                                    extracted_metadata=row_meta,
-                                    global_metadata=global_meta,
-                                    extraction_status='completed',
+                                # Emit progress every 5 rows or on the last row
+                                if _total_rows > 1 and (_ri % 5 == 0 or _ri == _total_rows - 1):
+                                    emit_node_progress(
+                                        workflow, execution, node,
+                                        processed=_ri + 1, total=_total_rows,
+                                        dag_level=level_idx,
+                                    )
+
+                            if _skipped > 0 or _updated > 0:
+                                logger.info(
+                                    f"[sheet-node] Node {node_id}: "
+                                    f"imported={_imported}, updated={_updated}, "
+                                    f"skipped_unchanged={_skipped}, "
+                                    f"tracked_total={len(_known_rows) + _imported}"
                                 )
-                                row_doc_ids.append(doc.id)
                             output_ids = row_doc_ids
                         else:
                             output_ids = incoming_ids
@@ -1734,6 +1994,21 @@ def _execute_workflow_body(
                     output_ids = _execute_output_node(node, incoming_ids)
 
             _node_end = timezone.now()
+            _node_dur = int((_node_end - _node_start).total_seconds() * 1000)
+
+            # ── Live event: node completed ────────────────────────────
+            _out_count = 0
+            if isinstance(output_ids, dict):
+                for _v in output_ids.values():
+                    _out_count += len(_v) if isinstance(_v, list) else 1
+            elif isinstance(output_ids, list):
+                _out_count = len(output_ids)
+            _nc_event = emit_node_completed(
+                workflow, execution, node, output_count=_out_count,
+                duration_ms=_node_dur, dag_level=level_idx,
+            )
+            _live_events_buffer.append((_ns_event, _nc_event))
+
             return node_id, output_ids, local_type_results, _node_start, _node_end
 
         # ── Process results from one node and integrate into shared state ─
@@ -2036,6 +2311,8 @@ def _execute_workflow_body(
                             'label': node.label or node.node_type.title(),
                             'count': 0, 'document_ids': [], 'error': str(e),
                         })
+                        # Live event: node failed
+                        emit_node_failed(workflow, execution, node, error=str(e), dag_level=level_idx)
                         # Log failed node execution
                         try:
                             from .event_system import log_node_execution
@@ -2155,6 +2432,32 @@ def _execute_workflow_body(
     workflow.execution_state = 'idle'
     workflow.current_execution_id = None
     workflow.save(update_fields=['execution_state', 'current_execution_id', 'updated_at'])
+
+    # ── Live event: execution completed ───────────────────────────────
+    emit_execution_completed(
+        workflow, execution, duration_ms=duration_ms,
+        total_docs=execution.total_documents,
+        output_count=len(unique_output_ids),
+    )
+
+    # ── Persist live events to WorkflowLiveEvent table ────────────────
+    try:
+        from .models import WorkflowLiveEvent
+        persist_records = []
+        for evt_pair in _live_events_buffer:
+            for evt in (evt_pair if isinstance(evt_pair, tuple) else [evt_pair]):
+                if evt is not None:
+                    persist_records.append(
+                        WorkflowLiveEvent.record_from_live_event(
+                            evt,
+                            workflow_id=str(workflow.id),
+                            execution_id=str(execution.id),
+                        )
+                    )
+        if persist_records:
+            WorkflowLiveEvent.objects.bulk_create(persist_records, ignore_conflicts=True)
+    except Exception as _persist_err:
+        logger.debug(f"Failed to persist live events: {_persist_err}")
 
     # ── Smart execution: record per-document execution results ─────────
     if smart:

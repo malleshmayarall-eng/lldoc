@@ -133,7 +133,7 @@ You help users build and modify document processing workflows through natural la
 ## AVAILABLE NODE TYPES
 - input: Starting point — documents uploaded or fetched here. Config: document_type (contract/invoice/nda/lease/employment/purchase_order/insurance/resume/mou/general), source_type (upload/email_inbox/google_drive/dropbox/onedrive/s3/ftp/url_scrape/webhook)
 - rule: Filters documents by metadata conditions. Config: boolean_operator (AND/OR), conditions: [{{field, operator, value}}]. Operators: eq, neq, gt, gte, lt, lte, contains, not_contains
-- ai: AI model processing. Config: model (gemini-2.0-flash/gemini-1.5-pro/gpt-4o/gpt-4o-mini), output_format (json_extract/yes_no/text/derived), system_prompt, output_key, json_fields (for json_extract), temperature, max_tokens
+- ai: AI model processing. Config: model (gemini-2.5-flash/gemini-2.5-pro-preview-05-06/gpt-4o/gpt-4o-mini), output_format (json_extract/yes_no/text/derived), system_prompt, output_key, json_fields (for json_extract), temperature, max_tokens
 - action: Runs plugins per document. Config: plugin (send_email/send_whatsapp/send_sms/webhook)
 - listener: Watches for triggers. Config: trigger_type (document_uploaded/approval_required/field_changed/all_documents_ready/document_count/manual/schedule)
 - validator: Human approval gate. Config: name, description
@@ -607,7 +607,7 @@ def _action_update_workflow(workflow: Workflow, params: dict) -> dict:
 def chat_with_workflow(
     workflow: Workflow,
     user_message: str,
-    model_id: str = 'gemini-2.0-flash',
+    model_id: str = 'gemini-2.5-flash',
     auto_apply: bool = True,
     user=None,
 ) -> dict:
@@ -625,7 +625,7 @@ def chat_with_workflow(
     Args:
         workflow: The Workflow instance to chat about
         user_message: The user's natural language message
-        model_id: LLM model to use (default: gemini-2.0-flash)
+        model_id: LLM model to use (default: gemini-2.5-flash)
         auto_apply: If True, automatically apply proposed actions
         user: The Django User who sent the message
 
@@ -635,7 +635,7 @@ def chat_with_workflow(
             "actions": [...],
             "actions_applied": true/false,
             "action_results": [...],
-            "model": "gemini-2.0-flash",
+            "model": "gemini-2.5-flash",
             "message_id": "uuid",
         }
     """

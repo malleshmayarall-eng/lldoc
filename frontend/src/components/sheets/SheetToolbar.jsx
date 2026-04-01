@@ -9,7 +9,7 @@ import {
   Save, Undo2, Redo2, Copy, Clipboard,
   Upload, Download, Wand2, Columns, Rows, Search,
   Table2, X, FunctionSquare, FileUp, LayoutDashboard,
-  Zap, Loader2,
+  Zap, Loader2, ArrowUpToLine,
 } from 'lucide-react';
 import useSheetsStore from '../../store/sheetsStore';
 import TaskProgressBar from './TaskProgressBar';
@@ -23,6 +23,7 @@ export default function SheetToolbar({
   const undo = useSheetsStore((s) => s.undo);
   const redo = useSheetsStore((s) => s.redo);
   const addRow = useSheetsStore((s) => s.addRow);
+  const addRowOnTop = useSheetsStore((s) => s.addRowOnTop);
   const addColumn = useSheetsStore((s) => s.addColumn);
   const copySelection = useSheetsStore((s) => s.copySelection);
   const pasteSelection = useSheetsStore((s) => s.pasteSelection);
@@ -31,6 +32,8 @@ export default function SheetToolbar({
   const setCellValue = useSheetsStore((s) => s.setCellValue);
   const searchQuery = useSheetsStore((s) => s.searchQuery);
   const setSearchQuery = useSheetsStore((s) => s.setSearchQuery);
+  const pendingAIChanges = useSheetsStore((s) => s.pendingAIChanges);
+  const aiGenerating = useSheetsStore((s) => s.aiGenerating);
 
   const [showSearch, setShowSearch] = useState(false);
   const [showFormulaMenu, setShowFormulaMenu] = useState(false);
@@ -94,7 +97,8 @@ export default function SheetToolbar({
       <Divider />
 
       {/* Structure */}
-      <Btn icon={Rows} label="Add Row" onClick={addRow} />
+      <Btn icon={ArrowUpToLine} label="Add Row on Top" onClick={addRowOnTop} />
+      <Btn icon={Rows} label="Add Row at Bottom" onClick={addRow} />
       <Btn icon={Columns} label="Add Column" onClick={() => addColumn()} />
       <Divider />
 
@@ -135,8 +139,16 @@ export default function SheetToolbar({
 
       {/* AI & Dashboard & Import/Export */}
       {onAIGenerate && (
-        <button onClick={onAIGenerate} className="flex items-center gap-1 px-2 py-1 text-[11px] font-medium text-purple-600 hover:bg-purple-50 rounded-md transition-colors">
-          <Wand2 className="h-3.5 w-3.5" /> AI
+        <button onClick={onAIGenerate} className={`flex items-center gap-1 px-2 py-1 text-[11px] font-medium rounded-md transition-colors relative ${
+          pendingAIChanges ? 'text-purple-700 bg-purple-100 shadow-sm' : aiGenerating ? 'text-purple-500 bg-purple-50' : 'text-purple-600 hover:bg-purple-50'
+        }`}>
+          {aiGenerating ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Wand2 className="h-3.5 w-3.5" />}
+          AI
+          {pendingAIChanges && (
+            <span className="ml-0.5 px-1 py-0 text-[9px] font-bold bg-purple-600 text-white rounded-full leading-[14px]">
+              {pendingAIChanges.changes?.length || 0}
+            </span>
+          )}
         </button>
       )}
       {onDashboard && (

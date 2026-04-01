@@ -35,9 +35,6 @@ import RichTextToolbar from '../../../components/RichTextToolbar';
 const DOCUMENT_STATUS_OPTIONS = [
   { value: 'draft', label: 'Draft', color: 'bg-gray-100 text-gray-700' },
   { value: 'under_review', label: 'Under Review', color: 'bg-yellow-100 text-yellow-700' },
-  { value: 'analyzed', label: 'Analyzed', color: 'bg-blue-100 text-blue-700' },
-  { value: 'approved', label: 'Approved', color: 'bg-green-100 text-green-700' },
-  { value: 'finalized', label: 'Finalized', color: 'bg-indigo-100 text-indigo-700' },
   { value: 'done', label: 'Done', color: 'bg-emerald-100 text-emerald-800' },
 ];
 

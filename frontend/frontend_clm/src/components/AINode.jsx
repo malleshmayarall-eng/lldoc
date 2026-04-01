@@ -17,12 +17,10 @@ export default function AINode({ node, isSelected, onSelect, onDragStart, onConn
   const lastResult = node.last_result || {};
 
   const modelLabels = {
-    'gemini-2.0-flash':  { icon: '✨', label: 'Gemini 2.0 Flash' },
-    'gemini-1.5-pro':    { icon: '🧠', label: 'Gemini 1.5 Pro' },
-    'gemini-1.5-flash':  { icon: '⚡', label: 'Gemini 1.5 Flash' },
+    'gemini-2.5-flash':  { icon: '✨', label: 'Gemini 2.5 Flash' },
+    'gemini-2.5-pro-preview-05-06': { icon: '🧠', label: 'Gemini 2.5 Pro' },
     'gpt-4o':            { icon: '🤖', label: 'GPT-4o' },
     'gpt-4o-mini':       { icon: '🤖', label: 'GPT-4o Mini' },
-    'gpt-3.5-turbo':     { icon: '🤖', label: 'GPT-3.5' },
   };
   const ml = modelLabels[modelName] || { icon: '🧪', label: modelName || 'No model' };
 

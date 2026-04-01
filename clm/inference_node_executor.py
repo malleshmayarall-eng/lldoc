@@ -19,7 +19,7 @@ full-text re-reads.
 
 Config schema (stored in node.config):
   {
-    "model": "gemini-2.0-flash",
+    "model": "gemini-2.5-flash",
     "system_prompt": "...",                    // user's custom prompt
     "output_key": "inference_analysis",        // key in extracted_metadata
     "inference_scope": "document" | "section", // what to infer
@@ -167,7 +167,7 @@ def execute_inference_node(
     Documents always pass through (enrichment, not filtering).
     """
     config = node.config or {}
-    model_id = config.get('model', 'gemini-2.0-flash')
+    model_id = config.get('model', 'gemini-2.5-flash')
     system_prompt = config.get('system_prompt', '')
     output_key = config.get('output_key', 'inference_analysis')
     inference_scope = config.get('inference_scope', 'document')

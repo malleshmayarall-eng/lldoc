@@ -1055,6 +1055,16 @@ class DocumentViewSet(viewsets.ModelViewSet):
         if response.status_code in (status.HTTP_200_OK, status.HTTP_201_CREATED):
             instance.refresh_from_db()
             response["ETag"] = self._get_document_etag(instance)
+            # Dispatch CLM workflow event
+            try:
+                from clm.event_system import handle_document_update
+                handle_document_update(
+                    document_id=str(instance.id),
+                    change_summary={'update_type': 'full', 'fields': list(request.data.keys())},
+                    user=request.user,
+                )
+            except Exception:
+                pass  # Non-critical — don't break the save
         return response
     
     def partial_update(self, request, *args, **kwargs):
@@ -1082,6 +1092,16 @@ class DocumentViewSet(viewsets.ModelViewSet):
         if response.status_code == status.HTTP_200_OK:
             instance.refresh_from_db()
             response["ETag"] = self._get_document_etag(instance)
+            # Dispatch CLM workflow event
+            try:
+                from clm.event_system import handle_document_update
+                handle_document_update(
+                    document_id=str(instance.id),
+                    change_summary={'update_type': 'partial', 'fields': list(request.data.keys())},
+                    user=request.user,
+                )
+            except Exception:
+                pass  # Non-critical — don't break the save
         return response
     
     def destroy(self, request, *args, **kwargs):
@@ -1435,6 +1455,25 @@ class DocumentViewSet(viewsets.ModelViewSet):
                 status=status_code,
             )
             response["ETag"] = self._get_document_etag(document)
+
+            # ── Dispatch CLM workflow event for document update ─────────
+            if changes_applied:
+                try:
+                    from clm.event_system import handle_document_update
+                    change_types = list({c.get('type', '') for c in changes if c.get('type')})
+                    handle_document_update(
+                        document_id=str(document.id),
+                        change_summary={
+                            'changes_applied': len(updated) + len(deleted),
+                            'updated_count': len(updated),
+                            'deleted_count': len(deleted),
+                            'types': change_types,
+                        },
+                        user=request.user,
+                    )
+                except Exception as e:
+                    logger.warning(f'CLM event dispatch failed for document {document.id}: {e}')
+
             return response
 
         except (Section.DoesNotExist, Paragraph.DoesNotExist, Table.DoesNotExist,
@@ -2761,6 +2800,23 @@ class DocumentViewSet(viewsets.ModelViewSet):
                     'document': serializer.data
                 })
                 response["ETag"] = self._get_document_etag(document)
+
+                # Dispatch CLM workflow event
+                if changes:
+                    try:
+                        from clm.event_system import handle_document_update
+                        handle_document_update(
+                            document_id=str(document.id),
+                            change_summary={
+                                'update_type': 'edit_full',
+                                'changes_count': len(changes),
+                                'changes': changes[:20],
+                            },
+                            user=request.user,
+                        )
+                    except Exception:
+                        pass  # Non-critical
+
                 return response
         
         except Exception as e:
@@ -4753,6 +4809,15 @@ class DocumentViewSet(viewsets.ModelViewSet):
                 Q(document__created_by=request.user),
             ).first()
             if not img:
+                # Fallback: check Attachment table
+                try:
+                    from attachments.models import Attachment
+                    img = Attachment.objects.filter(
+                        id=img_uuid, file_kind='image',
+                    ).first()
+                except Exception:
+                    pass
+            if not img:
                 return Response(
                     {'error': 'Image not found or not accessible.'},
                     status=status.HTTP_404_NOT_FOUND,
@@ -4825,6 +4890,17 @@ class DocumentViewSet(viewsets.ModelViewSet):
                 u = img_obj.get_url()
                 if u:
                     url_map[str(img_obj.id)] = request.build_absolute_uri(u)
+            # Fallback to Attachment table for any missing UUIDs
+            missing = [u for u in mapped_uuids if str(u) not in url_map]
+            if missing:
+                try:
+                    from attachments.models import Attachment
+                    for att in Attachment.objects.filter(id__in=missing, file_kind='image'):
+                        u = att.get_url()
+                        if u:
+                            url_map[str(att.id)] = request.build_absolute_uri(u)
+                except Exception:
+                    pass
         meta['_image_url_map'] = url_map
 
         doc.document_metadata = meta
@@ -5035,55 +5111,108 @@ class DocumentImageViewSet(viewsets.ModelViewSet):
         return DocumentImageSerializer
     
     def get_queryset(self):
-        """Filter images by current user, scope, type, and search."""
+        """
+        Filter images by current user's visibility scope.
+
+        Uses ``DocumentImage.visible_to_user()`` as base, then applies
+        additional query-param filters:
+          ?scope=user|team|organization|document
+          ?upload_scope=...  (legacy alias for scope)
+          ?document=<uuid>
+          ?type=logo|watermark|…  (or ?image_type=…)
+          ?search=keyword
+          ?include_public=true
+        """
         from django.db.models import Q
 
         user = self.request.user
-        scope = self.request.query_params.get('upload_scope', '').strip()
+        scope = (
+            self.request.query_params.get('scope', '').strip()
+            or self.request.query_params.get('upload_scope', '').strip()
+        )
         document_id = self.request.query_params.get('document', None)
         image_type = (
             self.request.query_params.get('type', None)
             or self.request.query_params.get('image_type', None)
         )
         search = self.request.query_params.get('search', '').strip()
-        include_public = self.request.query_params.get('include_public', 'false').lower() == 'true'
 
-        # ── Base queryset by scope ──────────────────────────────────
+        # ── Base: everything the user is allowed to see ─────────────
+        queryset = DocumentImage.visible_to_user(user, image_type=image_type or None)
+
+        # ── Narrow by scope ─────────────────────────────────────────
         if scope == 'document' and document_id:
-            # Images uploaded against this specific document + user's own
-            queryset = DocumentImage.objects.filter(
+            queryset = queryset.filter(
                 Q(document_id=document_id) | Q(uploaded_by=user, document__isnull=True)
             )
         elif scope == 'team':
-            # Public/shared images + user's own
-            queryset = DocumentImage.objects.filter(
-                Q(is_public=True) | Q(uploaded_by=user)
-            )
-        else:
-            # 'user' scope or default — all images owned by this user
-            queryset = DocumentImage.objects.filter(uploaded_by=user)
+            queryset = queryset.filter(scope='team')
+        elif scope == 'organization':
+            queryset = queryset.filter(scope='organization')
+        elif scope == 'user':
+            queryset = queryset.filter(uploaded_by=user)
 
-        # Optionally widen to include public images
-        if include_public and scope != 'team':
-            queryset = queryset | DocumentImage.objects.filter(is_public=True)
-            queryset = queryset.distinct()
-
-        # ── Apply additional filters ────────────────────────────────
-        if image_type:
-            queryset = queryset.filter(image_type=image_type)
+        # ── Additional filters ──────────────────────────────────────
         if search:
-            queryset = queryset.filter(name__icontains=search)
+            queryset = queryset.filter(
+                Q(name__icontains=search) | Q(tags__icontains=search)
+            )
 
         return queryset.order_by('-uploaded_at')
     
     def create(self, request, *args, **kwargs):
-        """Upload a new image."""
+        """Upload a new image with auto org/team/scope."""
         serializer = self.get_serializer(data=request.data, context={'request': request})
         
         if not serializer.is_valid():
             return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
         
         image = serializer.save()
+
+        # Auto-set organization from user profile if not already set
+        updated_fields = []
+        if not image.organization:
+            try:
+                image.organization = request.user.profile.organization
+                updated_fields.append('organization')
+            except Exception:
+                pass
+
+        # Set scope from request (defaults to 'user')
+        scope = request.data.get('scope', 'user')
+        if scope in ('user', 'team', 'organization', 'document'):
+            image.scope = scope
+            updated_fields.append('scope')
+
+        team_id = request.data.get('team')
+        if scope == 'team' and team_id:
+            image.team_id = team_id
+            updated_fields.append('team')
+
+        if updated_fields:
+            image.save(update_fields=updated_fields)
+
+        # Mirror to centralised Attachment library (best-effort)
+        try:
+            from attachments.models import Attachment
+            Attachment.objects.create(
+                name=image.name,
+                file_kind='image',
+                image_type=image.image_type,
+                file=image.image,
+                scope=image.scope,
+                uploaded_by=request.user,
+                organization=image.organization,
+                team=image.team,
+                document=image.document,
+                file_size=image.file_size,
+                mime_type=image.mime_type,
+                width=image.width,
+                height=image.height,
+                tags=image.tags or [],
+            )
+        except Exception:
+            pass
         
         # Return full details
         from .serializers import DocumentImageSerializer

@@ -270,6 +270,22 @@ export const API_ENDPOINTS = {
 		UPLOAD_IMAGE: (id) => `/documents/quick-latex/${id}/upload-image/`,
 		RESOLVE_IMAGES: (id) => `/documents/quick-latex/${id}/resolve-images/`,
 		MAP_IMAGE: (id) => `/documents/quick-latex/${id}/map-image/`,
+		// File uploads
+		FILES: (id) => `/documents/quick-latex/${id}/files/`,
+		UPLOAD_FILE: (id) => `/documents/quick-latex/${id}/upload-file/`,
+	},
+
+	// ── Attachments Library ─────────────────────────────────────────────
+	ATTACHMENTS: {
+		BASE: '/attachments/',
+		BY_ID: (id) => `/attachments/${id}/`,
+		UPLOAD: '/attachments/upload/',
+		MY_UPLOADS: '/attachments/my-uploads/',
+		TEAM: (teamId) => `/attachments/team/${teamId}/`,
+		ORGANIZATION: '/attachments/organization/',
+		IMAGES: '/attachments/images/',
+		DOCUMENTS: '/attachments/documents/',
+		SUMMARY: '/attachments/summary/',
 	},
 
 	// ── Section References ──────────────────────────────────────────────

@@ -3,7 +3,8 @@ import { Link } from 'react-router-dom';
 import {
   X, CheckCircle2, XCircle, AlertCircle,
   Loader2, ChevronDown, ChevronRight, Search,
-  ArrowUpRight, ArrowDownRight, Brain, Zap, Filter,
+  ArrowUpRight, ArrowDownRight, ArrowUp, ArrowDown, ArrowUpDown,
+  Brain, Zap, Filter,
   Download, FileText, FolderArchive, Table, ExternalLink,
 } from 'lucide-react';
 import { workflowApi, triggerBlobDownload } from '@services/clm/clmApi';
@@ -397,7 +398,9 @@ function DocTable({ docs, nodeType, summary, expandedId, onToggle, workflowId })
 
     if (nodeType === 'input') {
       cols.push({ key: 'input_type', label: 'Type', width: 'min-w-[100px]' });
+      cols.push({ key: 'input_status', label: 'Extraction', width: 'min-w-[100px]' });
       cols.push({ key: 'input_fields', label: 'Fields', width: 'min-w-[80px]' });
+      cols.push({ key: 'input_source', label: 'Source', width: 'min-w-[80px]' });
     }
 
     if (nodeType === 'and_gate') {
@@ -441,7 +444,9 @@ function DocTable({ docs, nodeType, summary, expandedId, onToggle, workflowId })
     if (col.key === 'action_status') return doc.details?.action?.status || '—';
     if (col.key === 'val_status')    return doc.details?.validator?.status || '—';
     if (col.key === 'input_type')    return doc.details?.input?.document_type?.replace(/_/g, ' ') || '—';
+    if (col.key === 'input_status')  return doc.details?.input?.extraction_status || '—';
     if (col.key === 'input_fields')  return doc.details?.input?.field_count ?? '—';
+    if (col.key === 'input_source')  return doc.details?.input?.source || '—';
     if (col.key === 'gate_status')    return doc.details?.gate?.status || '—';
     if (col.key === 'dc_status')      return doc.details?.doc_create?.status || '—';
     if (col.key === 'dc_mode')        return doc.details?.doc_create?.creation_mode?.replace(/_/g, ' ') || '—';
@@ -507,8 +512,15 @@ function DocTable({ docs, nodeType, summary, expandedId, onToggle, workflowId })
                       <ConditionCell cond={cellValue(doc, col)} />
                     ) : col.key === 'ai_answer' ? (
                       <AnswerCell value={cellValue(doc, col)} />
-                    ) : col.key === 'action_status' || col.key === 'val_status' || col.key === 'gate_status' || col.key === 'listener_status' || col.key === 'dc_status' ? (
+                    ) : col.key === 'action_status' || col.key === 'val_status' || col.key === 'gate_status' || col.key === 'listener_status' || col.key === 'dc_status' || col.key === 'input_status' ? (
                       <StatusPill status={cellValue(doc, col)} />
+                    ) : col.key === 'input_fields' ? (
+                      (() => {
+                        const count = cellValue(doc, col);
+                        return count != null && count !== '—' ? (
+                          <span className="text-[10px] px-2 py-0.5 rounded-full font-bold bg-blue-100 text-blue-700">{count}</span>
+                        ) : <span className="text-gray-400">—</span>;
+                      })()
                     ) : col.key === 'dc_link' ? (
                       (() => {
                         const docId = cellValue(doc, col);
@@ -824,33 +836,273 @@ function ExpandedDetail({ doc, nodeType }) {
       )}
 
       {d.input && (
-        <DetailSection title="Document Info" accent="blue">
-          <div className="space-y-1.5">
-            <div className="flex items-center gap-3 text-[11px] flex-wrap">
-              <StatusPill status={d.input.extraction_status} />
-              {d.input.document_type && <span className="text-indigo-600 font-medium">{d.input.document_type.replace(/_/g, ' ')}</span>}
-              {d.input.source && <span className="text-gray-500">{d.input.source}</span>}
-              <span className="text-gray-400">{d.input.field_count} fields</span>
-            </div>
-            {d.input.top_fields && Object.keys(d.input.top_fields).length > 0 && (
-              <div className="overflow-x-auto">
-                <table className="text-[10px] border-collapse w-full">
-                  <thead><tr className="text-left text-gray-400"><th className="pr-4 py-1 font-semibold">Field</th><th className="py-1 font-semibold">Value</th></tr></thead>
-                  <tbody>
-                    {Object.entries(d.input.top_fields).map(([k, v]) => (
-                      <tr key={k} className="border-t border-gray-100">
-                        <td className="pr-4 py-1 text-gray-500 font-medium">{k}</td>
-                        <td className="py-1 text-gray-700 max-w-[300px] truncate">{v}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            )}
-          </div>
-        </DetailSection>
+        <InputFieldsSheet input={d.input} />
       )}
     </div>
+  );
+}
+
+
+/* ════════════════════════════════════════════════════════════════
+   InputFieldsSheet — sheet-like metadata viewer for Input nodes
+   Shows all extracted + global fields in a spreadsheet-style table
+   with search, filter by type/source, sort, and quick stats.
+   ════════════════════════════════════════════════════════════════ */
+function InputFieldsSheet({ input }) {
+  const [fieldSearch, setFieldSearch] = useState('');
+  const [typeFilter, setTypeFilter] = useState('all');
+  const [sourceFilter, setSourceFilter] = useState('all');
+  const [sortBy, setSortBy] = useState('key');
+  const [sortDir, setSortDir] = useState('asc');
+  const [showEmpty, setShowEmpty] = useState(true);
+
+  const fields = input.all_fields || [];
+  const fileInfo = input.file_info || {};
+
+  // Compute type counts
+  const typeCounts = useMemo(() => {
+    const c = {};
+    fields.forEach(f => { c[f.type] = (c[f.type] || 0) + 1; });
+    return c;
+  }, [fields]);
+
+  // Filter & sort
+  const filtered = useMemo(() => {
+    let list = [...fields];
+    if (!showEmpty) list = list.filter(f => !f.empty);
+    if (typeFilter !== 'all') list = list.filter(f => f.type === typeFilter);
+    if (sourceFilter !== 'all') list = list.filter(f => f.source === sourceFilter);
+    if (fieldSearch.trim()) {
+      const q = fieldSearch.toLowerCase();
+      list = list.filter(f =>
+        f.key.toLowerCase().includes(q) ||
+        (f.value || '').toLowerCase().includes(q)
+      );
+    }
+    list.sort((a, b) => {
+      let cmp = 0;
+      if (sortBy === 'key') cmp = a.key.localeCompare(b.key);
+      else if (sortBy === 'value') cmp = (a.value || '').localeCompare(b.value || '');
+      else if (sortBy === 'type') cmp = a.type.localeCompare(b.type);
+      else if (sortBy === 'source') cmp = a.source.localeCompare(b.source);
+      return sortDir === 'asc' ? cmp : -cmp;
+    });
+    return list;
+  }, [fields, fieldSearch, typeFilter, sourceFilter, sortBy, sortDir, showEmpty]);
+
+  const handleSort = (col) => {
+    if (sortBy === col) setSortDir(d => d === 'asc' ? 'desc' : 'asc');
+    else { setSortBy(col); setSortDir('asc'); }
+  };
+
+  const TYPE_BADGES = {
+    text:    { bg: 'bg-gray-100',    text: 'text-gray-600',    label: 'Abc' },
+    number:  { bg: 'bg-blue-100',    text: 'text-blue-700',    label: '123' },
+    boolean: { bg: 'bg-purple-100',  text: 'text-purple-700',  label: 'T/F' },
+    list:    { bg: 'bg-amber-100',   text: 'text-amber-700',   label: '[ ]' },
+    object:  { bg: 'bg-rose-100',    text: 'text-rose-700',    label: '{ }' },
+  };
+
+  const emptyCount = fields.filter(f => f.empty).length;
+  const extractedCount = fields.filter(f => f.source === 'extracted').length;
+  const globalCount = fields.filter(f => f.source === 'global').length;
+
+  return (
+    <div className="rounded-lg border border-blue-200 overflow-hidden">
+      {/* ── Header bar ── */}
+      <div className="bg-gradient-to-r from-blue-50 to-sky-50 px-3 py-2.5 border-b border-blue-100">
+        <div className="flex items-center justify-between mb-2">
+          <div className="flex items-center gap-2">
+            <Table size={12} className="text-blue-600" />
+            <span className="text-[11px] font-semibold text-gray-800">Extracted Metadata</span>
+            <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-blue-100 text-blue-700 font-bold">{fields.length}</span>
+          </div>
+          <div className="flex items-center gap-2">
+            <StatusPill status={input.extraction_status} />
+            {input.document_type && (
+              <span className="text-[10px] px-1.5 py-0.5 rounded bg-indigo-100 text-indigo-700 font-medium">
+                {input.document_type.replace(/_/g, ' ')}
+              </span>
+            )}
+          </div>
+        </div>
+
+        {/* Summary chips */}
+        <div className="flex items-center gap-1.5 flex-wrap">
+          <span className="text-[9px] px-1.5 py-0.5 rounded bg-blue-100/80 text-blue-600 font-medium">{extractedCount} extracted</span>
+          {globalCount > 0 && <span className="text-[9px] px-1.5 py-0.5 rounded bg-sky-100/80 text-sky-600 font-medium">{globalCount} global</span>}
+          {emptyCount > 0 && <span className="text-[9px] px-1.5 py-0.5 rounded bg-gray-100 text-gray-500 font-medium">{emptyCount} empty</span>}
+          {Object.entries(typeCounts).map(([t, c]) => (
+            <button
+              key={t}
+              onClick={() => setTypeFilter(typeFilter === t ? 'all' : t)}
+              className={'text-[9px] px-1.5 py-0.5 rounded font-medium transition-colors cursor-pointer ' +
+                (typeFilter === t
+                  ? (TYPE_BADGES[t]?.bg || 'bg-gray-200') + ' ' + (TYPE_BADGES[t]?.text || 'text-gray-700') + ' ring-1 ring-offset-0 ring-gray-300'
+                  : 'bg-white/60 text-gray-400 hover:bg-white')}
+            >
+              {TYPE_BADGES[t]?.label || t} {c}
+            </button>
+          ))}
+          {fileInfo.file_type && (
+            <span className="text-[9px] px-1.5 py-0.5 rounded bg-emerald-100/80 text-emerald-600 font-medium uppercase">
+              {fileInfo.file_type}
+            </span>
+          )}
+        </div>
+      </div>
+
+      {/* ── Search + filters bar ── */}
+      <div className="px-3 py-1.5 bg-white border-b flex items-center gap-2">
+        <div className="relative flex-1">
+          <Search size={10} className="absolute left-2 top-1/2 -translate-y-1/2 text-gray-400" />
+          <input
+            value={fieldSearch}
+            onChange={(e) => setFieldSearch(e.target.value)}
+            placeholder="Search fields or values..."
+            className="w-full pl-6 pr-2 py-1 text-[10px] border rounded-md bg-gray-50 focus:bg-white focus:ring-1 focus:ring-blue-200 focus:border-blue-300 outline-none"
+          />
+          {fieldSearch && (
+            <button onClick={() => setFieldSearch('')} className="absolute right-1.5 top-1/2 -translate-y-1/2 text-gray-300 hover:text-gray-500">
+              <X size={9} />
+            </button>
+          )}
+        </div>
+        <select
+          value={sourceFilter}
+          onChange={(e) => setSourceFilter(e.target.value)}
+          className="text-[10px] px-1.5 py-1 border rounded-md bg-white text-gray-600 focus:ring-1 focus:ring-blue-200 outline-none"
+        >
+          <option value="all">All sources</option>
+          <option value="extracted">Extracted</option>
+          <option value="global">Global</option>
+        </select>
+        <label className="flex items-center gap-1 text-[10px] text-gray-500 cursor-pointer select-none">
+          <input
+            type="checkbox"
+            checked={showEmpty}
+            onChange={(e) => setShowEmpty(e.target.checked)}
+            className="w-3 h-3 rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+          />
+          Empty
+        </label>
+        <span className="text-[9px] text-gray-400">{filtered.length}/{fields.length}</span>
+      </div>
+
+      {/* ── Spreadsheet table ── */}
+      <div className="max-h-[320px] overflow-auto" style={{ scrollbarWidth: 'thin' }}>
+        {filtered.length === 0 ? (
+          <div className="py-8 text-center text-[11px] text-gray-400">
+            {fields.length === 0 ? 'No metadata fields extracted' : 'No fields match your search'}
+          </div>
+        ) : (
+          <table className="w-full text-[10px] border-collapse">
+            <thead className="sticky top-0 z-10">
+              <tr className="bg-gray-50 border-b">
+                <th className="w-8 px-2 py-1.5 text-center text-[9px] text-gray-400 font-semibold">#</th>
+                <SortHeader label="Field Name" col="key" sortBy={sortBy} sortDir={sortDir} onClick={handleSort} />
+                <SortHeader label="Value" col="value" sortBy={sortBy} sortDir={sortDir} onClick={handleSort} />
+                <SortHeader label="Type" col="type" sortBy={sortBy} sortDir={sortDir} onClick={handleSort} width="w-16" />
+                <SortHeader label="Source" col="source" sortBy={sortBy} sortDir={sortDir} onClick={handleSort} width="w-18" />
+              </tr>
+            </thead>
+            <tbody>
+              {filtered.map((f, i) => {
+                const tb = TYPE_BADGES[f.type] || TYPE_BADGES.text;
+                return (
+                  <tr
+                    key={f.key + '-' + i}
+                    className={'border-b border-gray-50 transition-colors hover:bg-blue-50/40 ' +
+                      (f.empty ? 'opacity-50' : '')}
+                  >
+                    <td className="px-2 py-1.5 text-center text-[9px] text-gray-300 font-mono">{i + 1}</td>
+                    <td className="px-3 py-1.5 font-medium text-gray-700 whitespace-nowrap">
+                      <div className="flex items-center gap-1.5">
+                        <span className="truncate max-w-[180px]" title={f.key}>{f.key}</span>
+                        {fieldSearch && f.key.toLowerCase().includes(fieldSearch.toLowerCase()) && (
+                          <span className="w-1 h-1 rounded-full bg-amber-400 shrink-0" />
+                        )}
+                      </div>
+                    </td>
+                    <td className="px-3 py-1.5 text-gray-600">
+                      {f.empty ? (
+                        <span className="text-gray-300 italic">empty</span>
+                      ) : f.type === 'boolean' ? (
+                        <span className={'px-1.5 py-0.5 rounded text-[9px] font-bold ' +
+                          (f.value === 'True' ? 'bg-emerald-100 text-emerald-700' : 'bg-red-100 text-red-700')}>
+                          {f.value}
+                        </span>
+                      ) : f.type === 'number' ? (
+                        <span className="font-mono text-blue-700">{f.value}</span>
+                      ) : f.type === 'list' ? (
+                        <div className="flex items-center gap-1 max-w-[280px] overflow-hidden">
+                          {f.value.split(', ').slice(0, 4).map((item, j) => (
+                            <span key={j} className="text-[9px] px-1 py-0.5 bg-amber-50 border border-amber-200 rounded text-amber-700 whitespace-nowrap truncate max-w-[80px]">{item}</span>
+                          ))}
+                          {f.value.split(', ').length > 4 && (
+                            <span className="text-[9px] text-gray-400">+{f.value.split(', ').length - 4}</span>
+                          )}
+                        </div>
+                      ) : f.type === 'object' ? (
+                        <span className="text-[9px] font-mono text-rose-600 bg-rose-50 px-1.5 py-0.5 rounded max-w-[280px] truncate block" title={f.value}>
+                          {f.value.length > 60 ? f.value.slice(0, 60) + '…' : f.value}
+                        </span>
+                      ) : (
+                        <span className="truncate block max-w-[280px]" title={f.value}>{f.value}</span>
+                      )}
+                    </td>
+                    <td className="px-2 py-1.5 text-center">
+                      <span className={'text-[8px] px-1.5 py-0.5 rounded font-bold ' + tb.bg + ' ' + tb.text}>
+                        {tb.label}
+                      </span>
+                    </td>
+                    <td className="px-2 py-1.5 text-center">
+                      <span className={'text-[8px] px-1.5 py-0.5 rounded font-medium ' +
+                        (f.source === 'extracted' ? 'bg-blue-50 text-blue-500' : 'bg-sky-50 text-sky-500')}>
+                        {f.source}
+                      </span>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        )}
+      </div>
+
+      {/* ── File info footer ── */}
+      {(fileInfo.file_type || fileInfo.created_at) && (
+        <div className="px-3 py-1.5 bg-gray-50/60 border-t flex items-center gap-3 text-[9px] text-gray-400">
+          {fileInfo.file_type && <span className="uppercase font-medium">{fileInfo.file_type}</span>}
+          {fileInfo.page_count && <span>{fileInfo.page_count} page{fileInfo.page_count !== 1 ? 's' : ''}</span>}
+          {fileInfo.file_size && <span>{(fileInfo.file_size / 1024).toFixed(0)} KB</span>}
+          {fileInfo.created_at && <span>Uploaded {new Date(fileInfo.created_at).toLocaleDateString()}</span>}
+          {input.source && <span className="ml-auto">via {input.source}</span>}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ── SortHeader for InputFieldsSheet ── */
+function SortHeader({ label, col, sortBy, sortDir, onClick, width = '' }) {
+  const active = sortBy === col;
+  return (
+    <th
+      onClick={() => onClick(col)}
+      className={'px-3 py-1.5 text-left text-[9px] uppercase tracking-wider font-semibold text-gray-500 cursor-pointer select-none hover:text-gray-800 transition-colors whitespace-nowrap ' + width}
+    >
+      <span className="flex items-center gap-0.5">
+        {label}
+        {active ? (
+          sortDir === 'asc'
+            ? <ArrowUp size={8} className="text-blue-500" />
+            : <ArrowDown size={8} className="text-blue-500" />
+        ) : (
+          <ArrowUpDown size={8} className="text-gray-300" />
+        )}
+      </span>
+    </th>
   );
 }
 

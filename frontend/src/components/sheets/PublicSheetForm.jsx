@@ -14,7 +14,7 @@ import { useState, useEffect } from 'react';
 import { useParams } from 'react-router-dom';
 import {
   CheckCircle, AlertCircle, Loader2, Send,
-  FileSpreadsheet, ClipboardList,
+  FileSpreadsheet, ClipboardList, Calculator,
 } from 'lucide-react';
 import sheetsService from '../../services/sheetsService';
 
@@ -29,6 +29,7 @@ export default function PublicSheetForm() {
   const [submitting, setSubmitting] = useState(false);
   const [submitted, setSubmitted] = useState(false);
   const [submitError, setSubmitError] = useState(null);
+  const [computedOutputs, setComputedOutputs] = useState({});
 
   // Fetch form schema
   useEffect(() => {
@@ -117,9 +118,13 @@ export default function PublicSheetForm() {
     setSubmitError(null);
     setFieldErrors({});
     try {
-      await sheetsService.submitPublicForm(token, {
+      const response = await sheetsService.submitPublicForm(token, {
         data: formValues,
       });
+      // Capture computed formula outputs from response
+      if (response.data?.computed_outputs) {
+        setComputedOutputs(response.data.computed_outputs);
+      }
       setSubmitted(true);
     } catch (err) {
       const data = err.response?.data;
@@ -138,6 +143,7 @@ export default function PublicSheetForm() {
     setSubmitted(false);
     setSubmitError(null);
     setFieldErrors({});
+    setComputedOutputs({});
     const init = {};
     (formSchema?.columns || []).forEach((col) => {
       init[col.key] = '';
@@ -172,6 +178,7 @@ export default function PublicSheetForm() {
 
   // ── Success ──
   if (submitted) {
+    const hasOutputs = Object.keys(computedOutputs).length > 0;
     return (
       <div className="min-h-screen bg-gradient-to-br from-emerald-50 via-white to-cyan-50 flex items-center justify-center">
         <div className="max-w-md mx-auto text-center p-8">
@@ -180,6 +187,27 @@ export default function PublicSheetForm() {
           </div>
           <h2 className="mt-4 text-lg font-semibold text-gray-900">Response Submitted!</h2>
           <p className="mt-2 text-sm text-gray-600">Thank you! Your response has been recorded.</p>
+
+          {/* ── Computed Output Values ─── */}
+          {hasOutputs && (
+            <div className="mt-6 bg-white border border-gray-200 rounded-xl overflow-hidden text-left">
+              <div className="px-4 py-3 bg-gradient-to-r from-blue-50 to-cyan-50 border-b border-gray-100 flex items-center gap-2">
+                <Calculator className="h-4 w-4 text-blue-500" />
+                <p className="text-xs font-semibold text-blue-700">Computed Results</p>
+              </div>
+              <div className="divide-y divide-gray-100">
+                {Object.entries(computedOutputs).map(([key, output]) => (
+                  <div key={key} className="flex items-center justify-between px-4 py-3">
+                    <span className="text-sm text-gray-600 font-medium">{output.label}</span>
+                    <span className="text-sm font-semibold text-gray-900 bg-blue-50 px-3 py-1 rounded-lg">
+                      {output.value}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
           <button
             onClick={handleReset}
             className="mt-6 px-5 py-2.5 text-sm font-medium text-cyan-700 bg-cyan-50 hover:bg-cyan-100 rounded-lg transition-colors"
@@ -193,6 +221,7 @@ export default function PublicSheetForm() {
 
   // ── Form ──
   const columns = formSchema?.columns || [];
+  const outputColumns = formSchema?.output_columns || [];
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-cyan-50 via-white to-blue-50">
@@ -219,6 +248,16 @@ export default function PublicSheetForm() {
           {formSchema?.max_submissions && (
             <div className="px-6 py-2 bg-gray-50 border-b border-gray-100 text-xs text-gray-500">
               {formSchema.submission_count} of {formSchema.max_submissions} responses collected
+            </div>
+          )}
+
+          {/* Output columns notice */}
+          {outputColumns.length > 0 && (
+            <div className="px-6 py-3 bg-blue-50/60 border-b border-blue-100 flex items-center gap-2">
+              <Calculator className="w-4 h-4 text-blue-500 shrink-0" />
+              <p className="text-xs text-blue-600">
+                This form has <strong>{outputColumns.length} computed field{outputColumns.length !== 1 ? 's' : ''}</strong> ({outputColumns.map(c => c.label).join(', ')}) that will be calculated automatically after you submit.
+              </p>
             </div>
           )}
 
@@ -315,6 +354,29 @@ export default function PublicSheetForm() {
               </div>
               );
             })}
+
+            {/* ── Output (formula) columns — read-only indicators ── */}
+            {outputColumns.length > 0 && (
+              <div className="border-t border-gray-100 pt-4 space-y-3">
+                <p className="text-xs font-semibold text-blue-600 uppercase tracking-wider flex items-center gap-1.5">
+                  <Calculator className="w-3.5 h-3.5" />
+                  Computed Fields (auto-calculated)
+                </p>
+                {outputColumns.map((col) => (
+                  <div key={col.key}>
+                    <label className="block text-sm font-medium text-gray-500 mb-1.5">
+                      {col.label || col.key}
+                      <span className="ml-2 text-[10px] px-1.5 py-0.5 rounded bg-blue-100 text-blue-500 font-normal">
+                        formula
+                      </span>
+                    </label>
+                    <div className="w-full border border-gray-200 bg-gray-100 rounded-lg px-3 py-2.5 text-sm text-gray-400 italic">
+                      Will be calculated after submission
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
 
             {submitError && (
               <div className="flex items-start gap-2 bg-red-50 border border-red-200 rounded-lg p-3">

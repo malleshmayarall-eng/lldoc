@@ -77,7 +77,8 @@ function reducer(state, action) {
     case 'SET_PREVIEW':
       return { ...state, previewLoading: false, previewPages: action.payload.pages, previewPdfUrl: action.payload.pdfUrl, previewError: null };
     case 'SET_PREVIEW_ERROR':
-      return { ...state, previewLoading: false, previewError: action.payload, previewPages: [], previewPdfUrl: null };
+      // Keep the previous preview pages so the user can still see the last working render
+      return { ...state, previewLoading: false, previewError: action.payload };
     case 'CLEAR_PREVIEW':
       return { ...state, previewPages: [], previewPdfUrl: null, previewError: null };
     case 'SET_SEARCH':
@@ -278,6 +279,8 @@ export default function useQuickLatex() {
       // Add AI response to chat (with previousCode for diff/undo)
       const code = result?.latex_code || result?.document?.latex_block?.latex_code || '';
       const codePreview = code.length > 120 ? code.slice(0, 120) + '…' : code;
+      const compStatus = result?.compilation_status;
+
       dispatch({
         type: 'ADD_CHAT_MESSAGE',
         payload: {
@@ -297,11 +300,48 @@ export default function useQuickLatex() {
         },
       });
 
+      // If compilation failed, add a follow-up message prompting the user
+      if (compStatus && !compStatus.compiled) {
+        dispatch({
+          type: 'ADD_CHAT_MESSAGE',
+          payload: {
+            documentId: id,
+            message: {
+              id: `comp-err-${Date.now()}`,
+              role: 'assistant',
+              text: compStatus.message || 'The generated code has compilation errors.',
+              actionRequired: true,
+              compilationErrors: {
+                errorSummary: compStatus.error_summary,
+                errorLines: compStatus.error_lines || [],
+                missingPackages: compStatus.missing_packages || [],
+              },
+              previousCode,
+              timestamp: new Date().toISOString(),
+            },
+          },
+        });
+      } else if (compStatus?.auto_fixed) {
+        dispatch({
+          type: 'ADD_CHAT_MESSAGE',
+          payload: {
+            documentId: id,
+            message: {
+              id: `comp-fix-${Date.now()}`,
+              role: 'assistant',
+              text: '⚡ Minor issues in the AI output were automatically corrected.',
+              autoFixed: true,
+              timestamp: new Date().toISOString(),
+            },
+          },
+        });
+      }
+
       dispatch({ type: 'SET_GENERATING', payload: false });
       return result;
     } catch (err) {
       const errorMsg = err?.response?.data?.message || err?.response?.data?.error || err.message;
-      // Add error to chat
+      // Add error to chat — prompt user for follow-up action
       dispatch({
         type: 'ADD_CHAT_MESSAGE',
         payload: {
@@ -311,6 +351,7 @@ export default function useQuickLatex() {
             role: 'assistant',
             text: `Failed: ${errorMsg}`,
             error: true,
+            actionRequired: true,
             timestamp: new Date().toISOString(),
           },
         },
@@ -531,8 +572,16 @@ export default function useQuickLatex() {
 
       return result;
     } catch (err) {
-      const msg = err?.response?.data?.error || err?.response?.data?.detail || err?.message || 'Preview render failed';
-      dispatch({ type: 'SET_PREVIEW_ERROR', payload: msg });
+      const data = err?.response?.data || {};
+      const errorPayload = {
+        message: data.error || data.detail || err?.message || 'Preview render failed',
+        errorLines: data.error_lines || [],       // [{line, message, context}]
+        missingPackages: data.missing_packages || [],
+        rawErrors: data.raw_errors || [],
+        memoryError: data.memory_error || false,
+        hint: data.hint || null,
+      };
+      dispatch({ type: 'SET_PREVIEW_ERROR', payload: errorPayload });
       return null;
     }
   }, []);

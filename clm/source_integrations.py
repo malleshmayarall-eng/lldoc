@@ -45,79 +45,25 @@ def _already_ingested(workflow, source_hash: str) -> bool:
     ).exists()
 
 
-def _reconcile_existing(workflow, source_hash: str, extra_metadata: dict | None):
-    """
-    When a file is already ingested (same source_hash), ensure the existing
-    doc's _source tag matches the current source so the pipeline filter can
-    find it.  Also un-archive it if it was archived from a previous source
-    switch.  Returns the existing doc or None.
-    """
-    from .models import WorkflowDocument
-    doc = WorkflowDocument.objects.filter(
-        workflow=workflow,
-        global_metadata__source_hash=source_hash,
-    ).first()
-    if not doc:
-        return None
-
-    meta = doc.global_metadata or {}
-    new_source = (extra_metadata or {}).get('_source')
-    changed = False
-
-    # Update _source if it changed (e.g. was 'upload', now 'url_scrape')
-    if new_source and meta.get('_source') != new_source:
-        meta['_source'] = new_source
-        changed = True
-
-    # Merge any other extra_metadata keys (source_url, drive_file_id, etc.)
-    if extra_metadata:
-        for k, v in extra_metadata.items():
-            if k not in meta:
-                meta[k] = v
-                changed = True
-
-    # Un-archive if it was archived from a previous source switch
-    update_fields = []
-    if doc.extraction_status == 'archived':
-        doc.extraction_status = 'completed'
-        update_fields.append('extraction_status')
-
-    if changed:
-        doc.global_metadata = meta
-        update_fields.append('global_metadata')
-
-    if update_fields:
-        doc.save(update_fields=update_fields)
-
-    return doc
 
 
-def _create_doc(workflow, title, content_bytes, file_ext, organization,
+
                 extra_metadata=None, user=None):
     """Create a WorkflowDocument from raw bytes, or reconcile if already exists."""
     from .models import WorkflowDocument
 
     source_hash = _file_hash(content_bytes)
     if _already_ingested(workflow, source_hash):
-        # File already exists — just make sure its _source tag is current
-        _reconcile_existing(workflow, source_hash, extra_metadata)
         return None, True  # (doc, skipped)
 
     file_type = file_ext.lower().lstrip('.')
-    # Accept all document-model file_type choices + common archives
     allowed = {
-        # Documents
         'pdf', 'docx', 'doc', 'txt', 'csv', 'json', 'xml', 'html', 'htm',
         'md', 'rtf', 'odt',
-        # Spreadsheets
         'xlsx', 'xls',
-        # Presentations
         'pptx', 'ppt',
-        # Images
         'png', 'jpg', 'jpeg', 'gif', 'bmp', 'tiff', 'tif', 'webp', 'svg',
-        # Archives
         'zip', 'rar', '7z', 'tar', 'gz', 'bz2', 'xz',
-        # Other
         'other',
     }
     if file_type not in allowed:
@@ -140,23 +86,7 @@ def _create_doc(workflow, title, content_bytes, file_ext, organization,
     return doc, False
 
 
-def _run_extraction(doc, workflow):
-    """Run AI extraction on a document if the workflow has a template.
-    If no template exists, mark the document as 'completed' immediately
-    so it passes through the pipeline without blocking."""
-    template = workflow.extraction_template
-    if not template:
-        # No extraction configured — mark as completed so the doc is usable
-        doc.extraction_status = 'completed'
-        doc.save(update_fields=['extraction_status'])
-        return
-    try:
-        from .ai_inference import extract_document
-        extract_document(doc, template, document_type=workflow.document_type)
-    except Exception as e:
-        logger.error(f"Extraction failed for {doc.id}: {e}")
-        doc.extraction_status = 'failed'
-        doc.save(update_fields=['extraction_status'])
+
 
 
 # =========================================================================
@@ -259,43 +189,6 @@ def _fetch_google_drive_public(folder_id, api_key, exts, workflow,
             },
             user=user,
         )
-        if skipped:
-            result['skipped'] += 1
-        elif doc:
-            _run_extraction(doc, workflow)
-            result['found'] += 1
-            result['documents_created'].append({
-                'id': str(doc.id), 'title': doc.title,
-            })
-
-
-def _fetch_google_drive_private(folder_id, creds_json, exts, workflow,
-                                 organization, user, result):
-    """Fetch files from a PRIVATE Google Drive folder using service account credentials."""
-    try:
-        from google.oauth2 import service_account
-        from googleapiclient.discovery import build
-        from googleapiclient.http import MediaIoBaseDownload
-    except ImportError:
-        result['errors'].append(
-            'Google API libraries not installed. '
-            'Run: pip install google-api-python-client google-auth'
-        )
-        return
-
-    import json as _json
-    if os.path.isfile(creds_json):
-        creds = service_account.Credentials.from_service_account_file(
-            creds_json, scopes=['https://www.googleapis.com/auth/drive.readonly']
-        )
-    else:
-        info = _json.loads(creds_json)
-        creds = service_account.Credentials.from_service_account_info(
-            info, scopes=['https://www.googleapis.com/auth/drive.readonly']
-        )
-
-    service = build('drive', 'v3', credentials=creds)
-
     query = f"'{folder_id}' in parents and trashed = false"
     resp = service.files().list(
         q=query, pageSize=100,
@@ -328,7 +221,7 @@ def _fetch_google_drive_private(folder_id, creds_json, exts, workflow,
         if skipped:
             result['skipped'] += 1
         elif doc:
-            _run_extraction(doc, workflow)
+            # Document metadata extraction removed
             result['found'] += 1
             result['documents_created'].append({
                 'id': str(doc.id), 'title': doc.title,
@@ -453,7 +346,7 @@ def fetch_dropbox(node, workflow, organization, user=None):
             if skipped:
                 result['skipped'] += 1
             elif doc:
-                _run_extraction(doc, workflow)
+                # Document metadata extraction removed
                 result['found'] += 1
                 result['documents_created'].append({
                     'id': str(doc.id), 'title': doc.title,
@@ -545,7 +438,7 @@ def fetch_onedrive(node, workflow, organization, user=None):
             if skipped:
                 result['skipped'] += 1
             elif doc:
-                _run_extraction(doc, workflow)
+                # Document metadata extraction removed
                 result['found'] += 1
                 result['documents_created'].append({
                     'id': str(doc.id), 'title': doc.title,
@@ -633,7 +526,7 @@ def fetch_s3(node, workflow, organization, user=None):
                 if skipped:
                     result['skipped'] += 1
                 elif doc:
-                    _run_extraction(doc, workflow)
+                    # Document metadata extraction removed
                     result['found'] += 1
                     result['documents_created'].append({
                         'id': str(doc.id), 'title': doc.title,
@@ -709,7 +602,7 @@ def fetch_ftp(node, workflow, organization, user=None):
                 if skipped:
                     result['skipped'] += 1
                 elif doc:
-                    _run_extraction(doc, workflow)
+                    # Document metadata extraction removed
                     result['found'] += 1
                     result['documents_created'].append({'id': str(doc.id), 'title': doc.title})
 
@@ -746,7 +639,7 @@ def fetch_ftp(node, workflow, organization, user=None):
                 if skipped:
                     result['skipped'] += 1
                 elif doc:
-                    _run_extraction(doc, workflow)
+                    # Document metadata extraction removed
                     result['found'] += 1
                     result['documents_created'].append({'id': str(doc.id), 'title': doc.title})
 
@@ -889,7 +782,7 @@ def _gdown_file(file_id, source_url, workflow, organization, user, result):
     if skipped:
         result['skipped'] += 1
     elif doc:
-        _run_extraction(doc, workflow)
+            # Document metadata extraction removed
         result['found'] += 1
         result['documents_created'].append({'id': str(doc.id), 'title': doc.title})
 
@@ -942,7 +835,7 @@ def _gdown_folder(folder_id, workflow, organization, user, result):
                 if skipped:
                     result['skipped'] += 1
                 elif doc:
-                    _run_extraction(doc, workflow)
+                    # Document metadata extraction removed
                     result['found'] += 1
                     result['documents_created'].append({
                         'id': str(doc.id), 'title': doc.title,
@@ -1185,10 +1078,23 @@ def fetch_from_source(node, workflow, organization, user=None):
     Generic dispatcher: read source_type from node.config and call the
     appropriate handler. Returns the standard result dict.
     """
-    source_type = (node.config or {}).get('source_type', 'upload')
+    # Resolve saved credentials (if credential_id is present in node config)
+    from clm.credential_resolver import resolve_credentials
+    resolved_config = resolve_credentials(node.config or {}, user=user)
+    # Temporarily patch node.config so handlers see the resolved secrets
+    original_config = node.config
+    node.config = resolved_config
+
+    source_type = resolved_config.get('source_type', 'upload')
     handler = SOURCE_HANDLERS.get(source_type)
     if not handler:
+        node.config = original_config
         return {'found': 0, 'skipped': 0, 'documents_created': [], 'errors': [
             f"Unknown source type: {source_type}"
         ]}
-    return handler(node, workflow, organization, user=user)
+    try:
+        result = handler(node, workflow, organization, user=user)
+    finally:
+        # Restore original config to avoid persisting resolved secrets
+        node.config = original_config
+    return result

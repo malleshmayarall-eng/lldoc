@@ -9,7 +9,7 @@ import { useEffect, useState, useCallback } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import {
   ArrowLeft, Save, MoreHorizontal, Share2, Copy, Trash2,
-  Download, Wand2, GitBranch, Loader2, Table2, Link, X,
+  Download, GitBranch, Loader2, Table2, Link, X,
   ClipboardCheck, ExternalLink, LayoutDashboard, LayoutGrid, FileText,
 } from 'lucide-react';
 import useSheetsStore from '../../store/sheetsStore';
@@ -21,6 +21,7 @@ import ImportTableDialog from './ImportTableDialog';
 import { IntelligentDashboard } from './dashboard';
 import SearchDialog from './SearchDialog';
 import TaskProgressBar from './TaskProgressBar';
+import SheetAIChatPanel from './SheetAIChatPanel';
 import { useTaskPoller } from '../../hooks/useTaskPoller';
 import sheetsService from '../../services/sheetsService';
 
@@ -42,8 +43,7 @@ export default function SheetEditor() {
   const [showMenu, setShowMenu] = useState(false);
   const [showWorkflowImport, setShowWorkflowImport] = useState(false);
   const [workflowId, setWorkflowId] = useState('');
-  const [showAIPrompt, setShowAIPrompt] = useState(false);
-  const [aiPrompt, setAiPrompt] = useState('');
+  const [showAIChat, setShowAIChat] = useState(false);
   const [showTableImport, setShowTableImport] = useState(false);
   const [showDashboard, setShowDashboard] = useState(false);
 
@@ -106,13 +106,8 @@ export default function SheetEditor() {
     if (currentSheet) setTitleValue(currentSheet.title);
   }, [currentSheet?.title]);
 
-  // Auto-save every 30 seconds
-  useEffect(() => {
-    const interval = setInterval(() => {
-      if (currentSheet) saveAllCells();
-    }, 30000);
-    return () => clearInterval(interval);
-  }, [currentSheet, saveAllCells]);
+  // Auto-save removed — save only on explicit Save button click.
+  // Each save triggers per-row workflow execution with hash tracking.
 
   const handleTitleSave = useCallback(() => {
     if (currentSheet && titleValue !== currentSheet.title) {
@@ -311,9 +306,7 @@ export default function SheetEditor() {
             <span className="flex items-center gap-1">
               <Loader2 className="h-3 w-3 animate-spin" /> Saving...
             </span>
-          ) : (
-            <span>Auto-saved</span>
-          )}
+          ) : null}
         </div>
 
         {/* Actions */}
@@ -413,7 +406,7 @@ export default function SheetEditor() {
         <>
           {/* ── Toolbar ─────────────────────────────────────────── */}
           <SheetToolbar
-            onAIGenerate={() => setShowAIPrompt(true)}
+            onAIGenerate={() => setShowAIChat((p) => !p)}
             onImportTable={() => setShowTableImport(true)}
             onExport={handleExport}
             onCsvImport={handleCsvImport}
@@ -428,9 +421,14 @@ export default function SheetEditor() {
           {/* ── Formula Bar ─────────────────────────────────────── */}
           <FormulaBar />
 
-          {/* ── Grid ────────────────────────────────────────────── */}
-          <div className="flex-1 min-h-0">
-            <SheetGrid />
+          {/* ── Grid + AI Chat Panel ────────────────────────────── */}
+          <div className="flex-1 min-h-0 flex">
+            <div className="flex-1 min-w-0">
+              <SheetGrid />
+            </div>
+            {showAIChat && (
+              <SheetAIChatPanel onClose={() => setShowAIChat(false)} />
+            )}
           </div>
         </>
       ) : (
@@ -498,46 +496,6 @@ export default function SheetEditor() {
                 className="px-4 py-2 text-sm bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50"
               >
                 Import
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* ── AI Prompt Dialog ────────────────────────────────────── */}
-      {showAIPrompt && (
-        <div className="fixed inset-0 bg-black/30 flex items-center justify-center z-50">
-          <div className="bg-white rounded-xl shadow-2xl w-[420px] p-6">
-            <h3 className="text-lg font-semibold text-gray-900 mb-2 flex items-center gap-2">
-              <Wand2 className="h-5 w-5 text-purple-500" />
-              AI Fill Data
-            </h3>
-            <p className="text-sm text-gray-500 mb-4">
-              Describe what data you want to add to this sheet.
-            </p>
-            <textarea
-              value={aiPrompt}
-              onChange={(e) => setAiPrompt(e.target.value)}
-              placeholder="e.g., Fill with sample vendor data for 10 suppliers..."
-              className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-purple-400 focus:border-purple-400 outline-none mb-4 h-24 resize-none"
-            />
-            <div className="flex justify-end gap-2">
-              <button
-                onClick={() => setShowAIPrompt(false)}
-                className="px-4 py-2 text-sm text-gray-700 hover:bg-gray-100 rounded-lg"
-              >
-                Cancel
-              </button>
-              <button
-                onClick={() => {
-                  // For now this creates a new sheet from prompt
-                  // Could be extended to fill current sheet
-                  setShowAIPrompt(false);
-                }}
-                disabled={!aiPrompt}
-                className="px-4 py-2 text-sm bg-purple-600 text-white rounded-lg hover:bg-purple-700 disabled:opacity-50"
-              >
-                Generate
               </button>
             </div>
           </div>

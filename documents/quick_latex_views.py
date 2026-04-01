@@ -631,11 +631,13 @@ class QuickLatexDocumentViewSet(viewsets.ModelViewSet):
                 "   fancyhdr, enumitem, titlesec, xcolor.\n"
                 "4. For tables, use booktabs and longtable.\n"
                 "5. Produce professional, well-formatted output suitable for XeLaTeX.\n"
-                "6. Use [[field_name]] double-bracket placeholders for dynamic values.\n"
+                "6. NEVER use fontspec, \\setmainfont, \\setsansfont, or \\setmonofont. "
+                "   The system uses Latin Modern fonts which are universally available.\n"
+                "7. Use [[field_name]] double-bracket placeholders for dynamic values.\n"
                 "   CRITICAL: NEVER place a backslash before [[ — write [[x]] directly.\n"
                 "   IMPORTANT: When using [[placeholder]] after a LaTeX command, ALWAYS "
                 "   wrap it in braces: \\author{[[name]]}, \\title{[[title]]}.\n"
-                "7. The output MUST compile without errors under XeLaTeX.\n"
+                "8. The output MUST compile without errors under XeLaTeX.\n"
             )
 
         user_message = (
@@ -695,12 +697,189 @@ class QuickLatexDocumentViewSet(viewsets.ModelViewSet):
         if code_type != 'html':
             generated_code = sanitize_ai_latex_code(generated_code)
 
-        return Response({
+        # ── Compile-verify-fix loop (LaTeX only) ────────────────────────
+        max_compile_retries = min(int(request.data.get('max_retries', 5)), 10)
+        compilation_status = None
+
+        if code_type != 'html':
+            from .latex_render_views import verify_latex_compilation
+
+            # Keep a Gemini conversation history so the AI learns from
+            # each failed attempt.
+            conversation = [
+                {
+                    'role': 'user',
+                    'parts': [
+                        {'text': system_prompt},
+                        {'text': user_message},
+                    ],
+                },
+                {
+                    'role': 'model',
+                    'parts': [{'text': generated_code}],
+                },
+            ]
+
+            compiled_ok = False
+            compilation_attempts = []
+
+            for attempt_num in range(1, max_compile_retries + 1):
+                comp = verify_latex_compilation(generated_code, max_retries=1)
+                attempt_info = {
+                    'attempt': attempt_num,
+                    'compiled': comp['compiled'],
+                    'errors': comp.get('errors', {}),
+                }
+
+                if comp['compiled']:
+                    if comp.get('fixed_code'):
+                        generated_code = comp['fixed_code']
+                        attempt_info['auto_fixed'] = True
+                    compiled_ok = True
+                    compilation_attempts.append(attempt_info)
+                    break
+
+                compilation_attempts.append(attempt_info)
+
+                if attempt_num >= max_compile_retries:
+                    break
+
+                # ── Feed errors back to the AI ──
+                errors = comp.get('errors', {})
+                error_lines = errors.get('error_lines', [])
+                error_summary = errors.get('error_summary', 'Compilation failed')
+                missing_pkgs = errors.get('missing_packages', [])
+
+                error_detail = (
+                    f"Compilation error (attempt {attempt_num}): {error_summary}\n"
+                )
+                if missing_pkgs:
+                    error_detail += (
+                        f"Missing packages: {', '.join(missing_pkgs)}\n"
+                    )
+                for el in error_lines[:5]:
+                    line_str = f"L{el['line']}" if el.get('line') else '?'
+                    error_detail += f"  [{line_str}] {el['message']}"
+                    if el.get('context'):
+                        error_detail += f"  — near: {el['context'][:120]}"
+                    error_detail += "\n"
+
+                fix_prompt = (
+                    f"The LaTeX code you produced failed to compile under XeLaTeX.\n\n"
+                    f"{error_detail}\n"
+                    "Please fix ALL the errors and return the COMPLETE corrected LaTeX "
+                    "document. Do NOT abbreviate or omit sections — return the full "
+                    "document from \\documentclass to \\end{document}.\n"
+                    "Return ONLY the LaTeX source code — no explanations or markdown fences."
+                )
+
+                conversation.append({
+                    'role': 'user',
+                    'parts': [{'text': fix_prompt}],
+                })
+
+                try:
+                    fix_response = call_gemini(
+                        {
+                            'contents': conversation,
+                            'generationConfig': {
+                                'temperature': 0.1,
+                                'topP': 0.8,
+                                'topK': 20,
+                                'maxOutputTokens': 16000,
+                            },
+                        },
+                        api_key=api_key,
+                    )
+                except Exception:
+                    break  # AI call failed — stop retrying
+
+                # Extract fixed code
+                fixed_code = ''
+                try:
+                    fix_candidates = fix_response.get('candidates', [])
+                    if fix_candidates:
+                        fix_parts = (
+                            fix_candidates[0].get('content', {}).get('parts', [])
+                        )
+                        fix_raw = ''.join(
+                            p.get('text', '') for p in fix_parts
+                        )
+                        fix_fence = re.search(
+                            r'```(?:latex|tex)?\s*\n?(.*?)```',
+                            fix_raw,
+                            re.DOTALL,
+                        )
+                        fixed_code = (
+                            fix_fence.group(1).strip() if fix_fence
+                            else fix_raw.strip()
+                        )
+                except Exception:
+                    pass
+
+                if not fixed_code:
+                    break  # AI returned empty — stop retrying
+
+                fixed_code = sanitize_ai_latex_code(fixed_code)
+                conversation.append({
+                    'role': 'model',
+                    'parts': [{'text': fixed_code}],
+                })
+                generated_code = fixed_code
+
+            # Build compilation_status for response
+            if compiled_ok:
+                was_auto_fixed = any(
+                    a.get('auto_fixed') for a in compilation_attempts
+                )
+                compilation_status = {
+                    'compiled': True,
+                    'auto_fixed': was_auto_fixed or len(compilation_attempts) > 1,
+                    'total_attempts': len(compilation_attempts),
+                    'attempts': compilation_attempts,
+                }
+                if len(compilation_attempts) > 1:
+                    compilation_status['message'] = (
+                        f'AI code compiled after {len(compilation_attempts)} '
+                        f'attempt(s) (auto-corrected '
+                        f'{len(compilation_attempts) - 1} time(s)).'
+                    )
+            else:
+                last_errors = (
+                    compilation_attempts[-1].get('errors', {})
+                    if compilation_attempts else {}
+                )
+                compilation_status = {
+                    'compiled': False,
+                    'auto_fixed': False,
+                    'action_required': True,
+                    'total_attempts': len(compilation_attempts),
+                    'attempts': compilation_attempts,
+                    'error_summary': last_errors.get(
+                        'error_summary', 'Unknown error'
+                    ),
+                    'error_lines': last_errors.get('error_lines', [])[:5],
+                    'missing_packages': last_errors.get(
+                        'missing_packages', []
+                    ),
+                    'message': (
+                        f'The AI-generated code has compilation errors that '
+                        f'could not be auto-fixed after '
+                        f'{len(compilation_attempts)} attempt(s). '
+                        f'You can provide suggestions and try again, or '
+                        f'edit manually.'
+                    ),
+                }
+
+        resp = {
             'status': 'success',
             'latex_code': generated_code,
             'code_type': code_type,
             'placeholders': _extract_placeholders(generated_code),
-        })
+        }
+        if compilation_status:
+            resp['compilation_status'] = compilation_status
+        return Response(resp)
 
     # ── AI GENERATE ──────────────────────────────────────────────────────
 
@@ -855,40 +1034,74 @@ class QuickLatexDocumentViewSet(viewsets.ModelViewSet):
         else:
             system_prompt = (
                 f"{document_ai_context}"
-                "You are an expert LaTeX code generator. You produce clean, compilable "
-                "LaTeX documents using standard packages.\n\n"
-                "RULES:\n"
-                "1. Return ONLY the LaTeX source code — no explanations, no markdown fences.\n"
-                "2. Always include a complete, self-contained LaTeX document.\n"
-                "3. Use standard packages: amsmath, amssymb, geometry, hyperref, graphicx, "
-                "   fancyhdr, enumitem, titlesec, xcolor.\n"
-                "4. For tables, use booktabs and longtable.\n"
-                "5. Produce professional, well-formatted output suitable for XeLaTeX.\n"
-                "6. NEVER use square brackets for placeholder text like [Your Name]. "
-                "   Use [[field_name]] double-bracket placeholders for dynamic values.\n"
-                "   CRITICAL: NEVER place a backslash before [[ — writing \\[[x]] "
-                "   creates \\[ which triggers LaTeX math mode and crashes the compiler. "
-                "   Write [[x]] WITHOUT a preceding backslash.\n"
-                "   IMPORTANT: When using [[placeholder]] after a LaTeX command, ALWAYS "
-                "   wrap it in braces: \\author{[[name]]}, \\title{[[title]]}, "
-                "   \\textbf{[[value]]}. NEVER write \\author[[name]] without braces.\n"
-                "7. The output MUST compile without errors under XeLaTeX.\n"
-                "8. IMAGE PLACEHOLDERS: Where an image would naturally appear (company logo,\n"
-                "   signature block, stamp, diagram, etc.), insert [[image:descriptive_name]]\n"
-                "   as a BARE placeholder — do NOT wrap it in \\includegraphics.\n"
-                "   The system will automatically generate the correct \\includegraphics\n"
-                "   command with proper file paths at render time.\n"
-                "   You MAY wrap [[image:name]] in a figure environment for layout:\n"
-                "     \\begin{figure}[h]\\centering [[image:company_logo]] \\end{figure}\n"
-                "   But write the placeholder DIRECTLY — never write:\n"
-                "     \\includegraphics[width=3cm]{[[image:logo]]}  ← WRONG\n"
-                "   Instead write:\n"
-                "     [[image:logo]]  ← CORRECT\n"
-                "   Use descriptive snake_case names: company_logo, header_logo, signature,\n"
-                "   stamp, diagram_1, chart_overview, letterhead_bg, etc.\n"
-                "9. NEVER use \\includegraphics directly. Never write \\includegraphics{} "
-                "   with an empty path, a URL, or a [[placeholder]]. The system handles all "
-                "   image inclusion automatically from [[image:name]] placeholders.\n"
+                "You are an expert legal / professional document generator that "
+                "produces clean, compilable LaTeX source code.\n\n"
+
+                "═══ GENERATION APPROACH (follow this order) ═══\n"
+                "STEP 1 — STRUCTURE: Plan the document outline first:\n"
+                "  • Title, subtitle, date, parties\n"
+                "  • Numbered sections and subsections in a logical hierarchy\n"
+                "  • Key clauses, definitions, obligations, terms\n"
+                "  • Tables for structured data (pricing, schedules, contacts)\n"
+                "  • Signature blocks, annexes, exhibits as needed\n"
+                "STEP 2 — LATEX: Convert the outline into clean LaTeX code.\n"
+                "  Return ONLY the LaTeX source — no explanations, no markdown fences.\n\n"
+
+                "═══ DOCUMENT STRUCTURE RULES ═══\n"
+                "1. Always produce a COMPLETE document: \\documentclass → preamble → "
+                "   \\begin{document} → content → \\end{document}.\n"
+                "2. Use \\documentclass[12pt]{article} unless the user requests otherwise.\n"
+                "3. Organise with \\section{}, \\subsection{}, \\subsubsection{} — "
+                "   number them explicitly (1., 1.1, 1.1.1) in the heading text for legal docs.\n"
+                "4. Use \\begin{enumerate}[label=\\alph*)] or \\begin{itemize} for lists.\n"
+                "5. For tables: \\begin{tabular} or \\begin{longtable} with booktabs "
+                "   (\\toprule, \\midrule, \\bottomrule). NEVER leave cells empty in a "
+                "   way that mismatches column count.\n"
+                "6. Signature blocks: use a simple \\vspace{2cm} + \\noindent + \\rule "
+                "   pattern, NOT tikz or minipages unless explicitly asked.\n\n"
+
+                "═══ COMPILATION / SAFETY RULES ═══\n"
+                "The system compiles with XeLaTeX. The renderer AUTOMATICALLY injects "
+                "these packages if missing, so you do NOT need to add them:\n"
+                "  amsmath, amssymb, amsfonts, mathtools, booktabs, longtable, multirow,\n"
+                "  tabularx, array, graphicx, xcolor, enumitem, setspace, parskip,\n"
+                "  hyperref, float, placeins, caption, listings, microtype, ragged2e,\n"
+                "  fancyvrb.\n"
+                "You MAY add \\usepackage{geometry} with your own margins, or any other "
+                "package you actually need. But do NOT add packages already listed above.\n\n"
+                "CRITICAL — these cause the most compilation crashes:\n"
+                "• Every \\begin{env} MUST have a matching \\end{env} — count them.\n"
+                "• NEVER write \\[ or \\] unless you intend display math mode.\n"
+                "• NEVER place a backslash directly before [[ — writing \\\\[[x]] "
+                "  creates \\\\[ which is display-math. Write [[x]] with NO preceding backslash.\n"
+                "• After a command, ALWAYS use braces: \\textbf{text}, \\author{[[name]]}. "
+                "  NEVER write \\textbf text or \\author[[name]] without braces.\n"
+                "• In tables, each row must have EXACTLY the right number of & separators "
+                "  (one fewer than the column count). End every row with \\\\.\n"
+                "• NEVER use \\includegraphics — the system handles images automatically.\n"
+                "• NEVER use \\input{} or \\include{} — everything must be self-contained.\n"
+                "• NEVER use fontspec, \\setmainfont, \\setsansfont, or \\setmonofont. "
+                "  The system uses Latin Modern fonts which are universally available.\n"
+                "• If you use \\href, ensure the URL has no unescaped special characters.\n"
+                "• Do NOT define \\def or \\newcommand for common LaTeX commands.\n\n"
+
+                "═══ PLACEHOLDER SYSTEM ═══\n"
+                "Use [[field_name]] (double square brackets) for dynamic values:\n"
+                "  ✓ This agreement is between [[party_a]] and [[party_b]].\n"
+                "  ✓ \\textbf{[[company_name]]}\n"
+                "  ✗ [Your Name]  — WRONG, must be [[your_name]]\n"
+                "  ✗ \\textbf\\[[name]]  — WRONG, missing braces + backslash before [[\n"
+                "For images, use [[image:descriptive_name]] as bare text (NOT inside "
+                "\\includegraphics). You may wrap in a figure:\n"
+                "  \\begin{figure}[h]\\centering [[image:company_logo]] \\end{figure}\n\n"
+
+                "═══ QUALITY CHECKLIST (verify before returning) ═══\n"
+                "□ Document compiles: every \\begin has \\end, braces are balanced.\n"
+                "□ No \\includegraphics, no \\input, no \\include.\n"
+                "□ No backslash before [[.\n"
+                "□ All table rows have correct & count.\n"
+                "□ Placeholders use [[snake_case]] format.\n"
+                "□ Professional formatting: consistent spacing, proper headings.\n"
             )
 
         if preamble:
@@ -899,13 +1112,19 @@ class QuickLatexDocumentViewSet(viewsets.ModelViewSet):
         if ai_mode == 'edit' and existing_code:
             # ── Edit mode: modify existing code based on instructions ──
             system_prompt += (
-                f"\nMODE: EDIT EXISTING CODE\n"
-                f"You have been given existing {lang_label} code below. "
-                f"Apply the user's requested changes to this code. "
-                f"Return the COMPLETE updated document — not just the changed parts.\n"
-                f"Preserve all existing structure, formatting, and [[placeholder]] "
-                f"placeholders unless the user specifically asks to change them.\n"
-                f"Do NOT add explanations, comments about what changed, or markdown fences.\n\n"
+                f"\n═══ MODE: EDIT EXISTING CODE ═══\n"
+                f"You are editing an existing {lang_label} document.\n"
+                f"APPROACH:\n"
+                f"  1. READ the existing code and understand its structure.\n"
+                f"  2. PLAN what needs to change to fulfil the user's request.\n"
+                f"  3. APPLY the changes and return the COMPLETE updated document "
+                f"     — not just the changed parts.\n"
+                f"RULES:\n"
+                f"  • Preserve all existing structure, formatting, and [[placeholder]] "
+                f"    placeholders unless the user specifically asks to change them.\n"
+                f"  • Keep the same \\documentclass and preamble unless changes require new packages.\n"
+                f"  • Do NOT add explanations, comments about what changed, or markdown fences.\n"
+                f"  • Ensure the edited document still compiles — run the QUALITY CHECKLIST.\n\n"
                 f"--- EXISTING {lang_label.upper()} CODE ---\n"
                 f"{existing_code[:8000]}\n"
                 f"--- END EXISTING CODE ---\n"
@@ -932,6 +1151,12 @@ class QuickLatexDocumentViewSet(viewsets.ModelViewSet):
             user_message = (
                 f"Document: \"{doc_title}\" (type: {doc_type})\n\n"
                 f"User request:\n{prompt}"
+            )
+
+        suggestions = d.get('suggestions', '').strip()
+        if suggestions:
+            user_message += (
+                f"\n\nUser suggestions / additional instructions:\n{suggestions}"
             )
 
         payload = {
@@ -995,6 +1220,159 @@ class QuickLatexDocumentViewSet(viewsets.ModelViewSet):
         if code_type != 'html':
             generated_code = sanitize_ai_latex_code(generated_code)
 
+        # ── Compile-verify-fix loop (up to max_retries iterations) ───────
+        max_compile_retries = min(int(request.data.get('max_retries', 5)), 10)
+        compilation_status = None
+        compilation_attempts = []
+
+        if code_type != 'html':
+            from .latex_render_views import compile_latex_with_document
+
+            # Keep a Gemini conversation history so the AI learns from
+            # each failed attempt.
+            conversation = [
+                {
+                    'role': 'user',
+                    'parts': [
+                        {'text': system_prompt},
+                        {'text': user_message},
+                    ],
+                },
+                {
+                    'role': 'model',
+                    'parts': [{'text': generated_code}],
+                },
+            ]
+
+            compiled_ok = False
+            for attempt_num in range(1, max_compile_retries + 1):
+                comp = compile_latex_with_document(
+                    generated_code, doc, max_retries=1,
+                )
+                attempt_info = {
+                    'attempt': attempt_num,
+                    'compiled': comp['compiled'],
+                    'errors': comp.get('errors', {}),
+                }
+
+                if comp['compiled']:
+                    if comp.get('fixed_code'):
+                        generated_code = comp['fixed_code']
+                        attempt_info['auto_fixed'] = True
+                    compiled_ok = True
+                    compilation_attempts.append(attempt_info)
+                    break
+
+                compilation_attempts.append(attempt_info)
+
+                if attempt_num >= max_compile_retries:
+                    break
+
+                # ── Feed errors back to the AI ──
+                errors = comp.get('errors', {})
+                error_lines = errors.get('error_lines', [])
+                error_summary = errors.get('error_summary', 'Compilation failed')
+                missing_pkgs = errors.get('missing_packages', [])
+
+                error_detail = f"Compilation error (attempt {attempt_num}): {error_summary}\n"
+                if missing_pkgs:
+                    error_detail += f"Missing packages: {', '.join(missing_pkgs)}\n"
+                for el in error_lines[:5]:
+                    line_str = f"L{el['line']}" if el.get('line') else '?'
+                    error_detail += f"  [{line_str}] {el['message']}"
+                    if el.get('context'):
+                        error_detail += f"  — near: {el['context'][:120]}"
+                    error_detail += "\n"
+
+                fix_prompt = (
+                    f"The LaTeX code you produced failed to compile under XeLaTeX.\n\n"
+                    f"{error_detail}\n"
+                    "Please fix ALL the errors and return the COMPLETE corrected LaTeX "
+                    "document. Do NOT abbreviate or omit sections — return the full "
+                    "document from \\documentclass to \\end{document}.\n"
+                    "Return ONLY the LaTeX source code — no explanations or markdown fences."
+                )
+
+                conversation.append({
+                    'role': 'user',
+                    'parts': [{'text': fix_prompt}],
+                })
+
+                try:
+                    fix_response = call_gemini(
+                        {
+                            'contents': conversation,
+                            'generationConfig': {
+                                'temperature': 0.1,
+                                'topP': 0.8,
+                                'topK': 20,
+                                'maxOutputTokens': 16000,
+                            },
+                        },
+                        api_key=api_key,
+                    )
+                except Exception:
+                    break  # AI call failed — stop retrying
+
+                # Extract fixed code
+                fixed_code = ''
+                try:
+                    fix_candidates = fix_response.get('candidates', [])
+                    if fix_candidates:
+                        fix_parts = fix_candidates[0].get('content', {}).get('parts', [])
+                        fix_raw = ''.join(p.get('text', '') for p in fix_parts)
+                        fix_fence = re.search(
+                            r'```(?:latex|tex)?\s*\n?(.*?)```', fix_raw, re.DOTALL,
+                        )
+                        fixed_code = (
+                            fix_fence.group(1).strip() if fix_fence
+                            else fix_raw.strip()
+                        )
+                except Exception:
+                    pass
+
+                if not fixed_code:
+                    break  # AI returned empty — stop retrying
+
+                fixed_code = sanitize_ai_latex_code(fixed_code)
+                conversation.append({
+                    'role': 'model',
+                    'parts': [{'text': fixed_code}],
+                })
+                generated_code = fixed_code
+
+            # Build compilation_status for response
+            if compiled_ok:
+                was_auto_fixed = any(a.get('auto_fixed') for a in compilation_attempts)
+                compilation_status = {
+                    'compiled': True,
+                    'auto_fixed': was_auto_fixed or len(compilation_attempts) > 1,
+                    'total_attempts': len(compilation_attempts),
+                    'attempts': compilation_attempts,
+                }
+                if len(compilation_attempts) > 1:
+                    compilation_status['message'] = (
+                        f'AI code compiled after {len(compilation_attempts)} attempt(s) '
+                        f'(auto-corrected {len(compilation_attempts) - 1} time(s)).'
+                    )
+            else:
+                last_errors = compilation_attempts[-1].get('errors', {}) if compilation_attempts else {}
+                compilation_status = {
+                    'compiled': False,
+                    'auto_fixed': False,
+                    'action_required': True,
+                    'total_attempts': len(compilation_attempts),
+                    'attempts': compilation_attempts,
+                    'error_summary': last_errors.get('error_summary', 'Unknown error'),
+                    'error_lines': last_errors.get('error_lines', [])[:5],
+                    'missing_packages': last_errors.get('missing_packages', []),
+                    'message': (
+                        f'The AI-generated code has compilation errors that could not '
+                        f'be auto-fixed after {len(compilation_attempts)} attempt(s). '
+                        f'You can provide suggestions and try again, or edit manually.'
+                    ),
+                }
+
         # Save to document + block
         doc.latex_code = generated_code
         doc.is_latex_code = True
@@ -1015,12 +1393,15 @@ class QuickLatexDocumentViewSet(viewsets.ModelViewSet):
         # Seed document_metadata with newly-discovered [[placeholder]] keys
         _seed_metadata_from_placeholders(doc, generated_code)
 
-        return Response({
+        resp = {
             'status': 'success',
             'latex_code': generated_code,
             'code_type': code_type,
             'document': QuickLatexDocumentSerializer(doc).data,
-        })
+        }
+        if compilation_status:
+            resp['compilation_status'] = compilation_status
+        return Response(resp)
 
     # ── SWITCH CODE TYPE ─────────────────────────────────────────────────
 
@@ -1339,21 +1720,21 @@ class QuickLatexDocumentViewSet(viewsets.ModelViewSet):
         """
         GET /api/documents/quick-latex/<uuid>/images/
         List all images available to the current user for use in
-        ``[[image:<uuid>]]`` placeholders.  Supports search and type filter.
+        ``[[image:<uuid>]]`` placeholders.
+
+        Uses organisation / team scoping so:
+          • Organisation-scoped images are visible to all org members
+          • Team-scoped images are visible to team members
+          • User-scoped images are visible only to the uploader
 
         Query params:
           ?search=keyword     — filter by name (icontains)
           ?type=logo          — filter by image_type
-          ?include_public=true — include public images
+          ?scope=organization|team|user  — filter by scope
         """
 
-        qs = DocumentImage.objects.filter(uploaded_by=request.user)
-
-        include_public = request.query_params.get('include_public', 'false').lower() == 'true'
-        if include_public:
-            qs = DocumentImage.objects.filter(
-                Q(uploaded_by=request.user) | Q(is_public=True)
-            )
+        image_type = request.query_params.get('type', '').strip()
+        qs = DocumentImage.visible_to_user(request.user, image_type=image_type or None)
 
         search = request.query_params.get('search', '').strip()
         if search:
@@ -1362,9 +1743,9 @@ class QuickLatexDocumentViewSet(viewsets.ModelViewSet):
                 Q(caption__icontains=search)
             )
 
-        image_type = request.query_params.get('type', '').strip()
-        if image_type:
-            qs = qs.filter(image_type=image_type)
+        scope = request.query_params.get('scope', '').strip()
+        if scope:
+            qs = qs.filter(scope=scope)
 
         qs = qs.order_by('-uploaded_at')[:100]
 
@@ -1398,10 +1779,17 @@ class QuickLatexDocumentViewSet(viewsets.ModelViewSet):
         Upload an image and get back the ``[[image:<uuid>]]`` placeholder
         to insert into the code editor.
 
+        The image is automatically scoped based on the ``scope`` field
+        in the request (defaults to ``'user'``).  When scope is
+        ``'organization'`` or ``'team'``, the image becomes visible to
+        all org / team members respectively.
+
         Multipart form data:
           image: file
           name: str (optional, defaults to filename)
           image_type: str (optional, defaults to 'picture')
+          scope: str (optional — 'user', 'team', 'organization'; default 'user')
+          team: uuid (optional — required when scope='team')
         """
         doc = self.get_object()
 
@@ -1415,6 +1803,15 @@ class QuickLatexDocumentViewSet(viewsets.ModelViewSet):
         name = request.data.get('name', image_file.name or 'Unnamed')
         image_type = request.data.get('image_type', 'picture')
         caption = request.data.get('caption', '')
+        scope = request.data.get('scope', 'user')
+        team_id = request.data.get('team', None)
+
+        # Auto-resolve organisation from user profile
+        org = None
+        try:
+            org = request.user.profile.organization
+        except Exception:
+            pass
 
         img = DocumentImage(
             document=doc,
@@ -1423,8 +1820,35 @@ class QuickLatexDocumentViewSet(viewsets.ModelViewSet):
             caption=caption,
             image=image_file,
             uploaded_by=request.user,
+            scope=scope,
+            organization=org,
         )
+        if scope == 'team' and team_id:
+            img.team_id = team_id
         img.save()
+
+        # Also create a mirror Attachment record so it appears in the
+        # centralised attachments library.
+        try:
+            from attachments.models import Attachment
+            Attachment.objects.create(
+                name=name,
+                file_kind='image',
+                image_type=image_type,
+                file=img.image,
+                scope=scope,
+                uploaded_by=request.user,
+                organization=org,
+                team_id=team_id if scope == 'team' else None,
+                document=doc,
+                file_size=img.file_size,
+                mime_type=img.mime_type,
+                width=img.width,
+                height=img.height,
+                tags=img.tags or [],
+            )
+        except Exception:
+            pass  # Non-critical — attachment mirror is best-effort
 
         return Response({
             'status': 'success',
@@ -1483,10 +1907,8 @@ class QuickLatexDocumentViewSet(viewsets.ModelViewSet):
             except (ValueError, AttributeError):
                 pass
 
-        images = DocumentImage.objects.filter(
-            Q(id__in=valid_uuids),
-            Q(uploaded_by=request.user) | Q(is_public=True) |
-            Q(document__created_by=request.user)
+        images = DocumentImage.visible_to_user(request.user).filter(
+            id__in=valid_uuids
         )
 
         result = {}
@@ -1501,8 +1923,30 @@ class QuickLatexDocumentViewSet(viewsets.ModelViewSet):
                 'height': img.height,
                 'file_size': img.file_size,
                 'mime_type': img.mime_type,
-                'caption': img.caption,
+                'caption': getattr(img, 'caption', ''),
             }
+
+        # Fallback: check Attachment table for any UUIDs not found
+        missing = [u for u in valid_uuids if str(u) not in result]
+        if missing:
+            try:
+                from attachments.models import Attachment
+                for att in Attachment.objects.filter(id__in=missing, file_kind='image'):
+                    url = att.get_url()
+                    result[str(att.id)] = {
+                        'id': str(att.id),
+                        'name': att.name,
+                        'image_type': att.image_type or 'picture',
+                        'url': url,
+                        'thumbnail_url': att.get_thumbnail_url() or url,
+                        'width': att.width,
+                        'height': att.height,
+                        'file_size': att.file_size,
+                        'mime_type': att.mime_type,
+                        'caption': '',
+                    }
+            except Exception:
+                pass
 
         return Response({
             'images': result,
@@ -1566,11 +2010,18 @@ class QuickLatexDocumentViewSet(viewsets.ModelViewSet):
                     {'error': 'image_id must be a valid UUID.'},
                     status=status.HTTP_400_BAD_REQUEST,
                 )
-            img = DocumentImage.objects.filter(
-                Q(id=img_uuid),
-                Q(uploaded_by=request.user) | Q(is_public=True) |
-                Q(document__created_by=request.user),
+            img = DocumentImage.visible_to_user(request.user).filter(
+                id=img_uuid,
             ).first()
+            if not img:
+                # Fallback: check Attachment table
+                try:
+                    from attachments.models import Attachment
+                    img = Attachment.objects.filter(
+                        id=img_uuid, file_kind='image',
+                    ).first()
+                except Exception:
+                    pass
             if not img:
                 return Response(
                     {'error': 'Image not found or not accessible.'},
@@ -1599,6 +2050,17 @@ class QuickLatexDocumentViewSet(viewsets.ModelViewSet):
                 u = img_obj.get_url()
                 if u:
                     url_map[str(img_obj.id)] = request.build_absolute_uri(u)
+            # Fallback to Attachment table for any missing UUIDs
+            missing = [u for u in mapped_uuids if str(u) not in url_map]
+            if missing:
+                try:
+                    from attachments.models import Attachment
+                    for att in Attachment.objects.filter(id__in=missing, file_kind='image'):
+                        u = att.get_url()
+                        if u:
+                            url_map[str(att.id)] = request.build_absolute_uri(u)
+                except Exception:
+                    pass
         meta['_image_url_map'] = url_map
 
         # Persist code changes
@@ -1624,6 +2086,195 @@ class QuickLatexDocumentViewSet(viewsets.ModelViewSet):
             'image_placeholders': img_map,
             'document': QuickLatexDocumentSerializer(doc).data,
         })
+
+    # ── FILE UPLOADS ─────────────────────────────────────────────────────
+
+    @action(detail=True, methods=['get'], url_path='files')
+    def list_files(self, request, pk=None):
+        """
+        GET /api/documents/quick-latex/<uuid>/files/
+        List all files available to the current user.
+
+        Uses organisation / team scoping so:
+          • Organisation-scoped files are visible to all org members
+          • Team-scoped files are visible to team members
+          • User-scoped files are visible only to the uploader
+
+        Query params:
+          ?search=keyword        — filter by name (icontains)
+          ?file_type=pdf         — filter by file_type
+          ?category=contract     — filter by category
+          ?access_level=organization|team|user  — filter by access level
+        """
+        from .models import DocumentFile
+
+        file_type = request.query_params.get('file_type', '').strip() or None
+        qs = DocumentFile.visible_to_user(request.user, file_type=file_type)
+
+        search = request.query_params.get('search', '').strip()
+        if search:
+            qs = qs.filter(
+                Q(name__icontains=search) |
+                Q(description__icontains=search) |
+                Q(original_filename__icontains=search)
+            )
+
+        category = request.query_params.get('category', '').strip()
+        if category:
+            qs = qs.filter(category=category)
+
+        access_level = request.query_params.get('access_level', '').strip()
+        if access_level:
+            qs = qs.filter(access_level=access_level)
+
+        qs = qs.order_by('-uploaded_at')[:100]
+
+        files = []
+        for f in qs:
+            files.append({
+                'id': str(f.id),
+                'name': f.name,
+                'file_type': f.file_type,
+                'category': f.category,
+                'access_level': f.access_level,
+                'url': f.file.url if f.file else None,
+                'file_size': f.file_size,
+                'file_size_display': f.get_file_size_display(),
+                'mime_type': f.mime_type,
+                'original_filename': f.original_filename,
+                'uploaded_at': f.uploaded_at.isoformat() if f.uploaded_at else None,
+                'tags': f.tags or [],
+                'description': f.description,
+            })
+
+        return Response({
+            'files': files,
+            'count': len(files),
+        })
+
+    @action(detail=True, methods=['post'], url_path='upload-file')
+    def upload_file(self, request, pk=None):
+        """
+        POST /api/documents/quick-latex/<uuid>/upload-file/
+        Upload a file to the document's file library.
+
+        The file is automatically scoped based on the ``access_level`` field
+        in the request (defaults to ``'user'``).
+
+        Multipart form data:
+          file: file (REQUIRED)
+          name: str (optional, defaults to filename)
+          description: str (optional)
+          file_type: str (optional, auto-detected)
+          category: str (optional, defaults to 'other')
+          access_level: str (optional — 'user', 'team', 'organization'; default 'user')
+          team: uuid (optional — required when access_level='team')
+          tags: list (optional)
+        """
+        from .models import DocumentFile
+
+        doc = self.get_object()
+
+        uploaded_file = request.FILES.get('file')
+        if not uploaded_file:
+            return Response(
+                {'error': 'file is required.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        import os, mimetypes
+
+        name = request.data.get('name', '') or os.path.splitext(uploaded_file.name or 'Untitled')[0]
+        description = request.data.get('description', '')
+        category = request.data.get('category', 'other')
+        access_level = request.data.get('access_level', 'user')
+        team_id = request.data.get('team', None)
+        tags = request.data.get('tags', [])
+        if isinstance(tags, str):
+            import json as _json
+            try:
+                tags = _json.loads(tags)
+            except Exception:
+                tags = [t.strip() for t in tags.split(',') if t.strip()]
+
+        # Auto-detect file_type
+        ext = os.path.splitext(uploaded_file.name or '')[1].lower().lstrip('.')
+        ext_map = {
+            'pdf': 'pdf', 'docx': 'docx', 'doc': 'doc', 'xlsx': 'xlsx',
+            'xls': 'xls', 'pptx': 'pptx', 'ppt': 'ppt', 'txt': 'txt',
+            'csv': 'csv', 'json': 'json', 'xml': 'xml', 'zip': 'zip',
+            'rar': 'rar', 'md': 'md', 'rtf': 'rtf', 'odt': 'odt',
+            'ods': 'ods', 'odp': 'odp',
+        }
+        file_type = request.data.get('file_type', '') or ext_map.get(ext, 'other')
+
+        # Auto-resolve organisation from user profile
+        org = None
+        try:
+            org = request.user.profile.organization
+        except Exception:
+            pass
+
+        doc_file = DocumentFile(
+            name=name,
+            description=description,
+            file=uploaded_file,
+            file_type=file_type,
+            category=category,
+            access_level=access_level,
+            uploaded_by=request.user,
+            organization=org,
+            tags=tags,
+        )
+        if access_level == 'team' and team_id:
+            doc_file.team_id = team_id
+        doc_file.save()
+
+        # Mirror to Attachment library (best-effort)
+        try:
+            from attachments.models import Attachment
+
+            file_kind = 'document'
+            if doc_file.mime_type and doc_file.mime_type.startswith('image/'):
+                file_kind = 'image'
+
+            Attachment.objects.create(
+                name=name,
+                file_kind=file_kind,
+                file=doc_file.file,
+                scope={'user': 'user', 'team': 'team', 'organization': 'organization'}.get(
+                    access_level, 'user'
+                ),
+                uploaded_by=request.user,
+                organization=org,
+                team_id=team_id if access_level == 'team' else None,
+                document=doc,
+                file_size=doc_file.file_size,
+                mime_type=doc_file.mime_type,
+                tags=tags,
+                metadata={'source': 'document_file', 'document_file_id': str(doc_file.id)},
+            )
+        except Exception:
+            pass  # Non-critical — attachment mirror is best-effort
+
+        return Response({
+            'status': 'success',
+            'file': {
+                'id': str(doc_file.id),
+                'name': doc_file.name,
+                'file_type': doc_file.file_type,
+                'category': doc_file.category,
+                'access_level': doc_file.access_level,
+                'url': doc_file.file.url if doc_file.file else None,
+                'file_size': doc_file.file_size,
+                'file_size_display': doc_file.get_file_size_display(),
+                'mime_type': doc_file.mime_type,
+                'original_filename': doc_file.original_filename,
+                'uploaded_at': doc_file.uploaded_at.isoformat() if doc_file.uploaded_at else None,
+                'tags': doc_file.tags or [],
+                'description': doc_file.description,
+            },
+        }, status=status.HTTP_201_CREATED)
 
     # ── PLACEHOLDERS ─────────────────────────────────────────────────────
 
@@ -1709,6 +2360,16 @@ class QuickLatexDocumentViewSet(viewsets.ModelViewSet):
         if all_mapped_uuids:
             for img_obj in DocumentImage.objects.filter(id__in=all_mapped_uuids):
                 uuid_to_img[str(img_obj.id)] = img_obj
+
+            # Fallback to Attachment table
+            missing = [u for u in all_mapped_uuids if str(u) not in uuid_to_img]
+            if missing:
+                try:
+                    from attachments.models import Attachment
+                    for att in Attachment.objects.filter(id__in=missing, file_kind='image'):
+                        uuid_to_img[str(att.id)] = att
+                except Exception:
+                    pass
 
         for name in sorted(img_map.keys()):
             mapped_id = img_map.get(name)
@@ -1853,11 +2514,10 @@ class QuickLatexDocumentViewSet(viewsets.ModelViewSet):
                 except (ValueError, AttributeError):
                     pass
             if valid_uuids:
-                imgs = DocumentImage.objects.filter(
-                    Q(id__in=valid_uuids),
-                    Q(uploaded_by=request.user) | Q(is_public=True) |
-                    Q(document__created_by=request.user)
+                imgs = DocumentImage.visible_to_user(request.user).filter(
+                    id__in=valid_uuids
                 )
+                resolved_uuids = set()
                 for img in imgs:
                     url = img.get_url() or ''
                     placeholder = f'[[image:{img.id}]]'
@@ -1874,6 +2534,30 @@ class QuickLatexDocumentViewSet(viewsets.ModelViewSet):
                         )
                     rendered = rendered.replace(placeholder, replacement)
                     images_resolved += 1
+                    resolved_uuids.add(str(img.id))
+
+                # Fallback: check Attachment table for any UUIDs not found
+                missing = [u for u in valid_uuids if str(u) not in resolved_uuids]
+                if missing:
+                    try:
+                        from attachments.models import Attachment
+                        for att in Attachment.objects.filter(id__in=missing, file_kind='image'):
+                            url = att.get_url() or ''
+                            placeholder = f'[[image:{att.id}]]'
+                            code_type = block.code_type or 'latex'
+                            if code_type == 'html':
+                                replacement = (
+                                    f'<img src="{url}" alt="{att.name or "image"}" '
+                                    f'style="max-width:100%; height:auto;" />'
+                                )
+                            else:
+                                replacement = (
+                                    f'\\includegraphics[width=\\linewidth]{{{url}}}'
+                                )
+                            rendered = rendered.replace(placeholder, replacement)
+                            images_resolved += 1
+                    except Exception:
+                        pass
 
         # Count how many text placeholders were resolved
         original_keys = set(k for k in re.findall(r'\[\[([^\]]+)\]\]', original)

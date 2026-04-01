@@ -19,7 +19,6 @@ import {
   GitBranch,
   Loader2,
   MoreVertical,
-  Sparkles,
   Tag,
   Trash2,
   User,
@@ -108,7 +107,6 @@ const MasterDocumentDetail = ({ master, onClose, onBranch, onRefresh }) => {
     description: master?.description || '',
     category: master?.category || 'contract',
     tags: (master?.tags || []).join(', '),
-    ai_system_prompt: master?.ai_system_prompt || '',
   });
 
   // Load branches for this master
@@ -129,7 +127,6 @@ const MasterDocumentDetail = ({ master, onClose, onBranch, onRefresh }) => {
         description: master.description || '',
         category: master.category || 'contract',
         tags: (master.tags || []).join(', '),
-        ai_system_prompt: master.ai_system_prompt || '',
       });
       setEditing(false);
     }
@@ -142,7 +139,6 @@ const MasterDocumentDetail = ({ master, onClose, onBranch, onRefresh }) => {
         description: editForm.description,
         category: editForm.category,
         tags: editForm.tags.split(',').map((t) => t.trim()).filter(Boolean),
-        ai_system_prompt: editForm.ai_system_prompt,
       });
       setEditing(false);
       onRefresh?.();
@@ -302,26 +298,6 @@ const MasterDocumentDetail = ({ master, onClose, onBranch, onRefresh }) => {
             </button>
           </div>
         )}
-
-        {/* AI System Prompt */}
-        <div className="px-6 py-4 border-b border-gray-100">
-          <p className="text-xs font-semibold text-gray-400 uppercase mb-2 flex items-center gap-1">
-            <Sparkles className="h-3 w-3" /> AI System Prompt
-          </p>
-          {editing ? (
-            <textarea
-              value={editForm.ai_system_prompt}
-              onChange={(e) => setEditForm((f) => ({ ...f, ai_system_prompt: e.target.value }))}
-              rows={3}
-              className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
-              placeholder="Custom AI system prompt for generating content..."
-            />
-          ) : (
-            <p className="text-sm text-gray-600 font-mono bg-gray-50 rounded p-2 max-h-24 overflow-y-auto">
-              {master.ai_system_prompt || 'Default AI prompt'}
-            </p>
-          )}
-        </div>
 
         {/* ── Branches Section ─────────────────────────────────── */}
         <div className="px-6 py-4">

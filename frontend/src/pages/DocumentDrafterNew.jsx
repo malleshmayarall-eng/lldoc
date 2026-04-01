@@ -21,7 +21,7 @@ import documentService from '../services/documentService';
 import sectionService from '../services/sectionService';
 import aiService from '../services/aiService';
 import useDocumentEditor from '../hooks/useDocumentEditor';
-import imageService from '../services/imageService';
+import attachmentService from '../services/attachmentService';
 import metadataService from '../services/metadataService';
 import exportSettingsService from '../services/exportSettingsService';
 import aiConfigService from '../services/aiConfigService';
@@ -38,6 +38,7 @@ import { StaleDataError } from '../utils/etagFetch';
 import { ShareDialog, ParagraphHistorySidebar } from '../components';
 import { useSharing, useSharePermissions } from '../hooks/useSharing';
 import { canEditDocument, getDocumentRole, isSharedDocument } from '../utils/documentPermissions';
+import { getDocumentEditorRoute } from '../utils/documentRouting';
 import { useAuth } from '../contexts/AuthContext';
 import useWorkflowStore from '../store/workflowStore';
 import WorkflowAssignment from '../components/WorkflowAssignment';
@@ -339,6 +340,17 @@ const DocumentDrafter = ({ onDocumentLoad }) => {
     };
     fetchCounts();
   }, [completeDocument?.id]);
+
+  // Guard: if the document is quick_latex, redirect away from the standard editor immediately.
+  // This fires once the document data is available, catching any path that bypasses the
+  // DocumentEditorRoute check in App.jsx (deep links, internal navigations, etc.).
+  useEffect(() => {
+    if (!completeDocument?.id || !completeDocument?.document_mode) return;
+    const destination = getDocumentEditorRoute(completeDocument, { fallback: null });
+    if (destination && destination !== `/drafter/${completeDocument.id}`) {
+      navigate(destination, { replace: true });
+    }
+  }, [completeDocument?.id, completeDocument?.document_mode, navigate]);
 
   const [sidebarTab, setSidebarTab] = useState('document');
   const [sidebarImages, setSidebarImages] = useState([]);
@@ -3246,9 +3258,13 @@ const DocumentDrafter = ({ onDocumentLoad }) => {
   const loadSidebarImages = async (scope = 'document', search = '', type = '') => {
     setLoadingSidebarImages(true);
     try {
-      const params = { upload_scope: scope };
+      const params = { file_kind: 'image' };
       if (scope === 'document' && id) {
         params.document = id;
+      } else if (scope === 'team') {
+        params.scope = 'team';
+      } else if (scope === 'user') {
+        params.scope = 'user';
       }
       if (search.trim()) {
         params.search = search.trim();
@@ -3256,7 +3272,7 @@ const DocumentDrafter = ({ onDocumentLoad }) => {
       if (type) {
         params.image_type = type;
       }
-      const response = await imageService.getImages(params);
+      const response = await attachmentService.list(params);
       const images = Array.isArray(response) ? response : response?.results || [];
       setSidebarImages(images);
     } catch (err) {
@@ -3330,12 +3346,12 @@ const DocumentDrafter = ({ onDocumentLoad }) => {
 
     setUploadingImage(true);
     try {
-      await imageService.uploadImage(file, {
+      await attachmentService.upload(file, {
         name: file.name,
-        imageType: 'picture',
-        documentId: sidebarTab === 'document' ? id : undefined,
-        uploadScope: sidebarTab,
-        isPublic: sidebarTab === 'team',
+        file_kind: 'image',
+        image_type: 'picture',
+        document: sidebarTab === 'document' ? id : undefined,
+        scope: sidebarTab === 'team' ? 'team' : sidebarTab === 'document' ? 'document' : 'user',
       });
       await loadSidebarImages(sidebarTab, imageSearchQuery, imageTypeFilter);
     } catch (err) {
@@ -4862,16 +4878,16 @@ const DocumentDrafter = ({ onDocumentLoad }) => {
           )}
 
           <div
-            className={`flex-1 min-w-0 overflow-y-auto overflow-x-auto flex flex-col ${isExportStudio ? 'items-stretch' : 'items-center'} bg-gray-50/60 ${isExportStudio ? 'py-2 md:py-3' : 'py-4 md:py-8'}`}
+            className={`flex-1 min-w-0 overflow-y-auto overflow-x-auto flex flex-col ${isExportStudio ? 'items-stretch' : 'items-center'} bg-gray-50/60 ${isExportStudio ? 'py-2 md:py-3' : 'py-2 md:py-2'}`}
             ref={contentScrollRef}
             data-document-scroll
           >
             <div
               style={{
                 transform: `scale(${pageSettings.zoom / 100})`,
-                transformOrigin: 'top center',
+                transformOrigin: 'center top',
                 paddingBottom: '100px',
-                paddingTop: '20px',
+                paddingTop: '0px',
               }}
             >
               {isExportStudio ? (

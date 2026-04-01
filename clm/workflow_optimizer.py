@@ -272,7 +272,7 @@ def _call_optimizer_llm(workflow: Workflow) -> dict:
     )
 
     result = _call_model(
-        model_id='gemini-2.0-flash',
+        model_id='gemini-2.5-flash',
         system_prompt=system,
         document_context=user_prompt,
         temperature=0.3,
@@ -373,5 +373,5 @@ def optimize_workflow(
         'proposed_actions': proposed_actions,
         'actions_applied': applied,
         'action_results': action_results,
-        'model': 'gemini-2.0-flash',
+        'model': 'gemini-2.5-flash',
     }

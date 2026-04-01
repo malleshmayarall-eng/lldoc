@@ -55,7 +55,7 @@ const useSheetsStore = create((set, get) => ({
   selectedRange: null,   // { startRow, startCol, endRow, endCol }
   editingCell: null,     // { row, colKey }
   formulaBarValue: '',
-  clipboard: null,       // { cells: [...], type: 'copy' | 'cut' }
+  clipboard: null,       // { cells: [[{row,colKey,value},...]], type:'copy' }
   undoStack: [],
   redoStack: [],
   loading: false,
@@ -528,11 +528,31 @@ const useSheetsStore = create((set, get) => ({
       const afterOrder = totalRows > 0 ? totalRows - 1 : -1;
       await sheetsService.addRow(currentSheet.id, afterOrder);
 
-      // Re-fetch: if the sheet is in paginated mode jump to the last page so
-      // the newly created row is visible; otherwise use the simple full fetch.
+      // Re-fetch: rows are ordered descending by default, so the newly
+      // added row (highest order) will be on page 1.
       if (pagination) {
         const pageSize = pagination.pageSize || 100;
-        // Total rows after insert is totalRows + 1; last page = ceil / pageSize
+        await get().fetchSheetPaginated(currentSheet.id, pageSize, { page: 1 });
+      } else {
+        await get().fetchSheet(currentSheet.id);
+      }
+    } catch (err) {
+      set({ error: err.message });
+    }
+  },
+
+  addRowOnTop: async () => {
+    const { currentSheet, pagination } = get();
+    if (!currentSheet) return;
+    try {
+      // Insert at the very top: after_order = -1 → new_order = 0
+      await sheetsService.addRow(currentSheet.id, -1);
+
+      // Re-fetch: the new row (order 0) will be on the last page in
+      // descending sort, but we want to show it — so jump to the last page.
+      if (pagination) {
+        const pageSize = pagination.pageSize || 100;
+        const totalRows = currentSheet.row_count ?? (currentSheet.rows?.length ?? 0);
         const newTotal = totalRows + 1;
         const lastPage = Math.ceil(newTotal / pageSize);
         await get().fetchSheetPaginated(currentSheet.id, pageSize, { page: lastPage });
@@ -555,11 +575,13 @@ const useSheetsStore = create((set, get) => ({
     }
   },
 
-  addColumn: async (label, type) => {
+  addColumn: async (label, type, formula) => {
     const { currentSheet } = get();
     if (!currentSheet) return;
     try {
-      await sheetsService.addColumn(currentSheet.id, { label, type });
+      const payload = { label, type };
+      if (formula) payload.formula = formula;
+      await sheetsService.addColumn(currentSheet.id, payload);
       await get().fetchSheet(currentSheet.id);
     } catch (err) {
       set({ error: err.message });
@@ -620,38 +642,41 @@ const useSheetsStore = create((set, get) => ({
   // ── Copy / Paste ─────────────────────────────────────────────────
 
   copySelection: () => {
-    const { selectedCell, selectedRange, cellValues } = get();
-    if (!selectedCell) return;
+    const { selectedCell, selectedRange, cellValues, currentSheet } = get();
+    const columns = currentSheet?.columns || [];
 
     if (selectedRange) {
+      const r1 = Math.min(selectedRange.startRow, selectedRange.endRow);
+      const r2 = Math.max(selectedRange.startRow, selectedRange.endRow);
+      const c1 = Math.min(selectedRange.startCol, selectedRange.endCol);
+      const c2 = Math.max(selectedRange.startCol, selectedRange.endCol);
       const cells = [];
-      for (let r = selectedRange.startRow; r <= selectedRange.endRow; r++) {
+      for (let r = r1; r <= r2; r++) {
         const row = [];
-        for (let c = selectedRange.startCol; c <= selectedRange.endCol; c++) {
-          const colKey = get().currentSheet?.columns[c]?.key;
+        for (let c = c1; c <= c2; c++) {
+          const colKey = columns[c]?.key;
           row.push({ row: r, colKey, value: cellValues[`${r}_${colKey}`] || '' });
         }
         cells.push(row);
       }
       set({ clipboard: { cells, type: 'copy' } });
-    } else {
-      set({
-        clipboard: {
-          cells: [[{
-            row: selectedCell.row,
-            colKey: selectedCell.colKey,
-            value: cellValues[`${selectedCell.row}_${selectedCell.colKey}`] || '',
-          }]],
-          type: 'copy',
-        },
-      });
+      return;
+    }
+
+    if (selectedCell) {
+      const cells = [[{
+        row: selectedCell.row,
+        colKey: selectedCell.colKey,
+        value: cellValues[`${selectedCell.row}_${selectedCell.colKey}`] || '',
+      }]];
+      set({ clipboard: { cells, type: 'copy' } });
     }
   },
 
   pasteSelection: () => {
-    const { selectedCell, clipboard } = get();
-    if (!selectedCell || !clipboard) return;
-
+    const { selectedCell, clipboard, currentSheet } = get();
+    if (!clipboard || !clipboard.cells?.length || !selectedCell) return;
+    const columns = currentSheet?.columns || [];
     const startRow = selectedCell.row;
     const startCol = selectedCell.col;
 
@@ -659,7 +684,7 @@ const useSheetsStore = create((set, get) => ({
       for (let c = 0; c < clipboard.cells[r].length; c++) {
         const targetRow = startRow + r;
         const targetCol = startCol + c;
-        const colKey = get().currentSheet?.columns[targetCol]?.key;
+        const colKey = columns[targetCol]?.key;
         if (colKey) {
           get().setCellValue(targetRow, colKey, clipboard.cells[r][c].value);
         }
@@ -739,6 +764,153 @@ const useSheetsStore = create((set, get) => ({
     }
   },
 
+  // ── AI Chat / Edit ───────────────────────────────────────────────
+
+  aiChatMessages: [],      // [{ id, role, text, timestamp, changes?, summary? }]
+  pendingAIChanges: null,  // { changes: [], new_columns: [], message, summary }
+  aiGenerating: false,
+
+  aiEditSheet: async (prompt) => {
+    const { currentSheet, aiChatMessages } = get();
+    if (!currentSheet) return;
+
+    const userMsg = {
+      id: Date.now(),
+      role: 'user',
+      text: prompt,
+      timestamp: new Date().toISOString(),
+    };
+
+    set({
+      aiChatMessages: [...aiChatMessages, userMsg],
+      aiGenerating: true,
+    });
+
+    try {
+      // Build conversation history for context
+      const history = [...aiChatMessages, userMsg].map((m) => ({
+        role: m.role,
+        text: m.text,
+      }));
+
+      const res = await sheetsService.aiEdit(currentSheet.id, prompt, history);
+      const data = res.data;
+
+      // If the AI needs more info from the user before proceeding
+      const actionRequired = data.action_required === true;
+
+      const aiMsg = {
+        id: Date.now() + 1,
+        role: 'assistant',
+        text: data.message || 'Here are my suggested changes.',
+        timestamp: new Date().toISOString(),
+        changes: data.changes || [],
+        newColumns: data.new_columns || [],
+        summary: data.summary || '',
+        actionRequired,
+      };
+
+      set({
+        aiChatMessages: [...get().aiChatMessages, aiMsg],
+        // Only set pending changes when there are actual changes to apply
+        pendingAIChanges: (!actionRequired && (data.changes?.length || data.new_columns?.length))
+          ? {
+              changes: data.changes || [],
+              new_columns: data.new_columns || [],
+              message: data.message,
+              summary: data.summary,
+            }
+          : null,
+        aiGenerating: false,
+      });
+
+      return data;
+    } catch (err) {
+      const errorMsg = {
+        id: Date.now() + 1,
+        role: 'assistant',
+        text: `Error: ${err.response?.data?.error || err.message}`,
+        timestamp: new Date().toISOString(),
+        error: true,
+        actionRequired: true,  // prompt user to retry / provide more details
+      };
+      set({
+        aiChatMessages: [...get().aiChatMessages, errorMsg],
+        aiGenerating: false,
+      });
+      throw err;
+    }
+  },
+
+  aiApplyChanges: async () => {
+    const { currentSheet, pendingAIChanges } = get();
+    if (!currentSheet || !pendingAIChanges) return;
+
+    set({ saving: true });
+    try {
+      const res = await sheetsService.aiApply(
+        currentSheet.id,
+        pendingAIChanges.changes,
+        pendingAIChanges.new_columns,
+      );
+      const sheet = res.data;
+
+      // Rebuild cell values from updated sheet
+      const cellValues = {};
+      const computedValues = {};
+      for (const row of (sheet.rows || [])) {
+        for (const cell of (row.cells || [])) {
+          const key = `${row.order}_${cell.column_key}`;
+          cellValues[key] = cell.raw_value;
+          computedValues[key] = cell.computed_value || cell.raw_value;
+        }
+      }
+
+      // Add confirmation message
+      const confirmMsg = {
+        id: Date.now(),
+        role: 'assistant',
+        text: '✅ Changes applied successfully!',
+        timestamp: new Date().toISOString(),
+        applied: true,
+      };
+
+      set({
+        currentSheet: sheet,
+        cellValues,
+        computedValues,
+        pendingAIChanges: null,
+        saving: false,
+        aiChatMessages: [...get().aiChatMessages, confirmMsg],
+      });
+
+      return sheet;
+    } catch (err) {
+      set({ saving: false, error: err.message });
+      throw err;
+    }
+  },
+
+  aiRejectChanges: () => {
+    const rejectMsg = {
+      id: Date.now(),
+      role: 'assistant',
+      text: '↩ Changes discarded. You can try a different prompt.',
+      timestamp: new Date().toISOString(),
+      rejected: true,
+    };
+    set({
+      pendingAIChanges: null,
+      aiChatMessages: [...get().aiChatMessages, rejectMsg],
+    });
+  },
+
+  clearAIChat: () => set({
+    aiChatMessages: [],
+    pendingAIChanges: null,
+    aiGenerating: false,
+  }),
+
   // ── Reset ────────────────────────────────────────────────────────
 
   reset: () => set({
@@ -755,6 +927,9 @@ const useSheetsStore = create((set, get) => ({
     error: null,
     pagination: null,
     loadingMore: false,
+    aiChatMessages: [],
+    pendingAIChanges: null,
+    aiGenerating: false,
   }),
 }));
 

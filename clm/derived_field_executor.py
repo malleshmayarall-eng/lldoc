@@ -1,8 +1,8 @@
 """
-Derived Field Executor — AI-computed metadata that NuExtract misses
+Derived Field Executor — AI-computed metadata beyond basic extraction
 ====================================================================
 Handles fields that require reasoning, calculation, or inference beyond
-simple NER extraction.  Examples:
+simple extraction.  Examples:
 
   - Resume:   total_experience = sum of all work durations
   - Contract: risk_score = analysis of clause protectiveness
@@ -141,7 +141,7 @@ def execute_derived_fields(
     Config (in node.config):
       {
         "output_format": "derived",
-        "model": "gemini-2.0-flash",
+        "model": "gemini-2.5-flash",
         "temperature": 0.2,
         "max_tokens": 2048,
         "derived_field_ids": [...] | null,  // optional filter; null = all
@@ -153,7 +153,7 @@ def execute_derived_fields(
         _get_cached_response, _store_cached_response
 
     config = node.config or {}
-    model_id = config.get('model', 'gemini-2.0-flash')
+    model_id = config.get('model', 'gemini-2.5-flash')
     temperature = float(config.get('temperature', 0.2))
     max_tokens = int(config.get('max_tokens', 2048))
     field_ids = config.get('derived_field_ids')  # optional subset

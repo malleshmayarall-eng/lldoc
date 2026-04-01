@@ -461,6 +461,12 @@ class OrganizationDocumentSettings(models.Model):
     allow_external_sharing = models.BooleanField(default=False)
     retention_days = models.IntegerField(default=365, help_text="Retention policy in days")
 
+    # AI defaults
+    default_ai_model = models.CharField(
+        max_length=100, default='gemini-2.5-flash',
+        help_text='Default AI model for CLM nodes, document analysis, etc.',
+    )
+
     # Performance/limits
     auto_save_interval_seconds = models.IntegerField(default=30)
     max_file_size_mb = models.IntegerField(default=25)
@@ -517,6 +523,81 @@ class UserDocumentSettings(models.Model):
 
     def __str__(self):
         return f"Document settings for {self.profile.get_full_name()}"
+
+
+class InputNodeCredential(models.Model):
+    """
+    Reusable credentials for CLM input node source types.
+
+    Instead of storing secrets (IMAP passwords, API keys, access tokens)
+    inside each WorkflowNode.config, users save them once in their profile
+    settings.  Nodes then reference a credential by its UUID, and the
+    backend resolves the actual secrets at execution time.
+
+    Supported credential_type values mirror the input node source_type:
+      email_inbox, google_drive, dropbox, onedrive, s3, ftp
+    """
+    CREDENTIAL_TYPE_CHOICES = [
+        ('email_inbox',  'Email / IMAP'),
+        ('google_drive', 'Google Drive'),
+        ('dropbox',      'Dropbox'),
+        ('onedrive',     'OneDrive / SharePoint'),
+        ('s3',           'AWS S3'),
+        ('ftp',          'FTP / SFTP'),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    profile = models.ForeignKey(
+        UserProfile,
+        on_delete=models.CASCADE,
+        related_name='input_credentials',
+    )
+    label = models.CharField(
+        max_length=120,
+        help_text='User-facing name, e.g. "Work Gmail" or "Contracts S3"',
+    )
+    credential_type = models.CharField(max_length=30, choices=CREDENTIAL_TYPE_CHOICES)
+    credentials = models.JSONField(
+        default=dict,
+        help_text=(
+            'Source-specific secrets. Schema depends on credential_type:\n'
+            '  email_inbox:  {email_host, email_user, email_password}\n'
+            '  google_drive: {google_access, google_api_key, google_credentials_json}\n'
+            '  dropbox:      {dropbox_access_token}\n'
+            '  onedrive:     {onedrive_access_token}\n'
+            '  s3:           {s3_access_key, s3_secret_key, s3_region}\n'
+            '  ftp:          {ftp_host, ftp_port, ftp_user, ftp_password, ftp_protocol}'
+        ),
+    )
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['credential_type', 'label']
+        indexes = [
+            models.Index(fields=['profile', 'credential_type']),
+        ]
+
+    def __str__(self):
+        return f"{self.label} ({self.get_credential_type_display()}) — {self.profile}"
+
+    @property
+    def redacted(self):
+        """Return credentials with secrets masked for safe API output."""
+        MASK = '••••••'
+        SECRET_KEYS = {
+            'email_password', 'google_api_key', 'google_credentials_json',
+            'dropbox_access_token', 'onedrive_access_token',
+            's3_secret_key', 'ftp_password',
+        }
+        safe = {}
+        for k, v in (self.credentials or {}).items():
+            if k in SECRET_KEYS and v:
+                safe[k] = MASK
+            else:
+                safe[k] = v
+        return safe
 
 
 class Team(models.Model):

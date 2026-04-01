@@ -8,6 +8,7 @@ import {
   Loader
 } from 'lucide-react';
 import { documentFileService } from '../services/documentFileService';
+import attachmentService from '../services/attachmentService';
 import './DocumentUploadModal.css';
 
 /**
@@ -112,7 +113,17 @@ const DocumentUploadModal = ({
         });
       }, 200);
 
-      const uploadedFile = await documentFileService.uploadFile(file, metadata);
+      const uploadedFile = await attachmentService.upload(file, {
+        name: metadata.name,
+        description: metadata.description,
+        file_kind: 'document',
+        scope: metadata.access_level === 'team' ? 'team' : metadata.access_level === 'organization' ? 'organization' : 'user',
+        document: metadata.document,
+        tags: metadata.tags,
+      });
+      
+      // Normalise response — attachmentService.upload returns { status, attachment } or object directly
+      const result = uploadedFile?.attachment || uploadedFile;
       
       clearInterval(progressInterval);
       setUploadProgress(100);
@@ -120,7 +131,7 @@ const DocumentUploadModal = ({
 
       // Wait a moment to show success, then callback
       setTimeout(() => {
-        onUploadComplete(uploadedFile);
+        onUploadComplete(result);
         onClose();
       }, 1000);
 

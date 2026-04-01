@@ -8,6 +8,7 @@ from .models import (
     InvitationToken,
     OrganizationDocumentSettings,
     UserDocumentSettings,
+    InputNodeCredential,
     DOMAIN_CHOICES,
     ALL_FEATURES,
     DOMAIN_DEFAULTS,
@@ -123,6 +124,27 @@ class UserDocumentSettingsSerializer(serializers.ModelSerializer):
         read_only_fields = ['id', 'created_at', 'updated_at', 'profile']
 
 
+class InputNodeCredentialSerializer(serializers.ModelSerializer):
+    """Serializer for reading saved input-node credentials (secrets redacted)."""
+    credentials = serializers.SerializerMethodField()
+
+    class Meta:
+        model = InputNodeCredential
+        fields = ['id', 'label', 'credential_type', 'credentials', 'created_at', 'updated_at']
+        read_only_fields = ['id', 'created_at', 'updated_at']
+
+    def get_credentials(self, obj):
+        return obj.redacted
+
+
+class InputNodeCredentialWriteSerializer(serializers.ModelSerializer):
+    """Serializer for creating/updating saved input-node credentials (accepts raw secrets)."""
+    class Meta:
+        model = InputNodeCredential
+        fields = ['id', 'label', 'credential_type', 'credentials', 'created_at', 'updated_at']
+        read_only_fields = ['id', 'created_at', 'updated_at']
+
+
 class UserProfileCreateSerializer(serializers.ModelSerializer):
     """Serializer for creating user profiles."""
     username = serializers.CharField(write_only=True)
@@ -201,6 +223,8 @@ class InvitationTokenSerializer(serializers.ModelSerializer):
 
 class InvitationCreateSerializer(serializers.ModelSerializer):
     """Serializer for creating invitation tokens."""
+
+    expires_at = serializers.DateTimeField(required=False, allow_null=True)
     
     class Meta:
         model = InvitationToken

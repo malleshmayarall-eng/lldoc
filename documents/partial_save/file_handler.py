@@ -174,6 +174,42 @@ class FileHandler(ChangeHandler):
             edit_count=1,
         )
 
+        # Mirror the referenced file to Attachment library (best-effort)
+        if file_reference and file_reference.file:
+            try:
+                from attachments.models import Attachment
+
+                org = getattr(file_reference, "organization", None)
+                if not org:
+                    try:
+                        org = user.profile.organization
+                    except Exception:
+                        pass
+
+                file_kind = "document"
+                if file_reference.mime_type and file_reference.mime_type.startswith("image/"):
+                    file_kind = "image"
+
+                access_level = getattr(file_reference, "access_level", "user") or "user"
+                scope_map = {"user": "user", "team": "team", "organization": "organization"}
+
+                Attachment.objects.create(
+                    name=file_reference.name or "Unnamed File",
+                    file_kind=file_kind,
+                    file=file_reference.file,
+                    scope=scope_map.get(access_level, "user"),
+                    uploaded_by=user,
+                    organization=org,
+                    team=getattr(file_reference, "team", None),
+                    document=document,
+                    file_size=file_reference.file_size,
+                    mime_type=file_reference.mime_type,
+                    tags=file_reference.tags or [],
+                    metadata={"source": "document_file", "document_file_id": str(file_reference.id)},
+                )
+            except Exception:
+                pass  # Non-critical — attachment mirror is best-effort
+
         self._log_change(
             document=document,
             user=user,

@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react';
 import { Upload, X, Image as ImageIcon, Trash2, Eye, User, FileText, Users, Search, Filter } from 'lucide-react';
 import DraggableImageItem from './DraggableImageItem';
-import { imageService } from '../services/imageService';
+import attachmentService from '../services/attachmentService';
 import { validateImageFile } from '../utils/imageUtils';
 
 /**
@@ -34,15 +34,17 @@ const ImagesGallery = ({ documentId, onClose }) => {
     setLoading(true);
     setError(null);
     try {
-      const params = {
-        upload_scope: activeTab
-      };
+      const params = { file_kind: 'image' };
       
       if (activeTab === 'document' && documentId) {
         params.document = documentId;
+      } else if (activeTab === 'team') {
+        params.scope = 'team';
+      } else if (activeTab === 'user') {
+        params.scope = 'user';
       }
 
-      const response = await imageService.getImages(params);
+      const response = await attachmentService.list(params);
       const imageData = Array.isArray(response) ? response : response?.results || [];
       setImages(imageData);
     } catch (err) {
@@ -68,12 +70,13 @@ const ImagesGallery = ({ documentId, onClose }) => {
     setError(null);
 
     try {
-      await imageService.uploadImage(file, {
+      await attachmentService.upload(file, {
         name: uploadForm.name || file.name,
-        imageType: uploadForm.image_type,
-        caption: uploadForm.caption || undefined,
-        documentId: activeTab === 'document' ? documentId : undefined,
-        uploadScope: activeTab,
+        file_kind: 'image',
+        image_type: uploadForm.image_type,
+        description: uploadForm.caption || undefined,
+        document: activeTab === 'document' ? documentId : undefined,
+        scope: activeTab === 'team' ? 'team' : activeTab === 'document' ? 'document' : 'user',
       });
 
       // Reset form
@@ -100,7 +103,7 @@ const ImagesGallery = ({ documentId, onClose }) => {
     if (!window.confirm('Delete this image?')) return;
 
     try {
-  await imageService.deleteImage(imageId);
+  await attachmentService.delete(imageId);
       await loadImages();
     } catch (err) {
       console.error('Delete error:', err);

@@ -166,6 +166,32 @@ export const userService = {
     const response = await api.get('/users/organizations/current/domain-config/');
     return response.data;
   },
+
+  // ── Input Node Credentials (saved in profile) ─────────────────────
+
+  /** GET /users/users/me/input-credentials/?type=... — list saved credentials */
+  getMyInputCredentials: async (type) => {
+    const params = type ? { type } : {};
+    const response = await api.get('/users/users/me/input-credentials/', { params });
+    return response.data;
+  },
+
+  /** POST /users/users/me/input-credentials/ — create a new credential */
+  saveInputCredential: async (data) => {
+    const response = await api.post('/users/users/me/input-credentials/', data);
+    return response.data;
+  },
+
+  /** PATCH /users/users/me/input-credentials/{id}/ — update a credential */
+  updateInputCredential: async (id, data) => {
+    const response = await api.patch(`/users/users/me/input-credentials/${id}/`, data);
+    return response.data;
+  },
+
+  /** DELETE /users/users/me/input-credentials/{id}/ — delete a credential */
+  deleteInputCredential: async (id) => {
+    await api.delete(`/users/users/me/input-credentials/${id}/`);
+  },
 };
 
 export default userService;

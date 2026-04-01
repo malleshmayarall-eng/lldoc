@@ -27,6 +27,7 @@ const COLUMN_TYPE_OPTIONS = [
   { value: 'boolean',  label: 'Boolean',  icon: '☑' },
   { value: 'select',   label: 'Select',   icon: '▾' },
   { value: 'json',     label: 'JSON',     icon: '{}' },
+  { value: 'formula',  label: 'Formula',  icon: 'ƒ' },
 ];
 
 function inputForType(type) {
@@ -147,20 +148,66 @@ export default function SheetFormView() {
   const [colLabel, setColLabel] = useState('');
   const [colType, setColType] = useState('text');
   const [colAdding, setColAdding] = useState(false);
+  const [formulaExpr, setFormulaExpr] = useState('');
+  const [showFormulaBuilder, setShowFormulaBuilder] = useState(false);
+
+  // Available columns for the formula builder (non-formula columns only)
+  const formulableColumns = useMemo(() => {
+    return columns.filter((c) => c.type !== 'formula' && !c.formula);
+  }, [columns]);
+
+  const FORMULA_OPERATIONS = [
+    { op: '+', label: 'Add (+)' },
+    { op: '-', label: 'Subtract (-)' },
+    { op: '*', label: 'Multiply (×)' },
+    { op: '/', label: 'Divide (÷)' },
+  ];
+
+  const FORMULA_FUNCTIONS = [
+    { fn: 'SUM',   label: 'SUM',   desc: 'Add all values' },
+    { fn: 'AVG',   label: 'AVG',   desc: 'Average' },
+    { fn: 'MIN',   label: 'MIN',   desc: 'Minimum value' },
+    { fn: 'MAX',   label: 'MAX',   desc: 'Maximum value' },
+    { fn: 'COUNT', label: 'COUNT', desc: 'Count values' },
+    { fn: 'ABS',   label: 'ABS',   desc: 'Absolute value' },
+    { fn: 'ROUND', label: 'ROUND', desc: 'Round to N digits' },
+  ];
+
+  const insertColumnRef = useCallback((colKey) => {
+    // Insert the column key reference — the backend resolves col_key + {row}
+    setFormulaExpr((prev) => prev + colKey + '{row}');
+  }, []);
+
+  const insertOperation = useCallback((op) => {
+    setFormulaExpr((prev) => prev + op);
+  }, []);
+
+  const insertFunction = useCallback((fn) => {
+    setFormulaExpr((prev) => prev + fn + '(');
+  }, []);
+
+  // When colType changes to/from formula, toggle builder
+  useEffect(() => {
+    setShowFormulaBuilder(colType === 'formula');
+    if (colType !== 'formula') setFormulaExpr('');
+  }, [colType]);
 
   const handleAddColumn = useCallback(async () => {
     if (!colLabel.trim()) return;
+    if (colType === 'formula' && !formulaExpr.trim()) return;
     setColAdding(true);
     try {
-      await addColumn(colLabel.trim(), colType);
+      const formula = colType === 'formula' ? `=${formulaExpr.trim()}` : undefined;
+      await addColumn(colLabel.trim(), colType, formula);
       setColLabel('');
       setColType('text');
+      setFormulaExpr('');
     } catch (err) {
       console.error('Add column failed:', err);
     } finally {
       setColAdding(false);
     }
-  }, [colLabel, colType, addColumn]);
+  }, [colLabel, colType, formulaExpr, addColumn]);
 
   // ── Analytics state ─────────────────────────────────────────────
   const [analytics, setAnalytics] = useState(null);
@@ -389,7 +436,7 @@ export default function SheetFormView() {
                   onChange={(e) => setColLabel(e.target.value)}
                   placeholder="Column name…"
                   className="w-full px-3 py-2 text-sm border border-gray-200 rounded-lg focus:ring-2 focus:ring-emerald-300 focus:border-emerald-300 outline-none bg-gray-50 hover:bg-white transition-colors"
-                  onKeyDown={(e) => e.key === 'Enter' && handleAddColumn()}
+                  onKeyDown={(e) => e.key === 'Enter' && colType !== 'formula' && handleAddColumn()}
                 />
                 <div className="flex flex-wrap gap-1.5">
                   {COLUMN_TYPE_OPTIONS.map((t) => (
@@ -406,13 +453,112 @@ export default function SheetFormView() {
                     </button>
                   ))}
                 </div>
+
+                {/* ── Formula Builder (shown when type = formula) ─── */}
+                {showFormulaBuilder && (
+                  <div className="space-y-2 p-3 bg-blue-50/50 border border-blue-200 rounded-xl">
+                    <p className="text-[10px] font-semibold text-blue-600 uppercase tracking-wider">Formula Builder</p>
+
+                    {/* Formula expression input */}
+                    <div className="relative">
+                      <span className="absolute left-3 top-1/2 -translate-y-1/2 text-blue-500 font-mono text-sm font-bold">=</span>
+                      <input
+                        type="text"
+                        value={formulaExpr}
+                        onChange={(e) => setFormulaExpr(e.target.value)}
+                        placeholder="e.g. col_0{row}+col_1{row}"
+                        className="w-full pl-7 pr-3 py-2 text-sm font-mono border border-blue-200 rounded-lg focus:ring-2 focus:ring-blue-300 focus:border-blue-300 outline-none bg-white"
+                      />
+                    </div>
+
+                    {/* Column chips — click to insert reference */}
+                    {formulableColumns.length > 0 && (
+                      <div>
+                        <p className="text-[9px] text-blue-500 font-medium mb-1">Click a column to insert:</p>
+                        <div className="flex flex-wrap gap-1">
+                          {formulableColumns.map((c) => (
+                            <button
+                              key={c.key}
+                              type="button"
+                              onClick={() => insertColumnRef(c.key)}
+                              className="text-[10px] px-2 py-1 bg-white border border-blue-200 text-blue-700 rounded-md hover:bg-blue-100 transition-colors font-medium"
+                              title={`Insert ${c.label} (${c.key})`}
+                            >
+                              {c.label}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Operations */}
+                    <div className="flex items-center gap-1">
+                      <p className="text-[9px] text-blue-500 font-medium mr-1">Ops:</p>
+                      {FORMULA_OPERATIONS.map((o) => (
+                        <button
+                          key={o.op}
+                          type="button"
+                          onClick={() => insertOperation(o.op)}
+                          className="w-7 h-7 text-sm font-bold bg-white border border-blue-200 text-blue-700 rounded-md hover:bg-blue-100 transition-colors flex items-center justify-center"
+                          title={o.label}
+                        >
+                          {o.op}
+                        </button>
+                      ))}
+                      <button
+                        type="button"
+                        onClick={() => insertOperation('(')}
+                        className="w-7 h-7 text-sm font-bold bg-white border border-gray-200 text-gray-600 rounded-md hover:bg-gray-100 transition-colors flex items-center justify-center"
+                      >
+                        (
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => insertOperation(')')}
+                        className="w-7 h-7 text-sm font-bold bg-white border border-gray-200 text-gray-600 rounded-md hover:bg-gray-100 transition-colors flex items-center justify-center"
+                      >
+                        )
+                      </button>
+                    </div>
+
+                    {/* Functions */}
+                    <div>
+                      <p className="text-[9px] text-blue-500 font-medium mb-1">Functions:</p>
+                      <div className="flex flex-wrap gap-1">
+                        {FORMULA_FUNCTIONS.map((f) => (
+                          <button
+                            key={f.fn}
+                            type="button"
+                            onClick={() => insertFunction(f.fn)}
+                            className="text-[10px] px-2 py-1 bg-white border border-blue-200 text-blue-700 rounded-md hover:bg-blue-100 transition-colors font-mono"
+                            title={f.desc}
+                          >
+                            {f.fn}()
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+
+                    {/* Preview */}
+                    {formulaExpr && (
+                      <div className="bg-white border border-blue-100 rounded-lg px-3 py-2">
+                        <p className="text-[9px] text-gray-400 mb-0.5">Preview:</p>
+                        <p className="text-xs font-mono text-blue-800">={formulaExpr}</p>
+                        <p className="text-[9px] text-gray-400 mt-1">
+                          This formula will be computed automatically. In shared forms it shows as output only.
+                        </p>
+                      </div>
+                    )}
+                  </div>
+                )}
+
                 <button
                   onClick={handleAddColumn}
-                  disabled={colAdding || !colLabel.trim()}
+                  disabled={colAdding || !colLabel.trim() || (colType === 'formula' && !formulaExpr.trim())}
                   className="w-full flex items-center justify-center gap-2 py-2 text-sm font-medium text-emerald-700 bg-emerald-50 hover:bg-emerald-100 rounded-xl transition-all disabled:opacity-40"
                 >
                   {colAdding ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Plus className="h-3.5 w-3.5" />}
-                  Add Column
+                  {colType === 'formula' ? 'Add Formula Column' : 'Add Column'}
                 </button>
               </div>
             </div>

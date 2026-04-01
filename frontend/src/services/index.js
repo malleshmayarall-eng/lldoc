@@ -25,3 +25,4 @@ export { default as exportSettingsService } from './exportSettingsService';
 export { default as userService } from './userService';
 export { default as workflowService } from './workflowService';
 export { default as quickLatexService } from './quickLatexService';
+export { default as attachmentService } from './attachmentService';

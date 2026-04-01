@@ -17,13 +17,16 @@ import DocCreateWizard from './DocCreateWizard';
 import DocumentManager from './DocumentManager';
 import Dashboard from './Dashboard';
 import ExecutionResults from './ExecutionResults';
+import ProcessingProgressPanel from './ProcessingProgressPanel';
+import InputPluginsPanel from './InputPluginsPanel';
 import NodeInspector from './NodeInspector';
 import WorkflowChat from './WorkflowChat';
+import WorkflowSettingsPanel from './WorkflowSettingsPanel';
 import notify from '@utils/clm/clmNotify';
 import { Spinner } from '@components/clm/ui/SharedUI';
 import {
   Play, Upload, LayoutGrid, FileText, BarChart3,
-  Zap, Settings, ArrowLeft, RefreshCw, Eye,
+  Zap, Settings, ArrowLeft, RefreshCw, Eye, Activity,
   CheckCircle2, XCircle, ChevronDown, ChevronRight,
   Plus, Trash2, ZoomIn, ZoomOut, Maximize, MessageSquare,
   Sparkles, Undo2, Redo2, Bell,
@@ -113,9 +116,9 @@ export default function WorkflowCanvas() {
   const [actionPlugins, setActionPlugins] = useState([]);
   const [listenerTriggers, setListenerTriggers] = useState([]);
   const [aiModels, setAiModels] = useState([]);
-  const [documentTypes, setDocumentTypes] = useState([]);
   const [showAddMenu, setShowAddMenu] = useState(false);
   const [showChat, setShowChat] = useState(false);
+  const [showSettings, setShowSettings] = useState(false);
 
   /* ── optimizer state ────────────── */
   const [optimizing, setOptimizing] = useState(false);
@@ -148,6 +151,7 @@ export default function WorkflowCanvas() {
   const [nodesStatus, setNodesStatus] = useState(null);        // { nodes_changed, pending_execution, already_executed }
   const [isLive, setIsLive] = useState(false);
   const [liveInterval, setLiveInterval] = useState(60);
+  const [showResultsModal, setShowResultsModal] = useState(false);  // results dialog
 
   /* ── zoom & pan ─────────────────── */
   const [zoom, setZoom] = useState(1);
@@ -209,13 +213,6 @@ export default function WorkflowCanvas() {
     } catch {}
   }, []);
 
-  const fetchDocumentTypes = useCallback(async () => {
-    try {
-      const { data } = await workflowApi.documentTypes();
-      setDocumentTypes(data.document_types || []);
-    } catch {}
-  }, []);
-
   const fetchExecutionHistory = useCallback(async () => {
     try {
       const { data } = await workflowApi.executionHistory(workflowId);
@@ -249,7 +246,7 @@ export default function WorkflowCanvas() {
     } catch {}
   }, [workflowId]);
 
-  useEffect(() => { fetchAll(); fetchFieldOptions(); fetchActionPlugins(); fetchListenerTriggers(); fetchAiModels(); fetchDocumentTypes(); fetchExecutionHistory(); fetchPendingValidations(); fetchNodesStatus(); }, [fetchAll, fetchFieldOptions, fetchActionPlugins, fetchListenerTriggers, fetchAiModels, fetchDocumentTypes, fetchExecutionHistory, fetchPendingValidations, fetchNodesStatus]);
+  useEffect(() => { fetchAll(); fetchFieldOptions(); fetchActionPlugins(); fetchListenerTriggers(); fetchAiModels(); fetchExecutionHistory(); fetchPendingValidations(); fetchNodesStatus(); }, [fetchAll, fetchFieldOptions, fetchActionPlugins, fetchListenerTriggers, fetchAiModels, fetchExecutionHistory, fetchPendingValidations, fetchNodesStatus]);
 
   /* ── Close notification panel on outside click ── */
   useEffect(() => {
@@ -293,7 +290,7 @@ export default function WorkflowCanvas() {
         type === 'action' ? { plugin: '', settings: {} } :
         type === 'listener' ? { trigger_type: '', gate_message: '', auto_execute_downstream: true } :
         type === 'validator' ? { description: '' } :
-        type === 'ai' ? { model: 'gemini-2.0-flash', system_prompt: '', output_format: 'json_extract', output_key: 'ai_analysis', json_fields: [], temperature: 0.3, max_tokens: 2048, include_text: true, include_metadata: true } :
+        type === 'ai' ? { model: 'gemini-2.5-flash', system_prompt: '', output_format: 'json_extract', output_key: 'ai_analysis', json_fields: [], temperature: 0.3, max_tokens: 2048, include_text: true, include_metadata: true } :
         type === 'and_gate' ? {} :
         type === 'sheet' ? { sheet_id: '', mode: 'input', write_mode: 'append', column_mapping: {}, auto_columns: true, include_fields: [], exclude_fields: [] } :
         {};
@@ -531,7 +528,7 @@ export default function WorkflowCanvas() {
     const data = resultData || {};
     setExecutionResult(data);
     setExecutionState('idle');
-    setTab('results');
+    setShowResultsModal(true);  // open results as dialog
     const doneMap = {};
     const nrl = Array.isArray(data.node_results) ? data.node_results : [];
     nodes.forEach((n) => {
@@ -618,6 +615,7 @@ export default function WorkflowCanvas() {
   const handleExecute = async () => {
     setExecuting(true);
     setExecutionState('compiling');
+    setTab('processing');  // auto-switch to live processing view
     const processingMap = {};
     nodes.forEach((n) => { processingMap[n.id] = 'processing'; });
     setNodeProcessing(processingMap);
@@ -688,12 +686,33 @@ export default function WorkflowCanvas() {
   /* ── Live mode toggle ───────────── */
   const handleToggleLive = async () => {
     try {
-      const { data } = await workflowApi.setLive(workflowId, { is_live: !isLive });
-      setIsLive(data.is_live);
-      setLiveInterval(data.live_interval || 60);
-      notify.success(data.message || (data.is_live ? 'Workflow is now LIVE' : 'Workflow is now offline'));
+      if (isLive) {
+        // Going offline → use pause endpoint
+        const { data } = await workflowApi.pause(workflowId);
+        setIsLive(false);
+        notify.success(data.message || 'Workflow is now offline');
+      } else {
+        // Pre-flight: check canvas has at least one input node (or sheet node in input mode)
+        const hasInput = nodes.some(n => n.node_type === 'input' || (n.node_type === 'sheet' && n.config?.mode === 'input'));
+        if (!hasInput) {
+          notify.error('Add at least one Input node (or a Sheet node in input mode) before going live.');
+          return;
+        }
+        // Going live → use go-live endpoint (compiles + enables in one step)
+        const { data } = await workflowApi.goLive(workflowId, { live_interval: liveInterval });
+        setIsLive(true);
+        setLiveInterval(data.live_interval || 60);
+        notify.success(data.message || 'Workflow is now LIVE');
+      }
     } catch (e) {
-      notify.error('Failed to toggle live mode: ' + (e.response?.data?.error || e.message));
+      const errData = e.response?.data;
+      const msg = errData?.error || errData?.message || e.message;
+      const errors = errData?.errors;
+      let detail = '';
+      if (Array.isArray(errors) && errors.length) {
+        detail = ': ' + errors.map(err => typeof err === 'string' ? err : (err.message || JSON.stringify(err))).join(', ');
+      }
+      notify.error(msg + detail);
     }
   };
 
@@ -862,8 +881,8 @@ export default function WorkflowCanvas() {
   const tabConfig = [
     { id: 'canvas', label: 'Canvas', icon: <LayoutGrid size={14} /> },
     { id: 'documents', label: 'Documents', icon: <FileText size={14} /> },
+    { id: 'processing', label: 'Processing', icon: <Activity size={14} /> },
     { id: 'dashboard', label: 'Dashboard', icon: <BarChart3 size={14} /> },
-    { id: 'results', label: 'Results', icon: <Zap size={14} /> },
   ];
 
   /* ================================================================
@@ -1008,6 +1027,14 @@ export default function WorkflowCanvas() {
             ))}
           </div>
           <button
+            onClick={() => setShowSettings(true)}
+            className="px-3 py-1.5 rounded-lg text-xs font-medium flex items-center gap-1.5 transition-colors border bg-white text-gray-600 border-gray-200 hover:bg-indigo-50 hover:text-indigo-600 hover:border-indigo-200"
+            title="Workflow settings &amp; event triggers"
+          >
+            <Settings size={14} />
+            Settings
+          </button>
+          <button
             onClick={handleOptimizePreview}
             disabled={optimizing}
             className="px-3 py-1.5 bg-violet-600 text-white rounded-lg text-xs font-medium hover:bg-violet-700 disabled:opacity-50 flex items-center gap-1.5 transition-colors"
@@ -1055,13 +1082,6 @@ export default function WorkflowCanvas() {
               </span>
             )}
 
-            {/* Nodes changed warning */}
-            {nodesStatus?.nodes_changed && !executing && (
-              <span className="px-2 py-1 rounded-lg text-[10px] font-semibold bg-amber-50 text-amber-600 border border-amber-200 animate-pulse" title="Node config changed since last run — will re-execute all docs">
-                ⚠ Config changed
-              </span>
-            )}
-
             {/* Pending docs badge */}
             {nodesStatus && nodesStatus.pending_execution > 0 && !nodesStatus.nodes_changed && !executing && (
               <span className="px-2 py-1 rounded-lg text-[10px] font-medium bg-indigo-50 text-indigo-600 border border-indigo-200" title={`${nodesStatus.pending_execution} new doc${nodesStatus.pending_execution !== 1 ? 's' : ''} to execute`}>
@@ -1097,6 +1117,18 @@ export default function WorkflowCanvas() {
               <span className={`w-2 h-2 rounded-full ${isLive ? 'bg-red-500 animate-pulse' : 'bg-gray-400'}`} />
               {isLive ? 'LIVE' : 'Go Live'}
             </button>
+
+            {/* Results (opens dialog) */}
+            {executionResult && (
+              <button
+                onClick={() => setShowResultsModal(true)}
+                className="px-3 py-1.5 rounded-lg text-xs font-medium flex items-center gap-1.5 transition-colors border bg-emerald-50 text-emerald-700 border-emerald-200 hover:bg-emerald-100"
+                title="View last execution results"
+              >
+                <Zap size={14} />
+                Results
+              </button>
+            )}
           </div>
         </div>
       </div>
@@ -1134,25 +1166,6 @@ export default function WorkflowCanvas() {
               </div>
 
               <hr className="my-2" />
-              <p className="text-[10px] uppercase tracking-wider text-gray-400 font-semibold mb-1">Quick Upload</p>
-              <label className="w-full text-center px-3 py-2.5 rounded-lg text-xs font-medium bg-gray-50 text-gray-600 hover:bg-gray-100 cursor-pointer border border-dashed border-gray-300 hover:border-indigo-300 transition-colors flex items-center justify-center gap-2">
-                {uploading ? <><Spinner size="sm" className="text-indigo-500" /> Uploading…</> : <><Upload size={14} /> Upload Docs</>}
-                <input type="file" multiple accept=".pdf,.docx,.doc,.txt,.xlsx,.xls,.csv,.pptx,.ppt,.jpg,.jpeg,.png,.gif,.bmp,.tiff,.webp,.html,.htm,.md,.rtf,.odt,.zip" onChange={handleQuickUpload} className="hidden" />
-              </label>
-              {/* Upload progress bar */}
-              {uploading && (
-                <div className="mt-2">
-                  <div className="w-full bg-gray-200 rounded-full h-1.5 overflow-hidden">
-                    <div
-                      className="h-full bg-gradient-to-r from-indigo-500 to-purple-500 rounded-full transition-all duration-300 ease-out"
-                      style={{ width: `${uploadProgress}%` }}
-                    />
-                  </div>
-                  <p className="text-[10px] text-gray-400 mt-1 text-center">
-                    {uploadProgress < 100 ? `${uploadProgress}% uploaded` : 'Processing…'}
-                  </p>
-                </div>
-              )}
             </div>
 
             {/* ── Canvas ── */}
@@ -1485,7 +1498,6 @@ export default function WorkflowCanvas() {
                     onChange={(config) => updateNode(selectedNode.id, { config })}
                     workflowId={workflowId}
                     onUpdate={() => { fetchAll(); fetchFieldOptions(); }}
-                    documentTypes={documentTypes}
                   />
                 )}
 
@@ -1617,24 +1629,62 @@ export default function WorkflowCanvas() {
           <DocumentManager workflowId={workflowId} onUpdate={fetchAll} />
         )}
 
+        {/* ── Processing tab (live SSE progress) ────── */}
+        {tab === 'processing' && (
+          <ProcessingProgressPanel
+            workflowId={workflowId}
+            nodes={nodes}
+            connections={connections}
+            executing={executing}
+            onViewResults={() => setShowResultsModal(true)}
+          />
+        )}
+
         {/* ── Dashboard tab ──────────────────────────── */}
         {tab === 'dashboard' && (
           <Dashboard workflowId={workflowId} />
         )}
 
-        {/* ── Results tab ────────────────────────────── */}
-        {tab === 'results' && (
-          <ExecutionResults
-            result={executionResult}
-            nodes={nodes}
-            executing={executing}
-            workflowId={workflowId}
-            executionHistory={executionHistory}
-            onRefreshHistory={fetchExecutionHistory}
-          />
-        )}
-
       </div>
+
+      {/* ── Results Modal (dialog overlay) ──────────── */}
+      {showResultsModal && (
+        <>
+          <div className="fixed inset-0 z-[70] bg-black/30 backdrop-blur-sm" onClick={() => setShowResultsModal(false)} />
+          <div className="fixed inset-0 z-[75] flex items-center justify-center p-4">
+            <div className="bg-white rounded-2xl shadow-2xl w-full max-w-5xl max-h-[85vh] flex flex-col overflow-hidden">
+              {/* Header */}
+              <div className="px-6 py-4 border-b flex items-center justify-between shrink-0">
+                <div className="flex items-center gap-2.5">
+                  <div className="w-8 h-8 rounded-xl bg-emerald-50 flex items-center justify-center">
+                    <Zap size={16} className="text-emerald-600" />
+                  </div>
+                  <h3 className="font-semibold text-gray-900">Execution Results</h3>
+                  {executionResult?.total_documents != null && (
+                    <span className="text-xs bg-emerald-50 text-emerald-600 px-2 py-0.5 rounded-full">
+                      {executionResult.total_documents} docs
+                    </span>
+                  )}
+                </div>
+                <button onClick={() => setShowResultsModal(false)} className="text-gray-400 hover:text-gray-600 text-xl leading-none p-1">
+                  ×
+                </button>
+              </div>
+              {/* Body */}
+              <div className="flex-1 overflow-y-auto">
+                <ExecutionResults
+                  result={executionResult}
+                  nodes={nodes}
+                  executing={executing}
+                  workflowId={workflowId}
+                  executionHistory={executionHistory}
+                  onRefreshHistory={fetchExecutionHistory}
+                />
+              </div>
+            </div>
+          </div>
+        </>
+      )}
 
       {/* ── Node Config Dialog — appears before creating a node ──── */}
       {showNodeConfigDialog && (
@@ -1962,6 +2012,29 @@ export default function WorkflowCanvas() {
         />
       )}
 
+      {/* ── Workflow Settings slide-out panel ──── */}
+      <div
+        className={`fixed top-0 right-0 z-[60] h-full w-[420px] max-w-[90vw] bg-white shadow-2xl border-l transform transition-transform duration-300 ease-in-out ${
+          showSettings ? 'translate-x-0' : 'translate-x-full'
+        }`}
+      >
+        {showSettings && (
+          <WorkflowSettingsPanel
+            workflowId={workflowId}
+            onClose={() => setShowSettings(false)}
+            onUpdate={fetchAll}
+          />
+        )}
+      </div>
+
+      {/* ── Settings backdrop ──── */}
+      {showSettings && (
+        <div
+          className="fixed inset-0 z-[55] bg-black/10"
+          onClick={() => setShowSettings(false)}
+        />
+      )}
+
       {/* ── Node Inspector overlay ──── */}
       {inspectNodeId && (
         <NodeInspector
@@ -2090,13 +2163,14 @@ function NodeConfigDialog({ nodeType, insertBetween, position, onSubmit, onCance
                 <div>
                   <label className="block text-xs font-medium text-gray-600 mb-1.5">AI Model</label>
                   <select
-                    value={config.model || 'gemini-2.0-flash'}
+                    value={config.model || 'gemini-2.5-flash'}
                     onChange={(e) => setConfig(prev => ({ ...prev, model: e.target.value }))}
                     className="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-indigo-200 focus:border-indigo-400 outline-none"
                   >
-                    <option value="gemini-2.0-flash">Gemini 2.0 Flash</option>
+                    <option value="gemini-2.5-flash">Gemini 2.5 Flash</option>
                     <option value="gemini-2.5-pro-preview-05-06">Gemini 2.5 Pro</option>
-                    <option value="gemini-2.5-flash-preview-05-20">Gemini 2.5 Flash</option>
+                    <option value="gpt-4o">GPT-4o</option>
+                    <option value="gpt-4o-mini">GPT-4o Mini</option>
                   </select>
                 </div>
                 <div>
@@ -2431,11 +2505,10 @@ function NodeResultPanel({ node, executionResult, nodes, workflowId }) {
 /* ================================================================
    Input Config Panel (sidebar) — source selector + email/upload config
    ================================================================ */
-function InputConfigPanel({ node, onChange, workflowId, onUpdate, documentTypes = [] }) {
+function InputConfigPanel({ node, onChange, workflowId, onUpdate }) {
   const serverConfig = node.config || { source_type: 'upload' };
 
   const [sourceType, setSourceType] = React.useState(serverConfig.source_type || 'upload');
-  const [docType, setDocType] = React.useState(serverConfig.document_type || '');
   // Email
   const [emailHost, setEmailHost] = React.useState(serverConfig.email_host || 'imap.gmail.com');
   const [emailUser, setEmailUser] = React.useState(serverConfig.email_user || '');
@@ -2516,11 +2589,38 @@ function InputConfigPanel({ node, onChange, workflowId, onUpdate, documentTypes 
   // Source-change confirmation dialog
   const [pendingSource, setPendingSource] = React.useState(null);
   const [showSourceChangeDialog, setShowSourceChangeDialog] = React.useState(false);
+  // Integration plugin state (when selected as input_type)
+  const [integrationPlugins, setIntegrationPlugins] = React.useState([]);
+  const [integrationSettings, setIntegrationSettings] = React.useState(serverConfig.integration_settings || {});
+  // Saved credentials from user profile
+  const [savedCredentials, setSavedCredentials] = React.useState([]);
+  const [credentialId, setCredentialId] = React.useState(serverConfig.credential_id || '');
+
+  // Fetch available integration plugins (org-enabled)
+  React.useEffect(() => {
+    let cancelled = false;
+    import('../../services/clm/clmApi').then(({ workflowApi }) => {
+      workflowApi.inputPluginIntegrations().then(({ data }) => {
+        if (!cancelled) setIntegrationPlugins(data.plugins || []);
+      }).catch(() => {});
+    });
+    return () => { cancelled = true; };
+  }, []);
+
+  // Fetch saved credentials from user profile
+  React.useEffect(() => {
+    let cancelled = false;
+    import('../../services/userService').then(({ userService }) => {
+      userService.getMyInputCredentials().then((data) => {
+        if (!cancelled) setSavedCredentials(data || []);
+      }).catch(() => {});
+    });
+    return () => { cancelled = true; };
+  }, []);
 
   React.useEffect(() => {
     const c = node.config || {};
     setSourceType(c.source_type || 'upload');
-    setDocType(c.document_type || '');
     setEmailHost(c.email_host || 'imap.gmail.com');
     setEmailUser(c.email_user || '');
     setEmailPassword(c.email_password || '');
@@ -2573,6 +2673,10 @@ function InputConfigPanel({ node, onChange, workflowId, onUpdate, documentTypes 
     setSheetSourceLinks([]);
     setSheetSourceNewName('');
     setSheetSourceCreatingSheet(false);
+    // Integration plugin settings
+    setIntegrationSettings(c.integration_settings || {});
+    // Saved credential reference
+    setCredentialId(c.credential_id || '');
     setDirty(false);
     setLastCheckResult(null);
     setTestResult(null);
@@ -2586,15 +2690,54 @@ function InputConfigPanel({ node, onChange, workflowId, onUpdate, documentTypes 
 
   const parseExtensions = () => fileExtensions.split(',').map(s => s.trim().toLowerCase()).filter(Boolean);
 
+  // Filter saved credentials matching the current source type
+  const matchingCredentials = savedCredentials.filter(c => c.credential_type === sourceType);
+  const usingCredential = !!credentialId;
+
+  // Credential selector widget (reused by all source types that support it)
+  const CredentialPicker = () => {
+    if (matchingCredentials.length === 0 && !credentialId) return null;
+    return (
+      <div className="mb-3">
+        <label className="block text-[10px] text-gray-400 font-medium mb-1">Saved Credentials</label>
+        <select
+          value={credentialId}
+          onChange={(e) => { setCredentialId(e.target.value); setDirty(true); }}
+          className="w-full px-2.5 py-2 border border-gray-200 rounded-lg text-xs text-gray-700 focus:ring-2 focus:ring-blue-100 focus:border-blue-300 outline-none bg-white"
+        >
+          <option value="">✏️ Enter manually</option>
+          {matchingCredentials.map(c => (
+            <option key={c.id} value={c.id}>🔑 {c.label}</option>
+          ))}
+        </select>
+        {credentialId && (
+          <p className="text-[10px] text-emerald-600 mt-1 flex items-center gap-1">
+            <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
+            Using saved credential — secrets are stored securely in your profile
+          </p>
+        )}
+        {matchingCredentials.length === 0 && (
+          <p className="text-[10px] text-gray-400 mt-1">
+            Tip: Save credentials in <span className="font-medium">Settings → Input Node Credentials</span> to reuse across workflows
+          </p>
+        )}
+      </div>
+    );
+  };
+
   const buildConfig = () => {
     const config = { source_type: sourceType };
-    // Email inbox doesn't use document_type — emails can be any type
-    if (sourceType !== 'email_inbox') {
-      config.document_type = docType;
-    }
+    // When using a saved credential, store the reference — backend resolves secrets
+    if (credentialId) config.credential_id = credentialId;
     if (sourceType === 'email_inbox') {
+      // Credential fields: only include if entering manually (no saved cred)
+      if (!credentialId) {
+        Object.assign(config, {
+          email_host: emailHost, email_user: emailUser, email_password: emailPassword,
+        });
+      }
+      // Non-credential config (always saved)
       Object.assign(config, {
-        email_host: emailHost, email_user: emailUser, email_password: emailPassword,
         email_folder: emailFolder, email_filter_subject: filterSubject,
         email_filter_sender: filterSender, include_body_as_document: includeBody,
         include_attachments: includeAttachments, auto_extract: autoExtract, auto_execute: false,
@@ -2605,33 +2748,50 @@ function InputConfigPanel({ node, onChange, workflowId, onUpdate, documentTypes 
         google_folder_id: googleFolderId, google_access: googleAccess,
         file_extensions: parseExtensions(),
       };
-      if (googleAccess === 'public') {
-        gConfig.google_api_key = googleApiKey;
-      } else {
-        gConfig.google_credentials_json = googleCreds;
+      if (!credentialId) {
+        if (googleAccess === 'public') {
+          gConfig.google_api_key = googleApiKey;
+        } else {
+          gConfig.google_credentials_json = googleCreds;
+        }
       }
       Object.assign(config, gConfig);
     } else if (sourceType === 'dropbox') {
       Object.assign(config, {
-        dropbox_access_token: dropboxToken, dropbox_folder_path: dropboxPath,
+        dropbox_folder_path: dropboxPath,
         file_extensions: parseExtensions(),
       });
+      if (!credentialId) config.dropbox_access_token = dropboxToken;
     } else if (sourceType === 'onedrive') {
       Object.assign(config, {
-        onedrive_access_token: onedriveToken, onedrive_folder_path: onedrivePath,
-        onedrive_drive_id: onedriveDrive, file_extensions: parseExtensions(),
-      });
-    } else if (sourceType === 's3') {
-      Object.assign(config, {
-        s3_bucket: s3Bucket, s3_prefix: s3Prefix, s3_access_key: s3AccessKey,
-        s3_secret_key: s3SecretKey, s3_region: s3Region, file_extensions: parseExtensions(),
-      });
-    } else if (sourceType === 'ftp') {
-      Object.assign(config, {
-        ftp_host: ftpHost, ftp_port: ftpPort, ftp_user: ftpUser,
-        ftp_password: ftpPassword, ftp_path: ftpPath, ftp_protocol: ftpProtocol,
+        onedrive_folder_path: onedrivePath,
         file_extensions: parseExtensions(),
       });
+      if (!credentialId) {
+        config.onedrive_access_token = onedriveToken;
+        config.onedrive_drive_id = onedriveDrive;
+      }
+    } else if (sourceType === 's3') {
+      Object.assign(config, {
+        s3_bucket: s3Bucket, s3_prefix: s3Prefix,
+        file_extensions: parseExtensions(),
+      });
+      if (!credentialId) {
+        Object.assign(config, {
+          s3_access_key: s3AccessKey, s3_secret_key: s3SecretKey, s3_region: s3Region,
+        });
+      }
+    } else if (sourceType === 'ftp') {
+      Object.assign(config, {
+        ftp_path: ftpPath,
+        file_extensions: parseExtensions(),
+      });
+      if (!credentialId) {
+        Object.assign(config, {
+          ftp_host: ftpHost, ftp_port: ftpPort, ftp_user: ftpUser,
+          ftp_password: ftpPassword, ftp_protocol: ftpProtocol,
+        });
+      }
     } else if (sourceType === 'url_scrape') {
       Object.assign(config, {
         urls: scrapeUrls.split('\n').map(u => u.trim()).filter(Boolean),
@@ -2654,6 +2814,13 @@ function InputConfigPanel({ node, onChange, workflowId, onUpdate, documentTypes 
       Object.assign(config, {
         sheet_id: sheetSourceId,
       });
+    }
+    // If source_type is an integration plugin (webhook, gmail, slack, teams),
+    // store the plugin settings alongside source_type
+    const isIntegrationSource = integrationPlugins.some(p => p.name === sourceType && p.org_enabled);
+    if (isIntegrationSource) {
+      config.integration_plugin = sourceType;
+      config.integration_settings = integrationSettings;
     }
     return config;
   };
@@ -3024,8 +3191,20 @@ function InputConfigPanel({ node, onChange, workflowId, onUpdate, documentTypes 
     { value: 'ftp',          icon: '🖥️', label: 'FTP',      desc: 'FTP/SFTP' },
   ];
 
+  // Integration plugins as input sources (only org-enabled ones)
+  const integrationSources = integrationPlugins
+    .filter(p => p.org_enabled)
+    .map(p => ({
+      value: p.name,
+      icon: p.icon,
+      label: p.display_name?.replace(' Notifier', '') || p.name,
+      desc: `${p.display_name} — receive notifications as input`,
+      isIntegration: true,
+    }));
+
   // Auto-expand "More" if the current source type is in the secondary list
   const isMoreSource = moreSources.some(s => s.value === sourceType);
+  const isIntegrationSource = integrationSources.some(s => s.value === sourceType);
 
   const handleSourceSwitch = (newSource) => {
     if (newSource === sourceType) return;
@@ -3105,61 +3284,34 @@ function InputConfigPanel({ node, onChange, workflowId, onUpdate, documentTypes 
           {primarySources.map((s) => <SourceBtn key={s.value} s={s} />)}
         </div>
 
-        {/* More integrations */}
+        {/* More cloud sources */}
         <button
           onClick={() => setShowMoreSources(!showMoreSources)}
           className="mt-2 text-[10px] font-medium text-gray-400 hover:text-blue-500 transition-colors"
         >
-          {(showMoreSources || isMoreSource) ? '− Hide' : '+ More'} integrations
+          {(showMoreSources || isMoreSource) ? '− Hide' : '+ More'} cloud sources
         </button>
         {(showMoreSources || isMoreSource) && (
           <div className="flex flex-wrap gap-1.5 mt-1.5">
             {moreSources.map((s) => <SourceBtn key={s.value} s={s} />)}
           </div>
         )}
+
+        {/* Integration plugins as input type */}
+        {integrationSources.length > 0 && (
+          <>
+            <div className="mt-3 mb-1.5">
+              <label className="block text-[10px] uppercase tracking-wider text-gray-400 font-semibold">Integrations</label>
+              <p className="text-[9px] text-gray-400 mt-0.5">Receive notifications as document input</p>
+            </div>
+            <div className="flex flex-wrap gap-1.5">
+              {integrationSources.map((s) => <SourceBtn key={s.value} s={s} />)}
+            </div>
+          </>
+        )}
       </div>
 
-      {/* Document Type Selector — hidden for email inbox, form, and sheet (structured data) */}
-      {sourceType !== 'email_inbox' && sourceType !== 'form' && sourceType !== 'sheet' && (
-      <div>
-        <label className="block text-[10px] uppercase tracking-wider text-gray-400 font-semibold mb-1.5">Document Type</label>
-        <select
-          value={docType}
-          onChange={(e) => { setDocType(e.target.value); setDirty(true); }}
-          className={`w-full px-2.5 py-2 border rounded-lg text-xs text-gray-700 focus:ring-2 focus:ring-blue-100 focus:border-blue-300 outline-none bg-white transition-colors ${
-            !docType ? 'border-amber-300' : 'border-gray-200'
-          }`}
-        >
-          <option value="">General (default fields)</option>
-          {documentTypes.map((dt) => (
-            <option key={dt.key} value={dt.key}>{dt.icon} {dt.label} — {dt.field_count} fields</option>
-          ))}
-        </select>
-      </div>
-      )}
-
-      {/* Selected type preview */}
-      {sourceType !== 'email_inbox' && sourceType !== 'form' && sourceType !== 'sheet' && docType && (() => {
-        const sel = documentTypes.find(t => t.key === docType);
-        return sel ? (
-          <div>
-            <p className="text-[11px] text-gray-500 mb-1">{sel.description}</p>
-            <button
-              onClick={() => setShowTypeFields(!showTypeFields)}
-              className="text-[10px] text-blue-500 hover:text-blue-600 font-medium transition-colors"
-            >
-              {showTypeFields ? '▾ Hide' : '▸ Show'} {sel.field_count} fields
-            </button>
-            {showTypeFields && (
-              <div className="mt-1.5 max-h-28 overflow-y-auto bg-gray-50 rounded-lg p-2 space-y-0.5">
-                {sel.fields.map((f) => (
-                  <div key={f} className="text-[10px] text-gray-500 font-mono">{f}</div>
-                ))}
-              </div>
-            )}
-          </div>
-        ) : null;
-      })()}
+      {/* Document type selection removed from input node config */}
 
       {/* Webhook source info */}
       {sourceType === 'webhook' && (
@@ -3466,39 +3618,47 @@ function InputConfigPanel({ node, onChange, workflowId, onUpdate, documentTypes 
       {sourceType === 'email_inbox' && (
         <div className="space-y-3">
 
-          {/* IMAP Host */}
-          <div>
-            <label className="block text-[10px] text-gray-400 font-medium mb-1">IMAP Host</label>
-            <input
-              value={emailHost}
-              onChange={(e) => { setEmailHost(e.target.value); setDirty(true); }}
-              placeholder="imap.gmail.com"
-              className="w-full px-2.5 py-2 border border-gray-200 rounded-lg text-xs text-gray-700 focus:ring-2 focus:ring-blue-100 focus:border-blue-300 outline-none"
-            />
-          </div>
+          {/* Credential selector */}
+          <CredentialPicker />
 
-          {/* Email */}
-          <div>
-            <label className="block text-[10px] text-gray-400 font-medium mb-1">Email</label>
-            <input
-              value={emailUser}
-              onChange={(e) => { setEmailUser(e.target.value); setDirty(true); }}
-              placeholder="contracts@company.com"
-              className="w-full px-2.5 py-2 border border-gray-200 rounded-lg text-xs text-gray-700 focus:ring-2 focus:ring-blue-100 focus:border-blue-300 outline-none"
-            />
-          </div>
+          {/* IMAP Host / Email / Password — hidden when using saved credential */}
+          {!usingCredential && (
+            <>
+              {/* IMAP Host */}
+              <div>
+                <label className="block text-[10px] text-gray-400 font-medium mb-1">IMAP Host</label>
+                <input
+                  value={emailHost}
+                  onChange={(e) => { setEmailHost(e.target.value); setDirty(true); }}
+                  placeholder="imap.gmail.com"
+                  className="w-full px-2.5 py-2 border border-gray-200 rounded-lg text-xs text-gray-700 focus:ring-2 focus:ring-blue-100 focus:border-blue-300 outline-none"
+                />
+              </div>
 
-          {/* Password */}
-          <div>
-            <label className="block text-[10px] text-gray-400 font-medium mb-1">App Password</label>
-            <input
-              type="password"
-              value={emailPassword}
-              onChange={(e) => { setEmailPassword(e.target.value); setDirty(true); }}
-              placeholder="16-char app password"
-              className="w-full px-2.5 py-2 border border-gray-200 rounded-lg text-xs text-gray-700 focus:ring-2 focus:ring-blue-100 focus:border-blue-300 outline-none"
-            />
-          </div>
+              {/* Email */}
+              <div>
+                <label className="block text-[10px] text-gray-400 font-medium mb-1">Email</label>
+                <input
+                  value={emailUser}
+                  onChange={(e) => { setEmailUser(e.target.value); setDirty(true); }}
+                  placeholder="contracts@company.com"
+                  className="w-full px-2.5 py-2 border border-gray-200 rounded-lg text-xs text-gray-700 focus:ring-2 focus:ring-blue-100 focus:border-blue-300 outline-none"
+                />
+              </div>
+
+              {/* Password */}
+              <div>
+                <label className="block text-[10px] text-gray-400 font-medium mb-1">App Password</label>
+                <input
+                  type="password"
+                  value={emailPassword}
+                  onChange={(e) => { setEmailPassword(e.target.value); setDirty(true); }}
+                  placeholder="16-char app password"
+                  className="w-full px-2.5 py-2 border border-gray-200 rounded-lg text-xs text-gray-700 focus:ring-2 focus:ring-blue-100 focus:border-blue-300 outline-none"
+                />
+              </div>
+            </>
+          )}
 
           {/* Folder */}
           <div>
@@ -3638,27 +3798,34 @@ function InputConfigPanel({ node, onChange, workflowId, onUpdate, documentTypes 
       {sourceType === 'google_drive' && (
         <div className="space-y-3">
 
-          {/* Access mode toggle */}
-          <div>
-            <label className="block text-[10px] text-gray-400 font-medium mb-1.5">Access Mode</label>
-            <div className="flex gap-1.5">
-              {[
-                { value: 'public', label: 'Public', desc: 'Anyone with link' },
-                { value: 'private', label: 'Private', desc: 'Service account' },
-              ].map(m => (
-                <button key={m.value}
-                  onClick={() => { setGoogleAccess(m.value); setDirty(true); }}
-                  className={`flex-1 py-2 rounded-lg text-[11px] font-medium transition-all ${
-                    googleAccess === m.value
-                      ? 'bg-blue-600 text-white shadow-sm'
-                      : 'bg-gray-50 text-gray-500 hover:bg-gray-100'
-                  }`}
-                >
-                  {m.label}
-                </button>
-              ))}
-            </div>
-          </div>
+          {/* Credential selector */}
+          <CredentialPicker />
+
+          {/* Access mode & API key / Service account — hidden when using saved credential */}
+          {!usingCredential && (
+            <>
+              <div>
+                <label className="block text-[10px] text-gray-400 font-medium mb-1.5">Access Mode</label>
+                <div className="flex gap-1.5">
+                  {[
+                    { value: 'public', label: 'Public', desc: 'Anyone with link' },
+                    { value: 'private', label: 'Private', desc: 'Service account' },
+                  ].map(m => (
+                    <button key={m.value}
+                      onClick={() => { setGoogleAccess(m.value); setDirty(true); }}
+                      className={`flex-1 py-2 rounded-lg text-[11px] font-medium transition-all ${
+                        googleAccess === m.value
+                          ? 'bg-blue-600 text-white shadow-sm'
+                          : 'bg-gray-50 text-gray-500 hover:bg-gray-100'
+                      }`}
+                    >
+                      {m.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            </>
+          )}
 
           {/* Folder URL or ID */}
           <div>
@@ -3668,8 +3835,8 @@ function InputConfigPanel({ node, onChange, workflowId, onUpdate, documentTypes 
               className="w-full px-2.5 py-2 border border-gray-200 rounded-lg text-xs text-gray-700 focus:ring-2 focus:ring-blue-100 focus:border-blue-300 outline-none font-mono" />
           </div>
 
-          {/* Public mode — API key */}
-          {googleAccess === 'public' && (
+          {/* Public mode — API key (hidden when using saved credential) */}
+          {!usingCredential && googleAccess === 'public' && (
             <div>
               <div className="flex items-center gap-1.5 mb-1">
                 <label className="block text-[10px] text-gray-400 font-medium">API Key</label>
@@ -3696,8 +3863,8 @@ function InputConfigPanel({ node, onChange, workflowId, onUpdate, documentTypes 
             </div>
           )}
 
-          {/* Private mode — Service account */}
-          {googleAccess === 'private' && (
+          {/* Private mode — Service account (hidden when using saved credential) */}
+          {!usingCredential && googleAccess === 'private' && (
             <div>
               <div className="flex items-center gap-1.5 mb-1">
                 <label className="block text-[10px] text-gray-400 font-medium">Service Account JSON</label>
@@ -3735,11 +3902,14 @@ function InputConfigPanel({ node, onChange, workflowId, onUpdate, documentTypes 
       {/* ── Dropbox configuration ── */}
       {sourceType === 'dropbox' && (
         <div className="space-y-3">
-          <div>
-            <label className="block text-[10px] text-gray-400 font-medium mb-1">Access Token</label>
-            <input type="password" value={dropboxToken} onChange={(e) => { setDropboxToken(e.target.value); setDirty(true); }}
-              placeholder="OAuth2 access token" className="w-full px-2.5 py-2 border border-gray-200 rounded-lg text-xs text-gray-700 focus:ring-2 focus:ring-blue-100 focus:border-blue-300 outline-none" />
-          </div>
+          <CredentialPicker />
+          {!usingCredential && (
+            <div>
+              <label className="block text-[10px] text-gray-400 font-medium mb-1">Access Token</label>
+              <input type="password" value={dropboxToken} onChange={(e) => { setDropboxToken(e.target.value); setDirty(true); }}
+                placeholder="OAuth2 access token" className="w-full px-2.5 py-2 border border-gray-200 rounded-lg text-xs text-gray-700 focus:ring-2 focus:ring-blue-100 focus:border-blue-300 outline-none" />
+            </div>
+          )}
           <div>
             <label className="block text-[10px] text-gray-400 font-medium mb-1">Folder Path</label>
             <input value={dropboxPath} onChange={(e) => { setDropboxPath(e.target.value); setDirty(true); }}
@@ -3756,11 +3926,14 @@ function InputConfigPanel({ node, onChange, workflowId, onUpdate, documentTypes 
       {/* ── OneDrive / SharePoint configuration ── */}
       {sourceType === 'onedrive' && (
         <div className="space-y-3">
-          <div>
-            <label className="block text-[10px] text-gray-400 font-medium mb-1">Access Token</label>
-            <input type="password" value={onedriveToken} onChange={(e) => { setOnedriveToken(e.target.value); setDirty(true); }}
-              placeholder="Microsoft Graph Bearer token" className="w-full px-2.5 py-2 border border-gray-200 rounded-lg text-xs text-gray-700 focus:ring-2 focus:ring-blue-100 focus:border-blue-300 outline-none" />
-          </div>
+          <CredentialPicker />
+          {!usingCredential && (
+            <div>
+              <label className="block text-[10px] text-gray-400 font-medium mb-1">Access Token</label>
+              <input type="password" value={onedriveToken} onChange={(e) => { setOnedriveToken(e.target.value); setDirty(true); }}
+                placeholder="Microsoft Graph Bearer token" className="w-full px-2.5 py-2 border border-gray-200 rounded-lg text-xs text-gray-700 focus:ring-2 focus:ring-blue-100 focus:border-blue-300 outline-none" />
+            </div>
+          )}
           <div>
             <label className="block text-[10px] text-gray-400 font-medium mb-1">Folder Path</label>
             <input value={onedrivePath} onChange={(e) => { setOnedrivePath(e.target.value); setDirty(true); }}
@@ -3782,6 +3955,7 @@ function InputConfigPanel({ node, onChange, workflowId, onUpdate, documentTypes 
       {/* ── AWS S3 configuration ── */}
       {sourceType === 's3' && (
         <div className="space-y-3">
+          <CredentialPicker />
           <div>
             <label className="block text-[10px] text-gray-400 font-medium mb-1">Bucket</label>
             <input value={s3Bucket} onChange={(e) => { setS3Bucket(e.target.value); setDirty(true); }}
@@ -3792,23 +3966,27 @@ function InputConfigPanel({ node, onChange, workflowId, onUpdate, documentTypes 
             <input value={s3Prefix} onChange={(e) => { setS3Prefix(e.target.value); setDirty(true); }}
               placeholder="contracts/2024/" className="w-full px-2.5 py-2 border border-gray-200 rounded-lg text-xs text-gray-700 focus:ring-2 focus:ring-blue-100 focus:border-blue-300 outline-none font-mono" />
           </div>
-          <div className="grid grid-cols-2 gap-2">
-            <div>
-              <label className="block text-[10px] text-gray-400 font-medium mb-1">Access Key</label>
-              <input value={s3AccessKey} onChange={(e) => { setS3AccessKey(e.target.value); setDirty(true); }}
-                placeholder="AKIA…" className="w-full px-2 py-2 border border-gray-200 rounded-lg text-xs text-gray-700 focus:ring-2 focus:ring-blue-100 focus:border-blue-300 outline-none font-mono" />
-            </div>
-            <div>
-              <label className="block text-[10px] text-gray-400 font-medium mb-1">Secret Key</label>
-              <input type="password" value={s3SecretKey} onChange={(e) => { setS3SecretKey(e.target.value); setDirty(true); }}
-                placeholder="••••••" className="w-full px-2 py-2 border border-gray-200 rounded-lg text-xs text-gray-700 focus:ring-2 focus:ring-blue-100 focus:border-blue-300 outline-none" />
-            </div>
-          </div>
-          <div>
-            <label className="block text-[10px] text-gray-400 font-medium mb-1">Region</label>
-            <input value={s3Region} onChange={(e) => { setS3Region(e.target.value); setDirty(true); }}
-              placeholder="us-east-1" className="w-full px-2.5 py-2 border border-gray-200 rounded-lg text-xs text-gray-700 focus:ring-2 focus:ring-blue-100 focus:border-blue-300 outline-none" />
-          </div>
+          {!usingCredential && (
+            <>
+              <div className="grid grid-cols-2 gap-2">
+                <div>
+                  <label className="block text-[10px] text-gray-400 font-medium mb-1">Access Key</label>
+                  <input value={s3AccessKey} onChange={(e) => { setS3AccessKey(e.target.value); setDirty(true); }}
+                    placeholder="AKIA…" className="w-full px-2 py-2 border border-gray-200 rounded-lg text-xs text-gray-700 focus:ring-2 focus:ring-blue-100 focus:border-blue-300 outline-none font-mono" />
+                </div>
+                <div>
+                  <label className="block text-[10px] text-gray-400 font-medium mb-1">Secret Key</label>
+                  <input type="password" value={s3SecretKey} onChange={(e) => { setS3SecretKey(e.target.value); setDirty(true); }}
+                    placeholder="••••••" className="w-full px-2 py-2 border border-gray-200 rounded-lg text-xs text-gray-700 focus:ring-2 focus:ring-blue-100 focus:border-blue-300 outline-none" />
+                </div>
+              </div>
+              <div>
+                <label className="block text-[10px] text-gray-400 font-medium mb-1">Region</label>
+                <input value={s3Region} onChange={(e) => { setS3Region(e.target.value); setDirty(true); }}
+                  placeholder="us-east-1" className="w-full px-2.5 py-2 border border-gray-200 rounded-lg text-xs text-gray-700 focus:ring-2 focus:ring-blue-100 focus:border-blue-300 outline-none" />
+              </div>
+            </>
+          )}
           <div>
             <label className="block text-[10px] text-gray-400 font-medium mb-1">File Extensions</label>
             <input value={fileExtensions} onChange={(e) => { setFileExtensions(e.target.value); setDirty(true); }}
@@ -3820,37 +3998,42 @@ function InputConfigPanel({ node, onChange, workflowId, onUpdate, documentTypes 
       {/* ── FTP / SFTP configuration ── */}
       {sourceType === 'ftp' && (
         <div className="space-y-3">
-          <div className="flex gap-1.5">
-            {['ftp', 'sftp'].map(p => (
-              <button key={p} onClick={() => { setFtpProtocol(p); setFtpPort(p === 'sftp' ? '22' : '21'); setDirty(true); }}
-                className={`px-3 py-1.5 rounded-lg text-[11px] font-medium transition-all ${ftpProtocol === p ? 'bg-blue-600 text-white' : 'bg-gray-50 text-gray-500 hover:bg-gray-100'}`}
-              >{p.toUpperCase()}</button>
-            ))}
-          </div>
-          <div className="grid grid-cols-3 gap-2">
-            <div className="col-span-2">
-              <label className="block text-[10px] text-gray-400 font-medium mb-1">Host</label>
-              <input value={ftpHost} onChange={(e) => { setFtpHost(e.target.value); setDirty(true); }}
-                placeholder="ftp.company.com" className="w-full px-2.5 py-2 border border-gray-200 rounded-lg text-xs text-gray-700 focus:ring-2 focus:ring-blue-100 focus:border-blue-300 outline-none" />
-            </div>
-            <div>
-              <label className="block text-[10px] text-gray-400 font-medium mb-1">Port</label>
-              <input value={ftpPort} onChange={(e) => { setFtpPort(e.target.value); setDirty(true); }}
-                placeholder="21" className="w-full px-2.5 py-2 border border-gray-200 rounded-lg text-xs text-gray-700 focus:ring-2 focus:ring-blue-100 focus:border-blue-300 outline-none" />
-            </div>
-          </div>
-          <div className="grid grid-cols-2 gap-2">
-            <div>
-              <label className="block text-[10px] text-gray-400 font-medium mb-1">Username</label>
-              <input value={ftpUser} onChange={(e) => { setFtpUser(e.target.value); setDirty(true); }}
-                placeholder="user" className="w-full px-2 py-2 border border-gray-200 rounded-lg text-xs text-gray-700 focus:ring-2 focus:ring-blue-100 focus:border-blue-300 outline-none" />
-            </div>
-            <div>
-              <label className="block text-[10px] text-gray-400 font-medium mb-1">Password</label>
-              <input type="password" value={ftpPassword} onChange={(e) => { setFtpPassword(e.target.value); setDirty(true); }}
-                placeholder="••••" className="w-full px-2 py-2 border border-gray-200 rounded-lg text-xs text-gray-700 focus:ring-2 focus:ring-blue-100 focus:border-blue-300 outline-none" />
-            </div>
-          </div>
+          <CredentialPicker />
+          {!usingCredential && (
+            <>
+              <div className="flex gap-1.5">
+                {['ftp', 'sftp'].map(p => (
+                  <button key={p} onClick={() => { setFtpProtocol(p); setFtpPort(p === 'sftp' ? '22' : '21'); setDirty(true); }}
+                    className={`px-3 py-1.5 rounded-lg text-[11px] font-medium transition-all ${ftpProtocol === p ? 'bg-blue-600 text-white' : 'bg-gray-50 text-gray-500 hover:bg-gray-100'}`}
+                  >{p.toUpperCase()}</button>
+                ))}
+              </div>
+              <div className="grid grid-cols-3 gap-2">
+                <div className="col-span-2">
+                  <label className="block text-[10px] text-gray-400 font-medium mb-1">Host</label>
+                  <input value={ftpHost} onChange={(e) => { setFtpHost(e.target.value); setDirty(true); }}
+                    placeholder="ftp.company.com" className="w-full px-2.5 py-2 border border-gray-200 rounded-lg text-xs text-gray-700 focus:ring-2 focus:ring-blue-100 focus:border-blue-300 outline-none" />
+                </div>
+                <div>
+                  <label className="block text-[10px] text-gray-400 font-medium mb-1">Port</label>
+                  <input value={ftpPort} onChange={(e) => { setFtpPort(e.target.value); setDirty(true); }}
+                    placeholder="21" className="w-full px-2.5 py-2 border border-gray-200 rounded-lg text-xs text-gray-700 focus:ring-2 focus:ring-blue-100 focus:border-blue-300 outline-none" />
+                </div>
+              </div>
+              <div className="grid grid-cols-2 gap-2">
+                <div>
+                  <label className="block text-[10px] text-gray-400 font-medium mb-1">Username</label>
+                  <input value={ftpUser} onChange={(e) => { setFtpUser(e.target.value); setDirty(true); }}
+                    placeholder="user" className="w-full px-2 py-2 border border-gray-200 rounded-lg text-xs text-gray-700 focus:ring-2 focus:ring-blue-100 focus:border-blue-300 outline-none" />
+                </div>
+                <div>
+                  <label className="block text-[10px] text-gray-400 font-medium mb-1">Password</label>
+                  <input type="password" value={ftpPassword} onChange={(e) => { setFtpPassword(e.target.value); setDirty(true); }}
+                    placeholder="••••" className="w-full px-2 py-2 border border-gray-200 rounded-lg text-xs text-gray-700 focus:ring-2 focus:ring-blue-100 focus:border-blue-300 outline-none" />
+                </div>
+              </div>
+            </>
+          )}
           <div>
             <label className="block text-[10px] text-gray-400 font-medium mb-1">Remote Directory</label>
             <input value={ftpPath} onChange={(e) => { setFtpPath(e.target.value); setDirty(true); }}
@@ -4075,8 +4258,104 @@ function InputConfigPanel({ node, onChange, workflowId, onUpdate, documentTypes 
         </div>
       )}
 
-      {/* Save for non-email, non-form sources */}
-      {sourceType !== 'email_inbox' && sourceType !== 'form' && sourceType !== 'sheet' && dirty && (
+      {/* ── Integration Plugin Config (when integration is selected as source) ── */}
+      {isIntegrationSource && (() => {
+        const plugin = integrationPlugins.find(p => p.name === sourceType);
+        if (!plugin) return null;
+        const schema = plugin.settings_schema || {};
+        return (
+          <div className="space-y-3">
+            <div className="flex items-center gap-2">
+              <span className="text-lg">{plugin.icon}</span>
+              <div>
+                <p className="text-xs font-semibold text-gray-800">{plugin.display_name}</p>
+                <p className="text-[10px] text-gray-400 leading-tight">{plugin.description}</p>
+              </div>
+            </div>
+
+            <div className="bg-blue-50/50 border border-blue-100 rounded-xl p-2.5">
+              <p className="text-[10px] text-blue-600 font-medium">📥 All notifications from this integration will be received as document inputs to this node.</p>
+            </div>
+
+            {/* Plugin settings form */}
+            {Object.keys(schema).length > 0 && (
+              <div className="space-y-2">
+                <label className="block text-[10px] uppercase tracking-wider text-gray-400 font-semibold">Configuration</label>
+                {Object.entries(schema).map(([key, fs]) => {
+                  const value = integrationSettings[key] ?? fs.default;
+                  return (
+                    <div key={key}>
+                      <label className="block text-[10px] text-gray-500 font-medium mb-1">{fs.label || key}</label>
+                      {fs.description && <p className="text-[9px] text-gray-400 mb-1">{fs.description}</p>}
+
+                      {fs.type === 'boolean' && (
+                        <button
+                          onClick={() => { setIntegrationSettings(prev => ({ ...prev, [key]: !value })); setDirty(true); }}
+                          className="flex items-center gap-1.5 text-[10px]"
+                        >
+                          <div className={`w-8 h-4 rounded-full transition-colors ${value ? 'bg-blue-500' : 'bg-gray-200'}`}>
+                            <div className={`w-3.5 h-3.5 rounded-full bg-white shadow-sm transition-transform mt-[1px] ${value ? 'translate-x-4' : 'translate-x-[1px]'}`} />
+                          </div>
+                          <span className="text-gray-600">{value ? 'On' : 'Off'}</span>
+                        </button>
+                      )}
+
+                      {fs.type === 'string' && (
+                        <input
+                          type={key.includes('secret') || key.includes('password') ? 'password' : 'text'}
+                          value={value || ''}
+                          onChange={e => { setIntegrationSettings(prev => ({ ...prev, [key]: e.target.value })); setDirty(true); }}
+                          placeholder={fs.default || '…'}
+                          className="w-full px-2.5 py-2 border border-gray-200 rounded-lg text-xs text-gray-700 focus:ring-2 focus:ring-blue-100 focus:border-blue-300 outline-none"
+                        />
+                      )}
+
+                      {fs.type === 'select' && (
+                        <select
+                          value={value || fs.default}
+                          onChange={e => { setIntegrationSettings(prev => ({ ...prev, [key]: e.target.value })); setDirty(true); }}
+                          className="w-full px-2.5 py-2 border border-gray-200 rounded-lg text-xs text-gray-700 focus:ring-2 focus:ring-blue-100 focus:border-blue-300 outline-none bg-white"
+                        >
+                          {(fs.options || []).map(opt => (
+                            <option key={opt} value={opt}>{opt}</option>
+                          ))}
+                        </select>
+                      )}
+
+                      {fs.type === 'array' && (
+                        <textarea
+                          value={Array.isArray(value) ? value.join('\n') : (value || '')}
+                          onChange={e => {
+                            const lines = e.target.value.split('\n').map(s => s.trim()).filter(Boolean);
+                            setIntegrationSettings(prev => ({ ...prev, [key]: lines }));
+                            setDirty(true);
+                          }}
+                          rows={2}
+                          placeholder="One per line…"
+                          className="w-full px-2.5 py-2 border border-gray-200 rounded-lg text-xs text-gray-700 focus:ring-2 focus:ring-blue-100 focus:border-blue-300 outline-none font-mono resize-y"
+                        />
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+
+            {/* Save */}
+            {dirty && (
+              <button
+                onClick={handleSave}
+                className="w-full px-2 py-2.5 bg-blue-600 text-white rounded-xl text-xs font-medium hover:bg-blue-700 transition-colors"
+              >
+                Save Integration Config
+              </button>
+            )}
+          </div>
+        );
+      })()}
+
+      {/* Save for non-email, non-form, non-integration sources */}
+      {sourceType !== 'email_inbox' && sourceType !== 'form' && sourceType !== 'sheet' && !isIntegrationSource && dirty && (
         <button
           onClick={handleSave}
           className="w-full px-2 py-2.5 bg-blue-600 text-white rounded-xl text-xs font-medium hover:bg-blue-700 transition-colors"
@@ -4084,6 +4363,15 @@ function InputConfigPanel({ node, onChange, workflowId, onUpdate, documentTypes 
           Save Config
         </button>
       )}
+
+      {/* ── Input Plugin Pipeline ── */}
+      <div className="border-t border-gray-100 pt-3 mt-3">
+        <InputPluginsPanel
+          workflowId={workflowId}
+          nodeId={node.id}
+          onUpdate={onUpdate}
+        />
+      </div>
     </div>
   );
 }
@@ -4892,7 +5180,7 @@ function ValidatorConfigPanel({ node, onChange, workflowId, onUpdate }) {
 function AIConfigPanel({ node, onChange, models }) {
   const serverConfig = node.config || {};
 
-  const [model, setModel] = React.useState(serverConfig.model || 'gemini-2.0-flash');
+  const [model, setModel] = React.useState(serverConfig.model || 'gemini-2.5-flash');
   const [systemPrompt, setSystemPrompt] = React.useState(serverConfig.system_prompt || '');
   const [outputFormat, setOutputFormat] = React.useState(serverConfig.output_format || 'json_extract');
   const [outputKey, setOutputKey] = React.useState(serverConfig.output_key || 'ai_analysis');
@@ -4905,7 +5193,7 @@ function AIConfigPanel({ node, onChange, models }) {
 
   React.useEffect(() => {
     const c = node.config || {};
-    setModel(c.model || 'gemini-2.0-flash');
+    setModel(c.model || 'gemini-2.5-flash');
     setSystemPrompt(c.system_prompt || '');
     setOutputFormat(c.output_format || 'json_extract');
     setOutputKey(c.output_key || 'ai_analysis');

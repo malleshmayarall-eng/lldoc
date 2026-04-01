@@ -11,6 +11,7 @@ https://docs.djangoproject.com/en/6.0/ref/settings/
 """
 
 from pathlib import Path
+import os
 
 from dotenv import load_dotenv
 
@@ -67,6 +68,7 @@ INSTALLED_APPS = [
     'viewer',  # Document viewer & commentator for external users
     'communications',  # Centralized communications, alerts & email system
     'sheets',  # Spreadsheet / data tables app
+    'attachments',  # Centralized image & document attachment library
 ]
 
 MIDDLEWARE = [
@@ -242,14 +244,14 @@ DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 # Email configuration — SMTP via Gmail with certifi SSL
 # NOTE: Google Workspace requires an App Password (not regular password).
 # Generate one at: https://myaccount.google.com → Security → App Passwords
-# Replace EMAIL_HOST_PASSWORD with the 16-char app password.
-EMAIL_BACKEND = 'clm.email_backend.CertifiSMTPBackend'
-EMAIL_HOST = 'smtp.gmail.com'
-EMAIL_PORT = 587
-EMAIL_USE_TLS = True
-EMAIL_HOST_USER = 'mayaramallesh12@gmail.com'
-EMAIL_HOST_PASSWORD = 'cvmwcnjvnppictjg'
-DEFAULT_FROM_EMAIL = 'mayaramallesh12@gmail.com'
+# Configure these in env.env (loaded via python-dotenv). Defaults are for local dev only.
+EMAIL_BACKEND = os.getenv('EMAIL_BACKEND', 'clm.email_backend.CertifiSMTPBackend')
+EMAIL_HOST = os.getenv('EMAIL_HOST', 'smtp.gmail.com')
+EMAIL_PORT = int(os.getenv('EMAIL_PORT', 587))
+EMAIL_USE_TLS = os.getenv('EMAIL_USE_TLS', 'True').lower() in ('1', 'true', 'yes')
+EMAIL_HOST_USER = os.getenv('EMAIL_HOST_USER', 'mayaramallesh12@gmail.com')
+EMAIL_HOST_PASSWORD = os.getenv('EMAIL_HOST_PASSWORD', '')
+DEFAULT_FROM_EMAIL = os.getenv('DEFAULT_FROM_EMAIL', EMAIL_HOST_USER)
 
 
 X_FRAME_OPTIONS = "SAMEORIGIN"  # allow iframes from same origin
@@ -284,8 +286,91 @@ CELERY_BEAT_SCHEDULE = {
         'task': 'clm.tasks.dispatch_event_subscriptions',
         'schedule': 30.0,  # every 30 seconds, polls time-based subscriptions (email, cloud, etc.)
     },
+    'clm-table-cleanup': {
+        'task': 'clm.tasks.cleanup_clm_tables',
+        'schedule': 6 * 60 * 60,  # every 6 hours — prunes SheetNodeQuery, NodeExecutionLog, etc.
+    },
+    # ── Notification system tasks ────────────────────────────────────
+    'notification-retry-failed': {
+        'task': 'communications.tasks.retry_failed_deliveries',
+        'schedule': 60.0,  # every 60 seconds — retry pending failed deliveries
+    },
+    'notification-digest-hourly': {
+        'task': 'communications.tasks.send_digest_emails',
+        'schedule': 3600.0,  # every hour
+        'args': ('hourly',),
+    },
+    'notification-digest-daily': {
+        'task': 'communications.tasks.send_digest_emails',
+        'schedule': 86400.0,  # every 24 hours
+        'args': ('daily',),
+    },
+    'notification-digest-weekly': {
+        'task': 'communications.tasks.send_digest_emails',
+        'schedule': 604800.0,  # every 7 days
+        'args': ('weekly',),
+    },
+    'notification-cleanup-expired': {
+        'task': 'communications.tasks.cleanup_expired_alerts',
+        'schedule': 6 * 60 * 60,  # every 6 hours — prune expired & old alerts
+    },
 }
 
 # django-celery-beat (optional, for dynamic schedules via admin)
 # Uncomment and add 'django_celery_beat' to INSTALLED_APPS if desired.
 # CELERY_BEAT_SCHEDULER = 'django_celery_beat.schedulers:DatabaseScheduler'
+
+
+# ---------------------------------------------------------------------------
+# Django Channels — WebSocket support for real-time notifications
+# ---------------------------------------------------------------------------
+# Install: pip install channels channels-redis
+# The notification WebSocket consumer is at /ws/notifications/
+# If channels is not installed, the system gracefully falls back to HTTP-only.
+
+# ASGI application (also set in drafter/asgi.py)
+ASGI_APPLICATION = 'drafter.asgi.application'
+
+# Channel layer — uses Redis for cross-process communication
+# In production, use the same Redis instance as Celery or a dedicated one.
+# For development without Redis, use InMemoryChannelLayer (single-process only).
+CHANNEL_LAYERS = {
+    'default': {
+        # Production: Redis-backed channel layer
+        'BACKEND': 'channels_redis.core.RedisChannelLayer',
+        'CONFIG': {
+            'hosts': [('127.0.0.1', 6379)],
+            'capacity': 1000,          # max messages per channel
+            'expiry': 60,              # message TTL in seconds
+        },
+    },
+    # Uncomment for development without Redis:
+    # 'default': {
+    #     'BACKEND': 'channels.layers.InMemoryChannelLayer',
+    # },
+}
+
+
+# ---------------------------------------------------------------------------
+# Notification system settings
+# ---------------------------------------------------------------------------
+NOTIFICATION_SETTINGS = {
+    # Deduplication window (seconds) — alerts with same dedup_key suppressed
+    'DEDUP_WINDOW_SECONDS': 300,  # 5 minutes
+
+    # Rate limit: max alerts per user per category within window
+    'RATE_LIMIT_WINDOW_SECONDS': 60,
+    'RATE_LIMIT_MAX_PER_WINDOW': 20,
+
+    # Alert TTL — auto-expire low-priority alerts after this many days
+    'DEFAULT_EXPIRY_DAYS': None,  # None = never expire
+
+    # Cleanup — delete old read+archived alerts after this many days
+    'CLEANUP_READ_ARCHIVED_DAYS': 90,
+    'CLEANUP_WEBHOOK_LOGS_DAYS': 30,
+
+    # Webhook settings
+    'WEBHOOK_TIMEOUT_SECONDS': 10,
+    'WEBHOOK_MAX_RETRIES': 3,
+    'WEBHOOK_AUTO_DISABLE_THRESHOLD': 10,
+}

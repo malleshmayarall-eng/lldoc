@@ -17,6 +17,8 @@ Users can then:
   - Update the missing data via override_data
   - Retry individual skipped/failed results
 """
+import hashlib
+import json
 import logging
 
 from django.utils import timezone
@@ -26,6 +28,7 @@ from .models import (
     ActionExecution,
     ActionExecutionResult,
     ActionPlugin,
+    RowActionLog,
     WorkflowDocument,
     WorkflowNode,
 )
@@ -37,6 +40,7 @@ def execute_action_node(
     node: WorkflowNode,
     incoming_document_ids: list,
     triggered_by=None,
+    workflow_execution=None,
 ) -> dict:
     """
     Execute an action node's plugin for every incoming document.
@@ -53,6 +57,7 @@ def execute_action_node(
               }
         incoming_document_ids: list of WorkflowDocument UUIDs from upstream nodes
         triggered_by: User who triggered the execution (optional)
+        workflow_execution: WorkflowExecution instance (for RowActionLog dedup)
 
     Returns:
         dict with execution summary and per-document results
@@ -116,6 +121,7 @@ def execute_action_node(
     sent = 0
     skipped = 0
     failed = 0
+    deduped = 0
 
     for doc in documents:
         # Extract data from both metadata sources
@@ -126,6 +132,35 @@ def execute_action_node(
         combined_meta['document_title'] = doc.title
         combined_meta['document_id'] = str(doc.id)
         combined_meta['file_type'] = doc.file_type
+
+        # ── Row identity & content hash for dedup ─────────────────
+        # _row_id comes from sheet-originated docs; fall back to doc.id
+        _row_id = combined_meta.get('_row_id') or str(doc.id)
+        # Use file_hash if available (already SHA-256 of row data),
+        # otherwise compute from extracted_metadata
+        _content_hash = doc.file_hash or ''
+        if not _content_hash:
+            _content_hash = hashlib.sha256(
+                json.dumps(doc.extracted_metadata or {}, sort_keys=True, default=str).encode()
+            ).hexdigest()
+
+        # ── Idempotency guard: skip if already executed for this data ─
+        if _content_hash and RowActionLog.has_been_executed(node, _row_id, _content_hash):
+            logger.info(
+                f"[action-dedup] Skipping doc {doc.id} (row={_row_id}, "
+                f"hash={_content_hash[:12]}…) — already executed by node {node.id}"
+            )
+            result = ActionExecutionResult.objects.create(
+                execution=execution,
+                document=doc,
+                status='skipped',
+                extracted_data={'_dedup': True, '_row_id': _row_id},
+                error_message='Deduplicated: identical data already processed',
+            )
+            deduped += 1
+            skipped += 1
+            results.append(_result_to_dict(result, doc))
+            continue
 
         # Extract only the fields the plugin cares about
         data = {}
@@ -168,6 +203,19 @@ def execute_action_node(
                     plugin_response=response,
                 )
                 sent += 1
+
+                # ── Record successful execution in RowActionLog ───────
+                if _content_hash:
+                    RowActionLog.record_execution(
+                        workflow=node.workflow,
+                        node=node,
+                        execution=workflow_execution,
+                        row_id=_row_id,
+                        content_hash=_content_hash,
+                        action_type=plugin_name,
+                        status='executed',
+                        result_summary={'plugin': plugin_name, 'doc_id': str(doc.id)},
+                    )
             else:
                 result = ActionExecutionResult.objects.create(
                     execution=execution,
@@ -216,6 +264,7 @@ def execute_action_node(
         'sent': sent,
         'skipped': skipped,
         'failed': failed,
+        'deduped': deduped,
         'status': execution.status,
     }
     node.save(update_fields=['last_result', 'updated_at'])
@@ -229,6 +278,7 @@ def execute_action_node(
         'sent': sent,
         'skipped': skipped,
         'failed': failed,
+        'deduped': deduped,
         'results': results,
     }
 

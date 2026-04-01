@@ -26,6 +26,7 @@ import {
   LayoutDashboard,
   FilePlus,
   Grid3X3,
+  Paperclip,
 } from 'lucide-react';
 import useWorkflowStore from '../store/workflowStore';
 import NotificationCenter from './NotificationCenter';
@@ -80,6 +81,7 @@ const Sidebar = () => {
       { key: 'masters', to: '/masters', icon: BookTemplate, label: 'Templates', flag: ['apps', 'master_documents'] },
       { key: 'quick_latex', to: '/quick-latex', icon: Eye, label: 'Quick Documents', flag: ['apps', 'quick_latex'] },
       { key: 'sheets', to: '/sheets', icon: Grid3X3, label: 'Sheets', always: true },
+      { key: 'attachments', to: '/attachments', icon: Paperclip, label: 'Attachments', always: true },
       { key: 'tasks', to: '/tasks', icon: ListTodo, label: 'My Tasks', flag: ['apps', 'workflow'] },
       { key: 'approvals', to: '/approvals', icon: CheckCircle, label: 'Approvals', flag: ['apps', 'workflow'] },
       { key: 'settings', to: '/settings', icon: Settings, label: 'Settings', always: true },
@@ -134,12 +136,12 @@ const Sidebar = () => {
       {/* Logo/Header */}
       <div className={`h-14 flex items-center border-b border-gray-200 ${isExpanded ? 'justify-between px-4' : 'justify-center px-2'}`}>
         <div className={`flex items-center gap-2 ${!isExpanded ? 'justify-center' : ''}`}>
-          <div className="bg-blue-600 p-1.5 rounded flex-shrink-0">
-            <FileText className="h-4 w-4 text-white" />
+          <div className="bg-white p-1.5 rounded flex-shrink-0 border border-gray-200">
+            <img src="/clearthread-logo.png" alt="clearthread logo" onError={(e) => { e.currentTarget.onerror = null; e.currentTarget.src = '/latentlayer-logo.svg'; }} className="h-5 w-5" />
           </div>
           {isExpanded && (
             <span className="font-bold text-lg text-gray-900 whitespace-nowrap">
-              Drafter
+              clearthread
               {domain && domain !== 'default' && (
                 <span className="ml-2 inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-semibold uppercase bg-blue-100 text-blue-700">
                   {domain}

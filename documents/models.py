@@ -467,9 +467,6 @@ class Document(models.Model):
     STATUS_CHOICES = [
         ('draft', 'Draft'),
         ('under_review', 'Under Review'),
-        ('analyzed', 'Analyzed'),
-        ('approved', 'Approved'),
-        ('finalized', 'Finalized'),
         ('done', 'Done'),
     ]
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='draft', db_index=True)
@@ -4542,6 +4539,27 @@ class DocumentImage(models.Model):
     uploaded_at = models.DateTimeField(auto_now_add=True, db_index=True)
     updated_at = models.DateTimeField(auto_now=True)
     
+    # ── Scope / visibility ───────────────────────────────────────────────
+    SCOPE_CHOICES = [
+        ('user', 'User (private)'),
+        ('team', 'Team'),
+        ('organization', 'Organization'),
+        ('document', 'Document-specific'),
+    ]
+    scope = models.CharField(max_length=20, choices=SCOPE_CHOICES, default='user',
+                             db_index=True,
+                             help_text="Visibility scope for this image")
+    organization = models.ForeignKey(
+        'user_management.Organization', on_delete=models.CASCADE,
+        null=True, blank=True, related_name='document_images', db_index=True,
+        help_text="Organization that owns this image (auto-set from uploader)",
+    )
+    team = models.ForeignKey(
+        'user_management.Team', on_delete=models.SET_NULL,
+        null=True, blank=True, related_name='document_images', db_index=True,
+        help_text="Team scope — required when scope='team'",
+    )
+
     # Usage tracking
     is_public = models.BooleanField(default=False, 
                                    help_text="Public images can be used by all users")
@@ -4565,6 +4583,10 @@ class DocumentImage(models.Model):
             models.Index(fields=['uploaded_by', 'image_type']),  # User + type
             models.Index(fields=['document', 'image_type']),  # Document images
             models.Index(fields=['is_public']),  # Public images
+            models.Index(fields=['scope', '-uploaded_at']),  # Scope lookup
+            models.Index(fields=['organization', '-uploaded_at']),  # Org lookup
+            models.Index(fields=['team', '-uploaded_at']),  # Team lookup
+            models.Index(fields=['organization', 'scope']),  # Org + scope
         ]
         verbose_name = "Document Image"
         verbose_name_plural = "Document Images"
@@ -4674,6 +4696,38 @@ class DocumentImage(models.Model):
             queryset = queryset.filter(image_type=image_type)
         return queryset.order_by('-uploaded_at')
     
+    @classmethod
+    def visible_to_user(cls, user, image_type=None):
+        """
+        Return all images the user is allowed to see across all scopes:
+          1. Their own uploads
+          2. Team uploads for teams they belong to
+          3. Organization-wide uploads in their org
+          4. Public images
+          5. Images attached to documents they created
+        """
+        from django.db.models import Q
+        try:
+            profile = user.profile
+            org = profile.organization
+            team_ids = list(profile.teams.values_list('id', flat=True))
+        except Exception:
+            qs = cls.objects.filter(Q(uploaded_by=user) | Q(is_public=True))
+            if image_type:
+                qs = qs.filter(image_type=image_type)
+            return qs.distinct().order_by('-uploaded_at')
+
+        qs = cls.objects.filter(
+            Q(uploaded_by=user) |
+            Q(scope='organization', organization=org) |
+            Q(scope='team', team_id__in=team_ids) |
+            Q(is_public=True) |
+            Q(document__created_by=user)
+        ).distinct()
+        if image_type:
+            qs = qs.filter(image_type=image_type)
+        return qs.order_by('-uploaded_at')
+
     def get_url(self):
         """Get image URL."""
         return self.image.url if self.image else None
@@ -4976,9 +5030,17 @@ class DocumentFile(models.Model):
         help_text="User who uploaded this file"
     )
     
-    # Optional: Organization and team references (if you have these models)
-    # team = models.ForeignKey('Team', on_delete=models.SET_NULL, null=True, blank=True)
-    # organization = models.ForeignKey('Organization', on_delete=models.SET_NULL, null=True, blank=True)
+    # Organization and team references for scoped access
+    organization = models.ForeignKey(
+        'user_management.Organization', on_delete=models.CASCADE,
+        null=True, blank=True, related_name='document_files', db_index=True,
+        help_text="Organization that owns this file (auto-set from uploader)",
+    )
+    team = models.ForeignKey(
+        'user_management.Team', on_delete=models.SET_NULL,
+        null=True, blank=True, related_name='document_files', db_index=True,
+        help_text="Team scope — required when access_level='team'",
+    )
     
     # Timestamps
     uploaded_at = models.DateTimeField(auto_now_add=True, db_index=True)
@@ -5096,6 +5158,9 @@ class DocumentFile(models.Model):
             models.Index(fields=['uploaded_by', 'access_level']),
             models.Index(fields=['is_active', '-uploaded_at']),
             models.Index(fields=['file_hash']),
+            models.Index(fields=['organization', '-uploaded_at']),
+            models.Index(fields=['team', '-uploaded_at']),
+            models.Index(fields=['organization', 'access_level']),
         ]
         verbose_name = "Document File"
         verbose_name_plural = "Document Files"
@@ -5200,15 +5265,46 @@ class DocumentFile(models.Model):
         if self.access_level == 'user':
             return False
         elif self.access_level == 'team':
-            # TODO: Implement team check if you have team model
-            # return user.team == self.uploaded_by.team
-            return True  # For now, allow access
+            if self.team:
+                return user.profile.teams.filter(id=self.team_id).exists()
+            return False
         elif self.access_level == 'organization':
-            # TODO: Implement organization check
-            # return user.organization == self.uploaded_by.organization
-            return True  # For now, allow access
+            if self.organization:
+                try:
+                    return user.profile.organization_id == self.organization_id
+                except Exception:
+                    return False
+            return False
         
         return False
+
+    @classmethod
+    def visible_to_user(cls, user, file_type=None):
+        """
+        Return all files the user is allowed to see across all access levels:
+          1. Their own uploads
+          2. Team uploads for teams they belong to
+          3. Organization-wide uploads in their org
+        """
+        from django.db.models import Q
+        try:
+            profile = user.profile
+            org = profile.organization
+            team_ids = list(profile.teams.values_list('id', flat=True))
+        except Exception:
+            qs = cls.objects.filter(uploaded_by=user, is_active=True)
+            if file_type:
+                qs = qs.filter(file_type=file_type)
+            return qs.order_by('-uploaded_at')
+
+        qs = cls.objects.filter(
+            Q(uploaded_by=user) |
+            Q(access_level='organization', organization=org) |
+            Q(access_level='team', team_id__in=team_ids)
+        ).filter(is_active=True).distinct()
+        if file_type:
+            qs = qs.filter(file_type=file_type)
+        return qs.order_by('-uploaded_at')
 
 
 class DocumentFileComponent(models.Model):

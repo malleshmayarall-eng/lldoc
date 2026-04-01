@@ -3,7 +3,7 @@ import { Link, useNavigate } from 'react-router-dom';
 import { workflowApi } from '@services/clm/clmApi';
 import { ConfirmModal, Spinner, EmptyState } from '@components/clm/ui/SharedUI';
 import notify from '@utils/clm/clmNotify';
-import { Plus, Copy, Trash2, Edit3, Clock, FileText, GitBranch, Sparkles, Loader2, MessageCircleQuestion, Send } from 'lucide-react';
+import { Plus, Copy, Trash2, Edit3, Clock, FileText, GitBranch, Sparkles, Loader2, MessageCircleQuestion, Send, Radio, User, Users } from 'lucide-react';
 import { useFeatureFlags } from '../../contexts/FeatureFlagContext';
 import { getDomainWorkflowTemplates } from '../../domains';
 
@@ -19,6 +19,7 @@ export default function WorkflowList() {
   const [aiGenerating, setAiGenerating] = useState(false);
   const [followUpQuestions, setFollowUpQuestions] = useState([]);   // [{question, answer}]
   const [originalPrompt, setOriginalPrompt] = useState('');         // keep the original prompt across rounds
+  const [activeFilter, setActiveFilter] = useState('all');          // all | my | team | live
   const navigate = useNavigate();
   const { domain } = useFeatureFlags();
 
@@ -47,7 +48,11 @@ export default function WorkflowList() {
   const fetchWorkflows = async () => {
     setLoading(true);
     try {
-      const { data } = await workflowApi.list();
+      const params = {};
+      if (activeFilter === 'my') params.scope = 'my';
+      else if (activeFilter === 'team') params.scope = 'team';
+      else if (activeFilter === 'live') params.is_live = true;
+      const { data } = await workflowApi.list(params);
       setWorkflows(Array.isArray(data) ? data : data.results || []);
     } catch (e) {
       notify.error('Failed to load workflows');
@@ -56,7 +61,7 @@ export default function WorkflowList() {
     }
   };
 
-  useEffect(() => { fetchWorkflows(); }, []);
+  useEffect(() => { fetchWorkflows(); }, [activeFilter]);
 
   const handleCreate = async (e) => {
     e.preventDefault();
@@ -142,13 +147,20 @@ export default function WorkflowList() {
   };
 
   return (
-    <div className="max-w-5xl mx-auto px-4 py-8">
-      <div className="flex items-center justify-between mb-6">
+    <div className="max-w-screen mx-auto px-16 py-8">
+      <div className="flex items-center justify-between mb-4">
         <div>
           <h1 className="text-2xl font-bold text-gray-900">Workflows</h1>
           <p className="text-sm text-gray-400 mt-0.5">{workflows.length} workflow{workflows.length !== 1 ? 's' : ''}</p>
         </div>
         <div className="flex items-center gap-2">
+          <Link
+            to="/clm/debug"
+            className="flex items-center gap-2 px-3 py-2 bg-white border border-gray-200 text-gray-700 rounded-lg hover:bg-gray-50 transition-colors text-sm font-medium"
+            title="System Debug Console"
+          >
+            <MessageCircleQuestion size={16} /> Debug
+          </Link>
           <button
             onClick={() => setShowAiGen(true)}
             className="flex items-center gap-2 px-4 py-2 bg-gradient-to-r from-purple-600 to-indigo-600 text-white rounded-lg hover:from-purple-700 hover:to-indigo-700 transition-all text-sm font-medium shadow-sm"
@@ -162,6 +174,32 @@ export default function WorkflowList() {
             <Plus size={16} /> New Workflow
           </button>
         </div>
+      </div>
+
+      {/* ── Filter tabs ── */}
+      <div className="flex items-center gap-1 mb-5 bg-gray-100 rounded-lg p-1 w-fit">
+        {[
+          { key: 'all',  label: 'All',           icon: null },
+          { key: 'my',   label: 'My Workflows',  icon: <User size={13} /> },
+          { key: 'team', label: 'Team',           icon: <Users size={13} /> },
+          { key: 'live', label: 'Live',           icon: <Radio size={13} /> },
+        ].map(tab => (
+          <button
+            key={tab.key}
+            onClick={() => setActiveFilter(tab.key)}
+            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium transition-all ${
+              activeFilter === tab.key
+                ? 'bg-white text-gray-900 shadow-sm'
+                : 'text-gray-500 hover:text-gray-700'
+            }`}
+          >
+            {tab.icon}
+            {tab.label}
+            {tab.key === 'live' && workflows.some?.(w => w.is_live) && activeFilter !== 'live' && (
+              <span className="w-1.5 h-1.5 rounded-full bg-red-500 animate-pulse" />
+            )}
+          </button>
+        ))}
       </div>
 
       {showCreate && (
@@ -332,17 +370,40 @@ export default function WorkflowList() {
       ) : (
         <div className="grid gap-3">
           {workflows.map((wf) => (
-            <div key={wf.id} className="bg-white rounded-xl border shadow-sm hover:shadow-md transition-shadow group">
+            <div key={wf.id} className={`bg-white rounded-xl border shadow-sm hover:shadow-md transition-shadow group ${wf.is_live ? 'border-l-4 border-l-red-400' : ''}`}>
               <div className="p-4 flex items-center justify-between">
                 <Link to={`/clm/workflows/${wf.id}`} className="flex-1 min-w-0">
-                  <h3 className="font-semibold text-gray-900 truncate group-hover:text-indigo-600 transition-colors">{wf.name}</h3>
+                  <div className="flex items-center gap-2">
+                    <h3 className="font-semibold text-gray-900 truncate group-hover:text-indigo-600 transition-colors">{wf.name}</h3>
+                    {wf.is_live && (
+                      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold bg-red-50 text-red-600 border border-red-200 shrink-0">
+                        <span className="w-1.5 h-1.5 rounded-full bg-red-500 animate-pulse" />
+                        LIVE
+                      </span>
+                    )}
+                    {wf.compilation_status === 'compiled' && !wf.is_live && (
+                      <span className="inline-flex items-center px-1.5 py-0.5 rounded-full text-[10px] font-medium bg-green-50 text-green-600 border border-green-200 shrink-0">
+                        Compiled
+                      </span>
+                    )}
+                  </div>
                   <p className="text-sm text-gray-500 truncate mt-0.5">{wf.description || 'No description'}</p>
-                  <div className="flex items-center gap-4 mt-2 text-xs text-gray-400">
+                  <div className="flex items-center gap-4 mt-2 text-xs text-gray-400 flex-wrap">
                     <span className="flex items-center gap-1"><GitBranch size={12} /> {wf.node_count ?? 0} nodes</span>
                     <span className="flex items-center gap-1"><FileText size={12} /> {wf.document_count ?? 0} docs</span>
                     {wf.last_executed_at && (
                       <span className="flex items-center gap-1">
                         <Clock size={12} /> Last run: {new Date(wf.last_executed_at).toLocaleDateString()}
+                      </span>
+                    )}
+                    {wf.created_by_name && (
+                      <span className="flex items-center gap-1">
+                        <User size={12} /> {wf.created_by_name}
+                      </span>
+                    )}
+                    {wf.team_name && (
+                      <span className="flex items-center gap-1 text-indigo-400">
+                        <Users size={12} /> {wf.team_name}
                       </span>
                     )}
                   </div>
@@ -355,6 +416,7 @@ export default function WorkflowList() {
                   >
                     <Edit3 size={14} />
                   </Link>
+                  
                   <button
                     onClick={() => handleDuplicate(wf.id)}
                     className="p-2 text-gray-600 bg-gray-50 rounded-lg hover:bg-gray-100 transition-colors"

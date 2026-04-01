@@ -151,10 +151,10 @@ const RightSidebar = ({
   const loadSlotPickerImages = useCallback(async (search = '') => {
     setLoadingSlotPicker(true);
     try {
-      const { imageService } = await import('../../../services/imageService');
-      const params = { upload_scope: 'user' };
+      const { default: attachmentService } = await import('../../../services/attachmentService');
+      const params = { file_kind: 'image', scope: 'user' };
       if (search.trim()) params.search = search.trim();
-      const response = await imageService.getImages(params);
+      const response = await attachmentService.list(params);
       const images = Array.isArray(response) ? response : response?.results || [];
       setSlotPickerImages(images);
     } catch {

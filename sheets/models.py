@@ -58,6 +58,14 @@ class Sheet(models.Model):
     # Sheet settings (frozen rows/cols, default col width, etc.)
     settings_json = models.JSONField(default=dict, blank=True)
 
+    # Unique columns — list of column keys that form a composite unique key.
+    # Used by CLM workflow sheet nodes to upsert rows (match existing row
+    # by these column values instead of always appending), and to prevent
+    # duplicate document creation or duplicate email sends for the same entity.
+    # Example: ["col_2"] for a single-column unique key (e.g. customer_id),
+    #          ["col_0", "col_3"] for a composite key (e.g. email + date).
+    unique_columns = models.JSONField(default=list, blank=True)
+
     # Soft state
     is_archived = models.BooleanField(default=False)
     row_count = models.PositiveIntegerField(default=0)
@@ -165,8 +173,78 @@ class Sheet(models.Model):
         """Remove a column definition and all cell data for that column."""
         self.columns = [c for c in self.columns if c['key'] != col_key]
         self.col_count = len(self.columns)
+        # Also remove from unique_columns if present
+        if col_key in (self.unique_columns or []):
+            self.unique_columns = [k for k in self.unique_columns if k != col_key]
         # Cascade delete cells
         SheetCell.objects.filter(row__sheet=self, column_key=col_key).delete()
+
+    # ── Unique column helpers ───────────────────────────────────────
+
+    def get_unique_column_labels(self):
+        """Return human-readable labels for the unique column keys."""
+        key_to_label = {c['key']: c.get('label', c['key']) for c in self.columns}
+        return [key_to_label.get(k, k) for k in (self.unique_columns or [])]
+
+    def find_row_by_unique_key(self, key_values: dict):
+        """
+        Find a row whose cells match the given *key_values* dict
+        ``{col_key: value}``.
+
+        Returns the matching ``SheetRow`` or ``None``.
+
+        Only checks columns listed in ``self.unique_columns``.
+        All unique columns must match for a row to qualify.
+        """
+        unique_cols = self.unique_columns or []
+        if not unique_cols:
+            return None
+
+        # Start from all rows, then narrow down with each unique-col value
+        candidate_row_ids = None
+        for col_key in unique_cols:
+            target_value = str(key_values.get(col_key, '')).strip()
+            if not target_value:
+                return None  # Missing a key value → can't match
+            matching_ids = set(
+                SheetCell.objects.filter(
+                    row__sheet=self,
+                    column_key=col_key,
+                    raw_value=target_value,
+                ).values_list('row_id', flat=True)
+            )
+            if candidate_row_ids is None:
+                candidate_row_ids = matching_ids
+            else:
+                candidate_row_ids &= matching_ids
+            if not candidate_row_ids:
+                return None
+
+        if candidate_row_ids:
+            from sheets.models import SheetRow as _SR
+            return _SR.objects.filter(id__in=candidate_row_ids).first()
+        return None
+
+    def find_row_by_unique_values(self, meta: dict, field_to_col: dict):
+        """
+        Higher-level helper: given a metadata dict and a field→col_key
+        mapping, extract the unique-column values and look up a matching row.
+
+        Returns the matching ``SheetRow`` or ``None``.
+        """
+        unique_cols = self.unique_columns or []
+        if not unique_cols:
+            return None
+        # Build {col_key: value} for unique columns from metadata
+        col_to_field = {v: k for k, v in field_to_col.items()}
+        key_values = {}
+        for col_key in unique_cols:
+            field_name = col_to_field.get(col_key)
+            if field_name and field_name in meta:
+                key_values[col_key] = str(meta[field_name])
+            else:
+                return None  # Can't build the full unique key
+        return self.find_row_by_unique_key(key_values)
 
     # ── Column-level formula propagation ────────────────────────────
 
@@ -529,7 +607,8 @@ class SheetShareLink(models.Model):
 
     def get_form_columns(self):
         """
-        Return column definitions that should appear in the public form.
+        Return column definitions that should appear in the public form
+        as **input** fields.
 
         Excludes:
         - formula columns (computed, not user input)
@@ -542,6 +621,25 @@ class SheetShareLink(models.Model):
         return [
             c for c in cols
             if c.get('type', 'text') not in self._NON_INPUT_TYPES
+            and not Sheet.is_default_column_label(c.get('label', ''))
+        ]
+
+    def get_output_columns(self):
+        """
+        Return formula/computed column definitions that should appear
+        in the public form as **read-only output** fields.
+
+        These columns are computed server-side; the form displays their
+        evaluated result but does not accept input for them.
+        """
+        cols = self.sheet.columns or []
+        if self.form_columns:
+            included = set(self.form_columns)
+            cols = [c for c in cols if c['key'] in included]
+        return [
+            {**c, 'is_output': True}
+            for c in cols
+            if c.get('type', 'text') in self._NON_INPUT_TYPES
             and not Sheet.is_default_column_label(c.get('label', ''))
         ]
 
@@ -1180,3 +1278,152 @@ class SheetTask(models.Model):
         self.status = self.TaskStatus.FAILED
         self.error = error_msg
         self.save(update_fields=['status', 'error', 'updated_at'])
+
+
+# ════════════════════════════════════════════════════════════════════
+#  RowExecutionTracker — per-row change-detection for workflow triggers
+# ════════════════════════════════════════════════════════════════════
+
+class RowExecutionTracker(models.Model):
+    """
+    Tracks the last-executed row_hash per (sheet, row, workflow).
+
+    Purpose: even if webhooks / CLM events fail, the hash discrepancy
+    between ``SheetRow.row_hash`` and ``RowExecutionTracker.last_executed_hash``
+    reveals rows that changed but were never processed.
+
+    The reconcile-pending endpoint compares these two values and
+    re-triggers workflows for any unprocessed rows.
+
+    Each sheet row is treated as a "form data record" — when a row is
+    saved (new or updated) and its hash differs from the tracker, a
+    workflow execution is triggered for that specific row.
+    """
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    sheet = models.ForeignKey(
+        Sheet, on_delete=models.CASCADE, related_name='execution_trackers',
+    )
+    row = models.ForeignKey(
+        SheetRow, on_delete=models.CASCADE, related_name='execution_trackers',
+    )
+    workflow = models.ForeignKey(
+        'clm.Workflow', on_delete=models.CASCADE,
+        related_name='row_execution_trackers',
+    )
+
+    # The row_hash at the time the workflow was last successfully triggered
+    last_executed_hash = models.CharField(
+        max_length=64, blank=True, default='',
+        help_text='SHA-256 row hash when the workflow was last triggered for this row.',
+    )
+
+    # Execution tracking
+    last_execution_id = models.UUIDField(
+        null=True, blank=True,
+        help_text='UUID of the WorkflowExecution that last processed this row.',
+    )
+    last_triggered_at = models.DateTimeField(
+        null=True, blank=True,
+        help_text='When the workflow was last triggered for this row.',
+    )
+
+    # Failure tracking
+    consecutive_failures = models.PositiveSmallIntegerField(
+        default=0,
+        help_text='How many times triggering failed in a row.',
+    )
+    last_error = models.TextField(blank=True, default='')
+    last_error_at = models.DateTimeField(null=True, blank=True)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        unique_together = [('sheet', 'row', 'workflow')]
+        indexes = [
+            models.Index(
+                fields=['sheet', 'workflow'],
+                name='rowexectracker_sheet_wf_idx',
+            ),
+            models.Index(
+                fields=['last_executed_hash'],
+                name='rowexectracker_hash_idx',
+            ),
+        ]
+
+    def __str__(self):
+        return (
+            f"RowExecTracker(sheet={self.sheet_id}, "
+            f"row={self.row_id}, wf={self.workflow_id})"
+        )
+
+    @classmethod
+    def mark_triggered(cls, sheet, row, workflow, execution_id=None):
+        """
+        Record that a workflow was successfully triggered for this row.
+        Updates last_executed_hash to the row's current row_hash.
+        """
+        tracker, _ = cls.objects.update_or_create(
+            sheet=sheet,
+            row=row,
+            workflow=workflow,
+            defaults={
+                'last_executed_hash': row.row_hash,
+                'last_execution_id': execution_id,
+                'last_triggered_at': timezone.now(),
+                'consecutive_failures': 0,
+                'last_error': '',
+            },
+        )
+        return tracker
+
+    @classmethod
+    def mark_failed(cls, sheet, row, workflow, error_msg=''):
+        """Record that triggering failed for this row."""
+        tracker, _ = cls.objects.get_or_create(
+            sheet=sheet,
+            row=row,
+            workflow=workflow,
+        )
+        tracker.consecutive_failures += 1
+        tracker.last_error = error_msg[:2000]
+        tracker.last_error_at = timezone.now()
+        tracker.save(update_fields=[
+            'consecutive_failures', 'last_error', 'last_error_at', 'updated_at',
+        ])
+        return tracker
+
+    @classmethod
+    def find_pending_rows(cls, sheet, workflow):
+        """
+        Find rows where current row_hash differs from last_executed_hash.
+
+        Returns a queryset of SheetRow objects that have unprocessed changes.
+        This covers two cases:
+          1. Rows with a tracker whose hash is stale (event failed)
+          2. Rows with no tracker at all (never processed)
+        """
+        # Rows with a stale tracker
+        stale_trackers = cls.objects.filter(
+            sheet=sheet, workflow=workflow,
+        ).exclude(
+            last_executed_hash=models.F('row__row_hash'),
+        ).values_list('row_id', flat=True)
+
+        # Rows with no tracker at all (but that have data — non-empty hash)
+        tracked_row_ids = cls.objects.filter(
+            sheet=sheet, workflow=workflow,
+        ).values_list('row_id', flat=True)
+
+        never_tracked = SheetRow.objects.filter(
+            sheet=sheet,
+        ).exclude(
+            id__in=tracked_row_ids,
+        ).exclude(
+            row_hash='',
+        ).values_list('id', flat=True)
+
+        # Union
+        all_pending_ids = set(stale_trackers) | set(never_tracked)
+        return SheetRow.objects.filter(id__in=all_pending_ids).order_by('order')

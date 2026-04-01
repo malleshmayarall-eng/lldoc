@@ -44,6 +44,7 @@ urlpatterns = [
     path('api/clm/', include('clm.urls')),  # Contract Lifecycle Management
     path('api/alerts/', include('communications.urls')),  # Centralized communications & alerts
     path('api/sheets/', include('sheets.urls')),  # Spreadsheet / data tables
+    path('api/attachments/', include('attachments.urls')),  # Centralized attachment library
     path('documents/', include('exporter.urls')),
 ]
 

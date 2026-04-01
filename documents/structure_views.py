@@ -1127,6 +1127,37 @@ class ImageComponentViewSet(viewsets.ModelViewSet):
         
         component = ImageComponent.objects.create(**component_data)
         
+        # Mirror the referenced image to Attachment library (best-effort)
+        if image_ref and image_ref.image:
+            try:
+                from attachments.models import Attachment
+
+                org = getattr(image_ref, 'organization', None)
+                if not org:
+                    try:
+                        org = request.user.profile.organization
+                    except Exception:
+                        pass
+
+                Attachment.objects.create(
+                    name=image_ref.name or 'Unnamed Image',
+                    file_kind='image',
+                    image_type=image_ref.image_type or 'picture',
+                    file=image_ref.image,
+                    scope=getattr(image_ref, 'scope', 'user') or 'user',
+                    uploaded_by=request.user,
+                    organization=org,
+                    team=getattr(image_ref, 'team', None),
+                    document=section.document if hasattr(section, 'document') else None,
+                    file_size=image_ref.file_size,
+                    mime_type=image_ref.mime_type,
+                    width=image_ref.width,
+                    height=image_ref.height,
+                    tags=image_ref.tags or [],
+                )
+            except Exception:
+                pass  # Non-critical — attachment mirror is best-effort
+
         # Return serialized response
         response_serializer = ImageComponentSerializer(component, context={'request': request})
         return Response(response_serializer.data, status=status.HTTP_201_CREATED)
@@ -1374,7 +1405,7 @@ class DocumentFileViewSet(viewsets.ModelViewSet):
     permission_classes = [IsAuthenticated]
     
     def get_queryset(self):
-        """Filter files based on access level and user permissions."""
+        """Filter files based on access level and user permissions using scoped visibility."""
         user = self.request.user
         
         # Get query parameters
@@ -1384,17 +1415,10 @@ class DocumentFileViewSet(viewsets.ModelViewSet):
         search = self.request.query_params.get('search')
         is_active = self.request.query_params.get('is_active')
         
-        # Base queryset with access control
-        queryset = DocumentFile.objects.filter(
-            models.Q(uploaded_by=user) |  # User's own files
-            models.Q(access_level='team') |  # Team files (TODO: add team check)
-            models.Q(access_level='organization')  # Organization files
-        ).filter(is_active=True)
+        # Base queryset with scoped access control
+        queryset = DocumentFile.visible_to_user(user, file_type=file_type or None)
         
         # Apply filters
-        if file_type:
-            queryset = queryset.filter(file_type=file_type)
-        
         if category:
             queryset = queryset.filter(category=category)
         
@@ -1437,6 +1461,7 @@ class DocumentFileViewSet(viewsets.ModelViewSet):
             "file_type": "pdf",
             "category": "template",
             "access_level": "team",
+            "team": "team-uuid",
             "tags": ["legal", "template", "contract"],
             "metadata": {"author": "Legal Dept", ...},
             "is_confidential": false
@@ -1450,6 +1475,52 @@ class DocumentFileViewSet(viewsets.ModelViewSet):
         
         # Create file
         document_file = upload_serializer.save()
+
+        # Auto-set organization from user profile if not already set
+        updated_fields = []
+        if not document_file.organization:
+            try:
+                document_file.organization = request.user.profile.organization
+                updated_fields.append('organization')
+            except Exception:
+                pass
+
+        # Set team if access_level is team
+        team_id = request.data.get('team')
+        if document_file.access_level == 'team' and team_id and not document_file.team_id:
+            document_file.team_id = team_id
+            updated_fields.append('team')
+
+        if updated_fields:
+            document_file.save(update_fields=updated_fields)
+
+        # Mirror to centralised Attachment library (best-effort)
+        try:
+            from attachments.models import Attachment
+            # Map file_type to file_kind
+            file_kind = 'document'
+            if document_file.mime_type and document_file.mime_type.startswith('image/'):
+                file_kind = 'image'
+
+            Attachment.objects.create(
+                name=document_file.name,
+                file_kind=file_kind,
+                file=document_file.file,
+                scope={
+                    'user': 'user',
+                    'team': 'team',
+                    'organization': 'organization',
+                }.get(document_file.access_level, 'user'),
+                uploaded_by=request.user,
+                organization=document_file.organization,
+                team=document_file.team,
+                file_size=document_file.file_size,
+                mime_type=document_file.mime_type,
+                tags=document_file.tags or [],
+                metadata={'source': 'document_file', 'document_file_id': str(document_file.id)},
+            )
+        except Exception:
+            pass  # Non-critical — attachment mirror is best-effort
         
         # Return serialized response
         response_serializer = DocumentFileSerializer(

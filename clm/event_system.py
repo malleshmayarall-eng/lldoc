@@ -95,15 +95,20 @@ def compile_workflow(workflow, user=None):
         })
 
     input_nodes = [n for n in nodes.values() if n.node_type == 'input']
+    # Sheet nodes in "input" mode also act as data sources for live workflows
+    sheet_input_nodes = [
+        n for n in nodes.values()
+        if n.node_type == 'sheet' and (n.config or {}).get('mode') == 'input'
+    ]
     output_nodes = [n for n in nodes.values() if n.node_type == 'output']
 
-    has_input = len(input_nodes) > 0
+    has_input = len(input_nodes) > 0 or len(sheet_input_nodes) > 0
     has_output = len(output_nodes) > 0
 
     if not has_input:
         errors.append({
             'node_id': None,
-            'message': 'Workflow must have at least one input node.',
+            'message': 'Workflow must have at least one input node (or a Sheet node in input mode).',
             'severity': 'error',
         })
     if not has_output:
@@ -162,6 +167,12 @@ def compile_workflow(workflow, user=None):
                         'node_id': str(node.id),
                         'message': f'Input node "{node.label or "Input"}" has sheets source but no sheet_id configured.',
                     })
+            elif source_type == 'document':
+                if not config.get('document_id'):
+                    warnings.append({
+                        'node_id': str(node.id),
+                        'message': f'Input node "{node.label or "Input"}" has document source but no document_id configured.',
+                    })
             elif source_type in ('google_drive', 'dropbox', 'onedrive', 's3', 'ftp'):
                 # Basic credential check
                 if source_type == 'google_drive' and not config.get('google_drive_folder_id') and not config.get('folder_id'):
@@ -195,6 +206,7 @@ def compile_workflow(workflow, user=None):
         'email_inbox': 'email',
         'webhook': 'webhook',
         'sheets': 'sheet',
+        'document': 'document',
         'google_drive': 'google_drive',
         'dropbox': 'dropbox',
         'onedrive': 'onedrive',
@@ -210,15 +222,24 @@ def compile_workflow(workflow, user=None):
     existing_sub_ids = set()
 
     if not errors:  # Only create subscriptions if DAG is valid
-        for node in input_nodes:
+        # Combine regular input nodes + sheet-input nodes for subscription creation
+        all_input_nodes = list(input_nodes) + list(sheet_input_nodes)
+        for node in all_input_nodes:
             config = node.config or {}
-            source_type = config.get('source_type', 'upload')
+
+            # Sheet nodes in input mode use 'sheet' source type
+            if node.node_type == 'sheet':
+                source_type = 'sheets'
+            else:
+                source_type = config.get('source_type', 'upload')
             sub_source_type = _SOURCE_MAP.get(source_type, 'upload')
 
             # Determine source_id
             source_id = ''
             if source_type == 'sheets':
                 source_id = config.get('sheet_id', '')
+            elif source_type == 'document':
+                source_id = config.get('document_id', '')
             elif source_type == 'folder_upload':
                 source_id = config.get('folder_id', '')
             elif source_type == 'google_drive':
@@ -236,7 +257,7 @@ def compile_workflow(workflow, user=None):
                 poll_interval = config.get('email_refetch_interval', 60)
             elif source_type in ('google_drive', 'dropbox', 'onedrive', 's3', 'ftp', 'url_scrape'):
                 poll_interval = config.get('poll_interval', 300)  # 5 min default for cloud
-            elif source_type in ('sheets', 'table'):
+            elif source_type in ('sheets', 'table', 'document'):
                 poll_interval = 0  # Event-driven, not polled
 
             # Create or update
@@ -376,6 +397,13 @@ def dispatch_event(
     """
     from .models import EventSubscription, WebhookEvent, WorkflowExecution
 
+    logger.info(
+        '[dispatch-event] CALLED event_type=%s source_type=%s source_id=%r '
+        'org_id=%s idem_key=%r payload_keys=%s',
+        event_type, source_type, source_id, organization_id,
+        idempotency_key, list((payload or {}).keys()),
+    )
+
     # Dedup check
     if idempotency_key:
         existing = WebhookEvent.objects.filter(
@@ -383,6 +411,7 @@ def dispatch_event(
             status__in=['received', 'processing', 'processed'],
         ).first()
         if existing:
+            logger.debug('[dispatch-event] DEDUP HIT — skipping (key=%s)', idempotency_key)
             return {
                 'dispatched': 0,
                 'events': [],
@@ -404,22 +433,50 @@ def dispatch_event(
     if organization_id:
         sub_qs = sub_qs.filter(organization_id=organization_id)
 
+    sub_count = sub_qs.count()
+    logger.info('[dispatch-event] Matching subscriptions: %d', sub_count)
+    if sub_count == 0:
+        logger.warning(
+            '[dispatch-event] No matching EventSubscriptions found! '
+            'filter: source_type=%r, status=active, workflow__is_active=True',
+            source_type,
+        )
+        all_subs = EventSubscription.objects.filter(source_type=source_type).values_list(
+            'id', 'status', 'workflow__name', 'workflow__is_active', 'workflow__is_live', 'workflow__compilation_status'
+        )
+        for s in all_subs:
+            logger.debug(
+                '[dispatch-event] Existing sub: id=%s status=%s wf=%s active=%s live=%s compiled=%s',
+                s[0], s[1], s[2], s[3], s[4], s[5],
+            )
+        if not all_subs.exists():
+            logger.warning(
+                '[dispatch-event] No EventSubscriptions with source_type=%r exist at all. '
+                'Did you compile the workflow? (POST /compile/ or POST /go-live/)',
+                source_type,
+            )
+
     dispatched = 0
     events = []
     errors = []
 
     for sub in sub_qs:
         workflow = sub.workflow
+        logger.info(
+            '[dispatch-event] Processing sub %s → workflow %r (is_live=%s, compiled=%s)',
+            sub.id, workflow.name, workflow.is_live, workflow.compilation_status,
+        )
 
         # Only dispatch if workflow is live or auto_execute_on_upload
         if not workflow.is_live and not workflow.auto_execute_on_upload:
+            logger.debug('[dispatch-event] SKIPPED %r — not live and no auto_execute_on_upload', workflow.name)
             continue
 
         # Check compilation status
         if workflow.compilation_status not in ('compiled',):
             logger.warning(
-                f"Skipping event for workflow '{workflow.name}' — not compiled "
-                f"(status={workflow.compilation_status})"
+                '[dispatch-event] SKIPPED %r — not compiled (status=%s)',
+                workflow.name, workflow.compilation_status,
             )
             continue
 
@@ -434,6 +491,7 @@ def dispatch_event(
             source_ip=source_ip,
             idempotency_key=idempotency_key,
         )
+        logger.info('[dispatch-event] Created WebhookEvent %s', event.id)
 
         # Trigger async execution
         try:
@@ -444,8 +502,13 @@ def dispatch_event(
                 triggered_by=workflow.created_by,
                 trigger_context=payload or {},
             )
+            logger.info('[dispatch-event] Created WorkflowExecution %s (status=queued)', execution.id)
 
             from .tasks import execute_workflow_async
+            logger.info(
+                '[dispatch-event] Dispatching execute_workflow_async wf=%s exec=%s',
+                workflow.id, execution.id,
+            )
             execute_workflow_async.delay(
                 workflow_id=str(workflow.id),
                 execution_id=str(execution.id),
@@ -453,10 +516,32 @@ def dispatch_event(
                 mode='full',
                 smart=True,
             )
+            logger.info('[dispatch-event] Task dispatched to Celery successfully for %r', workflow.name)
 
             event.status = 'processing'
             event.execution = execution
             event.save(update_fields=['status', 'execution'])
+
+            # Emit a live event to the in-process bus so SSE clients
+            # connected to the web process see the event immediately.
+            # (Celery workers will emit their own events during execution.)
+            try:
+                from .live_events import emit
+                emit(
+                    'execution_queued',
+                    workflow_id=str(workflow.id),
+                    execution_id=str(execution.id),
+                    data={
+                        'workflow_name': workflow.name,
+                        'event_type': event_type,
+                        'source_type': source_type,
+                        'source_id': source_id,
+                        'status': 'queued',
+                        'trigger': 'event_dispatch',
+                    },
+                )
+            except Exception:
+                pass  # Never let SSE emission block event dispatch
 
             # Update subscription stats
             sub.total_events_received += 1
@@ -490,7 +575,9 @@ def dispatch_event(
                 'workflow_id': str(workflow.id),
                 'error': error_msg,
             })
-            logger.error(f"Failed to dispatch event to workflow '{workflow.name}': {e}")
+            logger.error('[dispatch-event] EXCEPTION dispatching to %r: %s', workflow.name, error_msg)
+
+    logger.info('[dispatch-event] RESULT: dispatched=%d, errors=%d', dispatched, len(errors))
 
     return {
         'dispatched': dispatched,
@@ -742,6 +829,116 @@ def handle_sheet_update(sheet_id: str, changed_data: dict = None, user=None):
             'updated_at': timezone.now().isoformat(),
         },
     )
+    return result
+
+
+# ---------------------------------------------------------------------------
+# 5b. Document Event Handler
+# ---------------------------------------------------------------------------
+
+def handle_document_update(document_id: str, change_summary: dict = None, user=None):
+    """
+    Called when a Document (documents app) is updated via partial-save.
+
+    Dispatches events to all workflows that have an EventSubscription
+    with source_type='document' and source_id=<document_id>.
+
+    Also auto-discovers workflows linked via DocumentCreationResult:
+    if the document was created by a CLM workflow, the originating
+    workflow is triggered even without an explicit document subscription.
+
+    Args:
+        document_id: UUID of the documents.Document that was edited.
+        change_summary: Optional dict describing what changed, e.g.
+            {'changes_applied': 3, 'types': ['section', 'paragraph']}.
+        user: The user who made the edit.
+    """
+    change_summary = change_summary or {}
+
+    # ── 1. Direct subscriptions (input node source_type='document') ──
+    result = dispatch_event(
+        event_type='document_updated',
+        source_type='document',
+        source_id=str(document_id),
+        payload={
+            'document_id': str(document_id),
+            'change_summary': change_summary,
+            'updated_by': user.username if user else None,
+            'updated_at': timezone.now().isoformat(),
+        },
+    )
+
+    # ── 2. Auto-discover via DocumentCreationResult ──────────────────
+    # If this document was created by a CLM workflow (doc_create node),
+    # re-trigger that workflow so it can re-process the updated document.
+    from .models import DocumentCreationResult, WebhookEvent, WorkflowExecution
+
+    creation_records = DocumentCreationResult.objects.filter(
+        created_document_id=document_id,
+        status='created',
+    ).select_related('workflow')
+
+    for record in creation_records:
+        workflow = record.workflow
+        if not workflow.is_active or not workflow.is_live:
+            continue
+        if workflow.compilation_status != 'compiled':
+            continue
+
+        # Check we haven't already dispatched to this workflow via direct sub
+        already_dispatched = any(
+            e.get('workflow_id') == str(workflow.id)
+            for e in result.get('events', [])
+        )
+        if already_dispatched:
+            continue
+
+        # Direct execution — the workflow may not have a document
+        # EventSubscription, so we trigger execution directly.
+        try:
+            execution = WorkflowExecution.objects.create(
+                workflow=workflow,
+                status='queued',
+                mode='auto',
+                triggered_by=workflow.created_by,
+                trigger_context={
+                    'document_id': str(document_id),
+                    'change_summary': change_summary,
+                    'creation_record_id': str(record.id),
+                    'source_clm_document_id': str(record.source_clm_document_id),
+                    'trigger': 'document_update_auto',
+                    'updated_by': user.username if user else None,
+                },
+            )
+
+            from .tasks import execute_workflow_async
+            execute_workflow_async.delay(
+                workflow_id=str(workflow.id),
+                execution_id=str(execution.id),
+                user_id=workflow.created_by_id,
+                mode='full',
+                smart=True,
+            )
+
+            result['dispatched'] += 1
+            result['events'].append({
+                'event_id': None,
+                'workflow_id': str(workflow.id),
+                'workflow_name': workflow.name,
+                'execution_id': str(execution.id),
+                'trigger': 'document_creation_record',
+            })
+
+        except Exception as e:
+            logger.error(
+                f"Failed to auto-trigger workflow '{workflow.name}' "
+                f"for document {document_id}: {e}"
+            )
+            result['errors'].append({
+                'workflow_id': str(workflow.id),
+                'error': str(e),
+            })
+
     return result
 
 

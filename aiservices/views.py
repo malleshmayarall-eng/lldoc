@@ -214,6 +214,21 @@ def analyze_text(request):
 		create_in_db=False,
 	)
 
+	system_prompt += (
+		"\nPAGE & LAYOUT:\n"
+		" - Include a sensible geometry declaration in the preamble. Use a default\n"
+		"   margin of 1in and set papersize to letterpaper or a4paper depending on\n"
+		"   the document type. Example: \\usepackage[margin=1in,papersize=letterpaper]{geometry}\n"
+		"   Prefer 12pt base font and consistent section spacing for professional\n"
+		"   documents.\n"
+		"\nREFERENCES & BIBLIOGRAPHY:\n"
+		" - When the user requests references or citations, include a bibliography\n"
+		"   section. Use biblatex with biber for modern workflows or natbib for a\n"
+		"   simple \"bibliography\" approach. Provide a placeholder .bib entry and\n"
+		"   a \\printbibliography or \\bibliography command as appropriate. Use\n"
+		"   citation commands (\\citep, \\citet, or \\cite) consistently.\n"
+		)
+
 	structure = result.get('structure')
 	if not structure:
 		return Response(
@@ -1976,16 +1991,21 @@ def document_ai_set_type(request, pk):
 def ai_generate_latex(request, pk):
 	"""
 	Generate LaTeX code using Gemini AI based on a user prompt.
+	Compiles the generated code and, on failure, feeds errors back to the AI
+	to produce a corrected version — looping up to ``max_retries`` times
+	(default 5, capped at 10).
 
 	POST /api/ai/documents/<uuid:pk>/generate-latex/
 	Body:
 	{
 		"prompt": "Create a professional contract with terms and conditions",
-		"save": true,           // optional, default true — save to Document.latex_code
-		"section_id": "<uuid>", // optional — also create/update a LatexCode record
-		"preamble": "...",      // optional — custom LaTeX preamble to include
-		"code_type": "latex",   // optional — LatexCode.code_type field
-		"topic": "..."          // optional — LatexCode.topic field
+		"save": true,            // optional, default true — save to Document.latex_code
+		"section_id": "<uuid>",  // optional — also create/update a LatexCode record
+		"preamble": "...",       // optional — custom LaTeX preamble to include
+		"code_type": "latex",    // optional — LatexCode.code_type field
+		"topic": "...",          // optional — LatexCode.topic field
+		"suggestions": "...",    // optional — user hints / corrections for the AI
+		"max_retries": 5         // optional — max compile-fix iterations (1–10)
 	}
 
 	Returns:
@@ -1994,7 +2014,13 @@ def ai_generate_latex(request, pk):
 		"latex_code": "\\documentclass{article}...",
 		"document_id": "<uuid>",
 		"saved_to_document": true,
-		"latex_code_id": "<uuid or null>"
+		"latex_code_id": "<uuid or null>",
+		"compiled": true,
+		"compilation_attempts": [
+			{"attempt": 1, "compiled": false, "errors": {...}},
+			{"attempt": 2, "compiled": true, "errors": {}}
+		],
+		"total_attempts": 2
 	}
 	"""
 	from documents.models import Section, LatexCode
@@ -2013,6 +2039,8 @@ def ai_generate_latex(request, pk):
 	preamble = request.data.get('preamble', '').strip()
 	code_type = request.data.get('code_type', 'latex')
 	topic = request.data.get('topic', '')
+	suggestions = (request.data.get('suggestions') or '').strip()
+	max_compile_retries = min(int(request.data.get('max_retries', 5)), 10)
 
 	# ── Guard: check if latex_generation service is enabled ──
 	from .models import DocumentAIConfig
@@ -2068,7 +2096,9 @@ def ai_generate_latex(request, pk):
 		"5. For math-heavy content, use amsmath environments (align, equation, etc.).\n"
 		"6. For charts/plots, use pgfplots with tikz.\n"
 		"7. Produce professional, well-formatted output suitable for XeLaTeX compilation.\n"
-		"8. Use fontspec with standard fonts (when using XeLaTeX features).\n"
+		"8. NEVER use fontspec, \\setmainfont, \\setsansfont, or \\setmonofont — "
+		"   the system uses the default Latin Modern fonts which are universally "
+		"   available. Font commands referencing system fonts will be stripped.\n"
 		"9. NEVER use square brackets for placeholder text like [Your Name] or "
 		"   [Company Name]. Square brackets are LaTeX optional-argument syntax and "
 		"   cause compilation errors. Use curly braces with \\textit{}, angle brackets "
@@ -2093,16 +2123,29 @@ def ai_generate_latex(request, pk):
 		"    as a BARE placeholder — do NOT wrap it in \\includegraphics.\n"
 		"    The system will automatically generate the correct \\includegraphics\n"
 		"    command with proper file paths at render time.\n"
-		"    You MAY wrap [[image:name]] in a figure environment for layout:\n"
-		"      \\begin{figure}[h]\\centering [[image:company_logo]] \\end{figure}\n"
-		"    But write the placeholder DIRECTLY — never write:\n"
-		"      \\includegraphics[width=3cm]{[[image:logo]]}  ← WRONG\n"
-		"    Instead write:\n"
-		"      [[image:logo]]  ← CORRECT\n"
-		"    NEVER use \\includegraphics directly with an empty path, a URL, or\n"
-		"    a [[placeholder]]. Use descriptive snake_case names: company_logo,\n"
-		"    header_logo, signature, stamp, diagram_1, chart_overview, etc.\n"
-	)
+		"    There are two ways to specify image sizing so the renderer can apply\n"
+		"    them consistently across PDF (XeLaTeX) and HTML previews:\n"
+		"\n"
+		"    A) Preferred — explicit options via a single-line comment placed\n"
+		"       immediately above the placeholder:%%img-opts:placeholder_name:opts%%\n"
+		"       Example:\n"
+		"         %%img-opts:company_logo:width=4cm,keepaspectratio%%\n"
+		"         [[image:company_logo]]\n"
+		"\n"
+		"       The renderer honors width, height, scale, and keepaspectratio and\n"
+		"       converts them to proper \\includegraphics options for LaTeX and to\n"
+		"       CSS for HTML previews. Use relative units (cm, in, \\\\linewidth) or\n"
+		"       scale factors. Avoid pixel-based sizes.\n"
+		"\n"
+		"    B) Allowed — LaTeX \\includegraphics: if you prefer, you may write\n"
+		"       \\includegraphics[...] around the placeholder and the sanitizer\n"
+		"       will extract the options into the same internal form. Example:\n"
+		"         \\includegraphics[width=4cm]{[[image:company_logo]]}\n"
+		"\n"
+		"    When placing images in figures, wrap them in a standard figure\n"
+		"    environment with captions. Use descriptive snake_case names:\n"
+		"    company_logo, header_logo, signature, stamp, diagram_1, chart_overview.\n"
+		)
 
 	if preamble:
 		system_prompt += (
@@ -2180,6 +2223,11 @@ def ai_generate_latex(request, pk):
 		f"User request:\n{prompt}"
 	)
 
+	if suggestions:
+		user_message += (
+			f"\n\nUser suggestions / additional instructions:\n{suggestions}"
+		)
+
 	# ── Call Gemini ──
 	api_key = os.environ.get('GEMINI_API')
 	if not api_key:
@@ -2214,36 +2262,152 @@ def ai_generate_latex(request, pk):
 			status=status.HTTP_502_BAD_GATEWAY,
 		)
 
-	# ── Extract LaTeX from response ──
-	latex_code = ''
-	try:
-		candidates = raw_response.get('candidates', [])
-		if candidates:
-			parts = candidates[0].get('content', {}).get('parts', [])
-			raw_text = ''.join(p.get('text', '') for p in parts)
+	# ── Helper: extract LaTeX from a Gemini response ──
+	def _extract_latex_from_response(resp):
+		"""Return the LaTeX string from a Gemini response dict, or ''."""
+		try:
+			candidates = resp.get('candidates', [])
+			if candidates:
+				parts = candidates[0].get('content', {}).get('parts', [])
+				raw_text = ''.join(p.get('text', '') for p in parts)
+				fence_match = re.search(
+					r'```(?:latex|tex)?\s*\n?(.*?)```',
+					raw_text,
+					re.DOTALL,
+				)
+				if fence_match:
+					return fence_match.group(1).strip()
+				return raw_text.strip()
+		except Exception:
+			pass
+		return ''
 
-			# Strip markdown code fences if the model wrapped them
-			fence_match = re.search(
-				r'```(?:latex|tex)?\s*\n?(.*?)```',
-				raw_text,
-				re.DOTALL,
-			)
-			if fence_match:
-				latex_code = fence_match.group(1).strip()
-			else:
-				latex_code = raw_text.strip()
-	except Exception:
-		latex_code = ''
+	# ── Helper: call Gemini with a conversation history ──
+	def _call_ai(messages):
+		"""Wrap call_gemini with the standard generation config."""
+		ai_payload = {
+			'contents': messages,
+			'generationConfig': {
+				'temperature': 0.3,
+				'topP': 0.9,
+				'topK': 40,
+				'maxOutputTokens': 16000,
+			},
+		}
+		return call_gemini(ai_payload, api_key=api_key)
 
+	from documents.latex_render_views import sanitize_ai_latex_code, compile_latex_with_document
+
+	# ── Extract LaTeX from initial response ──
+	latex_code = _extract_latex_from_response(raw_response)
 	if not latex_code:
 		return Response(
 			{'status': 'error', 'message': 'AI did not return valid LaTeX code.'},
 			status=status.HTTP_502_BAD_GATEWAY,
 		)
 
-	# ── Sanitize AI-generated code to fix common errors ──
-	from documents.latex_render_views import sanitize_ai_latex_code
 	latex_code = sanitize_ai_latex_code(latex_code)
+
+	# ── Compile-verify-fix loop ──────────────────────────────────────
+	#
+	# Attempt to compile the generated code.  If compilation fails,
+	# send the error log back to the AI and ask it to produce a fixed
+	# version.  Repeat up to *max_compile_retries* times.
+	#
+	# The conversation history grows with each iteration so the AI has
+	# full context of what it already tried and what failed.
+
+	compilation_attempts = []
+	compiled_ok = False
+
+	# Build the conversation so far (system + initial user + AI response)
+	conversation = [
+		{
+			'role': 'user',
+			'parts': [
+				{'text': system_prompt},
+				{'text': user_message},
+			],
+		},
+		{
+			'role': 'model',
+			'parts': [{'text': latex_code}],
+		},
+	]
+
+	for attempt_num in range(1, max_compile_retries + 1):
+		compile_result = compile_latex_with_document(latex_code, document, max_retries=1)
+
+		attempt_info = {
+			'attempt': attempt_num,
+			'compiled': compile_result['compiled'],
+			'errors': compile_result.get('errors', {}),
+		}
+
+		if compile_result['compiled']:
+			# The sanitiser inside compile_latex_with_document may have produced
+			# a fixed version that compiles.  Use it.
+			if compile_result.get('fixed_code'):
+				latex_code = compile_result['fixed_code']
+				attempt_info['auto_fixed'] = True
+			compiled_ok = True
+			compilation_attempts.append(attempt_info)
+			break
+
+		compilation_attempts.append(attempt_info)
+
+		# ── Have we exhausted retries? ──
+		if attempt_num >= max_compile_retries:
+			break
+
+		# ── Feed errors back to the AI and ask for a fix ──
+		error_info = compile_result.get('errors', {})
+		error_lines = error_info.get('error_lines', [])
+		error_summary = error_info.get('error_summary', 'Unknown compilation error')
+		missing_pkgs = error_info.get('missing_packages', [])
+
+		error_detail = f"Compilation error (attempt {attempt_num}): {error_summary}\n"
+		if missing_pkgs:
+			error_detail += f"Missing packages: {', '.join(missing_pkgs)}\n"
+		for el in error_lines[:5]:
+			line_str = f"L{el['line']}" if el.get('line') else '?'
+			error_detail += f"  [{line_str}] {el['message']}"
+			if el.get('context'):
+				error_detail += f"  — near: {el['context'][:120]}"
+			error_detail += "\n"
+
+		fix_prompt = (
+			f"The LaTeX code you produced failed to compile under XeLaTeX.\n\n"
+			f"{error_detail}\n"
+			"Please fix ALL the errors and return the COMPLETE corrected LaTeX "
+			"document. Do NOT abbreviate or omit sections — return the full "
+			"document from \\documentclass to \\end{document}.\n"
+			"Return ONLY the LaTeX source code — no explanations or markdown fences."
+		)
+
+		conversation.append({
+			'role': 'user',
+			'parts': [{'text': fix_prompt}],
+		})
+
+		try:
+			fix_response = _call_ai(conversation)
+		except Exception:
+			break  # AI call failed — stop retrying
+
+		fixed_code = _extract_latex_from_response(fix_response)
+		if not fixed_code:
+			break  # AI returned empty — stop retrying
+
+		fixed_code = sanitize_ai_latex_code(fixed_code)
+
+		# Add the model's response to the conversation for next iteration
+		conversation.append({
+			'role': 'model',
+			'parts': [{'text': fixed_code}],
+		})
+
+		latex_code = fixed_code
 
 	# ── Save to document ──
 	latex_code_id = None
@@ -2281,6 +2445,9 @@ def ai_generate_latex(request, pk):
 			'saved_to_document': bool(should_save),
 			'latex_code_id': latex_code_id,
 			'is_latex_code': document.is_latex_code,
+			'compiled': compiled_ok,
+			'compilation_attempts': compilation_attempts,
+			'total_attempts': len(compilation_attempts),
 		},
 		status=status.HTTP_200_OK,
 	)

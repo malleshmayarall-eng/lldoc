@@ -26,8 +26,8 @@ class Workflow(models.Model):
     """
     A visual workflow pipeline.  Users create these, add nodes,
     connect them, then upload documents through the input node.
-    When created/saved, all field names from rule nodes are collected
-    and used as the NuExtract template automatically.
+    When created/saved, all field names from rule/AI/doc_create nodes
+    are collected and used as the extraction template automatically.
     """
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     organization = models.ForeignKey(
@@ -37,7 +37,7 @@ class Workflow(models.Model):
     description = models.TextField(blank=True, default='')
     is_active = models.BooleanField(default=True)
 
-    # Auto-generated NuExtract template from rule node field names
+    # Auto-generated extraction template from rule/AI/doc_create node field names
     extraction_template = models.JSONField(
         default=dict, blank=True,
         help_text='Auto-built from rule nodes: {"field_name": "", ...}',
@@ -52,6 +52,11 @@ class Workflow(models.Model):
     created_by = models.ForeignKey(
         settings.AUTH_USER_MODEL, on_delete=models.SET_NULL,
         null=True, blank=True,
+    )
+    team = models.ForeignKey(
+        'user_management.Team', on_delete=models.SET_NULL,
+        null=True, blank=True, related_name='clm_workflows',
+        help_text='Optional team that manages this workflow',
     )
     last_executed_at = models.DateTimeField(null=True, blank=True)
 
@@ -118,6 +123,47 @@ class Workflow(models.Model):
         help_text='ID of the currently active WorkflowExecution (null when idle).',
     )
 
+    # ── Workflow-level settings (adjustable from frontend Settings panel) ──
+    workflow_settings = models.JSONField(
+        default=dict, blank=True,
+        help_text='''Workflow-level configuration. Schema:
+        {
+          "validation": {
+            "approval_rule": "any"|"all"|"majority",   // any=first approve wins, all=unanimous, majority=50%+1
+            "require_note": false,                      // force validators to add a note
+            "auto_approve_timeout_hours": null,          // auto-approve after N hours (null=disabled)
+            "notification_channels": ["in_app", "email"] // where to notify validators
+          },
+          "execution": {
+            "retry_on_failure": false,
+            "max_retries": 3,
+            "retry_delay_seconds": 60,
+            "notify_on_complete": true,
+            "notify_on_failure": true,
+            "timeout_minutes": null,                     // max execution time (null=unlimited)
+            "parallel_nodes": true                       // execute independent nodes in parallel
+          },
+          "general": {
+            "description_long": "",
+            "tags": [],
+            "color": "",                                 // workflow accent color
+            "icon": ""                                   // workflow icon
+          }
+        }''',
+    )
+
+    # ── Event-driven mode ──────────────────────────────────────────────
+    class TriggerMode(models.TextChoices):
+        MANUAL = 'manual', 'Manual Only'
+        EVENT = 'event', 'Event-Driven'
+        SCHEDULED = 'scheduled', 'Scheduled'
+        HYBRID = 'hybrid', 'Hybrid (Manual + Events)'
+
+    trigger_mode = models.CharField(
+        max_length=20, choices=TriggerMode.choices, default=TriggerMode.MANUAL,
+        help_text='How this workflow is triggered: manual, event-driven, scheduled, or hybrid',
+    )
+
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -134,7 +180,7 @@ class Workflow(models.Model):
         """
         Collect every unique field name from all rule nodes, all AI
         node json_fields, AND all DerivedField definitions in this
-        workflow, then build the NuExtract JSON template.  Derived
+        workflow, then build the extraction JSON template.  Derived
         fields are included so downstream Rule nodes can reference
         them in conditions.
 
@@ -187,28 +233,20 @@ class Workflow(models.Model):
     @property
     def document_type(self) -> str:
         """
-        Return the document_type set on this workflow's first input node config.
-        For workflows with a single input node.
-        Returns empty string if not set.
+        DEPRECATED — document_type on input nodes is no longer used.
+        Extraction is handled by dedicated AI extract nodes.
+        Kept for backwards compatibility; always returns empty string.
         """
-        input_node = self.nodes.filter(node_type='input').first()
-        if input_node:
-            return (input_node.config or {}).get('document_type', '')
         return ''
 
     @property
     def document_types(self) -> dict:
         """
-        Return a {node_id: document_type} mapping for ALL input nodes.
-        Supports workflows with multiple input nodes, each handling a
-        different document type (e.g., one for invoices, one for contracts).
+        DEPRECATED — document_type on input nodes is no longer used.
+        Extraction is handled by dedicated AI extract nodes.
+        Kept for backwards compatibility; always returns empty dict.
         """
-        result = {}
-        for node in self.nodes.filter(node_type='input'):
-            doc_type = (node.config or {}).get('document_type', '')
-            if doc_type:
-                result[str(node.id)] = doc_type
-        return result
+        return {}
 
     def compute_nodes_config_hash(self, save=False):
         """
@@ -252,6 +290,41 @@ class Workflow(models.Model):
 
         return digest
 
+    def on_canvas_changed(self, rebuild_template=True, clear_stale_results=True):
+        """
+        Call this whenever the DAG changes — node created, updated,
+        deleted, or connection added/removed.
+
+        1. Rebuilds extraction_template from current canvas nodes
+           (rule + AI + doc_create + derived fields).
+        2. Recomputes nodes_config_hash so smart execution knows
+           the config has changed and docs need re-processing.
+        3. Optionally clears stale last_result on all nodes so
+           the frontend doesn't show outdated execution data.
+        4. Marks compilation_status as 'stale' if it was 'compiled'.
+
+        This ensures the workflow always reflects the CANVAS state,
+        not cached/stale processing data.
+        """
+        if rebuild_template:
+            self.rebuild_extraction_template()
+
+        old_hash = self.nodes_config_hash
+        new_hash = self.compute_nodes_config_hash(save=True)
+
+        config_changed = old_hash and old_hash != new_hash
+
+        if config_changed and clear_stale_results:
+            # Clear stale per-node execution caches so the next
+            # execution starts fresh.  The execution itself will
+            # repopulate last_result on each node.
+            self.nodes.all().update(last_result={})
+
+        # Mark compilation stale so live mode re-compiles
+        if config_changed and self.compilation_status == 'compiled':
+            self.compilation_status = 'stale'
+            self.save(update_fields=['compilation_status', 'updated_at'])
+
 
 # ---------------------------------------------------------------------------
 # WorkflowNode — only 3 types
@@ -290,6 +363,7 @@ class WorkflowNode(models.Model):
         DOC_CREATE = 'doc_create', 'Document Creator'
         INFERENCE = 'inference', 'Inference'
         SHEET = 'sheet', 'Sheet'
+        EXTRACT = 'extract', 'Extractor'
         OUTPUT = 'output', 'Output'
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
@@ -664,7 +738,7 @@ class ExtractedField(models.Model):
     # Values
     raw_value = models.TextField(
         blank=True, default='',
-        help_text='Original value as returned by NuExtract model',
+        help_text='Original value as returned by AI extraction',
     )
     standardized_value = models.TextField(
         blank=True, default='',
@@ -1184,6 +1258,16 @@ class WorkflowExecution(models.Model):
         help_text='[{node_id, node_type, label, count, status}, ...]',
     )
 
+    # Snapshot of the workflow configuration at execution time.
+    # Captures the DAG shape, node configs, extraction template, and
+    # nodes_config_hash so that past runs are fully reproducible even
+    # after the canvas is later modified.
+    config_snapshot = models.JSONField(
+        default=dict, blank=True,
+        help_text='Frozen copy of workflow config at execution time: '
+                  'nodes, connections, extraction_template, nodes_config_hash',
+    )
+
     # Timing
     started_at = models.DateTimeField(auto_now_add=True)
     completed_at = models.DateTimeField(null=True, blank=True)
@@ -1330,13 +1414,13 @@ class AIPromptCache(models.Model):
 
 
 # ---------------------------------------------------------------------------
-# DerivedField — AI-computed metadata that NuExtract cannot extract
+# DerivedField — AI-computed metadata beyond basic extraction
 # ---------------------------------------------------------------------------
 
 class DerivedField(models.Model):
     """
     A derived / computed metadata field that cannot be directly extracted
-    by NuExtract (NER-based extraction).
+    by simple AI extraction (label-based extraction).
 
     Examples:
       - Resume: "total_experience" computed by summing all work durations
@@ -1355,7 +1439,7 @@ class DerivedField(models.Model):
       - "Score from 1-10 based on clause protectiveness for the buyer"
       - "Categorise the candidate's seniority: junior/mid/senior/lead/executive"
 
-    The 'depends_on' list references other metadata fields (from NuExtract
+    The 'depends_on' list references other metadata fields (from AI extraction
     or previous AI nodes) that this field needs as input.  The executor
     includes those values in the AI prompt automatically.
 
@@ -1753,6 +1837,7 @@ class InputNodeHistory(models.Model):
         DMS_IMPORT = 'dms_import', 'DMS Import'
         BULK_UPLOAD = 'bulk_upload', 'Bulk Upload'
         SHEETS = 'sheets', 'Sheets Import'
+        DOCUMENT = 'document', 'Document Update'
         EMAIL_INBOX = 'email_inbox', 'Email Inbox'
         GOOGLE_DRIVE = 'google_drive', 'Google Drive'
         DROPBOX = 'dropbox', 'Dropbox'
@@ -1871,6 +1956,7 @@ class SheetNodeQuery(models.Model):
         READ = 'read', 'Read'
         WRITE = 'write', 'Write'
         APPEND = 'append', 'Append'
+        UPSERT = 'upsert', 'Upsert (unique-key match)'
 
     class Status(models.TextChoices):
         PENDING = 'pending', 'Pending'
@@ -1955,6 +2041,148 @@ class SheetNodeQuery(models.Model):
 
 
 # ---------------------------------------------------------------------------
+# InputNodeRow — persistent per-input-node row tracking with hashes
+# ---------------------------------------------------------------------------
+
+class InputNodeRow(models.Model):
+    """
+    Tracks every row that an input node (or sheet-input node) has ingested
+    into the workflow, along with the content hash at the time of ingestion.
+
+    This is the **master dedup table** for input nodes with sheet/table
+    sources.  Instead of loading ALL rows from a sheet and comparing
+    hashes in Python on every execution, the executor can:
+
+      1. Query ``InputNodeRow`` for the node's known rows + hashes
+      2. Compare with the current ``SheetRow.row_hash`` values at the
+         SQL/Python level to find only NEW or CHANGED rows
+      3. Skip unchanged rows entirely — they never hit Python
+
+    Decision matrix per row:
+
+      | InputNodeRow exists? | Hash matches? | Action            |
+      |:--------------------:|:------------:|:------------------|
+      | ✗                    | —            | INSERT + create doc |
+      | ✓                    | ✓            | **SKIP** (unchanged) |
+      | ✓                    | ✗            | UPDATE hash + update doc |
+
+    The ``document`` FK points to the ``WorkflowDocument`` created for
+    this row so that on content change we update the existing doc rather
+    than creating a new one (no orphans).
+
+    This model is source-agnostic — it works for ``source_type='sheets'``
+    on input nodes AND ``node_type='sheet', mode='input'`` sheet nodes.
+    """
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    workflow = models.ForeignKey(
+        Workflow, on_delete=models.CASCADE, related_name='input_node_rows',
+    )
+    node = models.ForeignKey(
+        WorkflowNode, on_delete=models.CASCADE, related_name='input_node_rows',
+    )
+
+    # Row identity — stable SheetRow UUID (survives reorders)
+    row_id = models.CharField(
+        max_length=255,
+        help_text='Stable row identity (SheetRow UUID)',
+    )
+
+    # SHA-256 of the row data at the time it was last ingested.
+    # Compared against SheetRow.row_hash or computed hash to detect changes.
+    content_hash = models.CharField(
+        max_length=64,
+        help_text='SHA-256 of row data when last ingested',
+    )
+
+    # The WorkflowDocument that was created/updated for this row.
+    # Allows update-in-place on content change without creating orphans.
+    document = models.ForeignKey(
+        WorkflowDocument, on_delete=models.CASCADE,
+        related_name='input_node_rows',
+        help_text='The WorkflowDocument created for this row',
+    )
+
+    # Source metadata for filtering/debugging
+    source_type = models.CharField(
+        max_length=30, default='sheets',
+        help_text='sheets | sheet_node | table',
+    )
+    sheet_id = models.CharField(
+        max_length=255, blank=True, default='',
+        help_text='Sheet UUID (for sheet sources)',
+    )
+    row_order = models.IntegerField(
+        null=True, blank=True,
+        help_text='Row order at time of ingestion',
+    )
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['-updated_at']
+        indexes = [
+            # Primary lookup: what rows does this node know about?
+            models.Index(
+                fields=['node', 'row_id'],
+                name='inputnoderow_node_rowid_idx',
+            ),
+            # Batch load for a node: all rows + hashes
+            models.Index(
+                fields=['node', 'content_hash'],
+                name='inputnoderow_node_hash_idx',
+            ),
+            # Workflow-level queries
+            models.Index(
+                fields=['workflow', 'node'],
+                name='inputnoderow_wf_node_idx',
+            ),
+        ]
+        # One row_id per node — prevents duplicates
+        unique_together = [('node', 'row_id')]
+
+    def __str__(self):
+        return (
+            f"InputNodeRow(node={self.node_id}, row={self.row_id}, "
+            f"hash={self.content_hash[:8]}…)"
+        )
+
+    @classmethod
+    def load_hash_map(cls, node) -> dict:
+        """
+        Load {row_id: (content_hash, document_id)} for all rows tracked
+        by this node.  Used at the start of execution for fast lookups.
+        """
+        return {
+            str(rid): (chash, str(doc_id))
+            for rid, chash, doc_id in cls.objects.filter(
+                node=node,
+            ).values_list('row_id', 'content_hash', 'document_id')
+        }
+
+    @classmethod
+    def upsert(cls, node, workflow, row_id, content_hash, document, source_type='sheets', sheet_id='', row_order=None):
+        """
+        Insert or update a tracked row.  On content change, updates the
+        hash.  Returns (obj, created).
+        """
+        obj, created = cls.objects.update_or_create(
+            node=node,
+            row_id=str(row_id),
+            defaults={
+                'workflow': workflow,
+                'content_hash': content_hash,
+                'document': document,
+                'source_type': source_type,
+                'sheet_id': str(sheet_id),
+                'row_order': row_order,
+            },
+        )
+        return obj, created
+
+
+# ---------------------------------------------------------------------------
 # EventSubscription — links input nodes to event sources for live workflows
 # ---------------------------------------------------------------------------
 
@@ -1974,6 +2202,7 @@ class EventSubscription(models.Model):
 
     class SourceType(models.TextChoices):
         SHEET = 'sheet', 'Sheet Update'
+        DOCUMENT = 'document', 'Document Update'
         EMAIL = 'email', 'Email Inbox'
         WEBHOOK = 'webhook', 'Webhook'
         UPLOAD = 'upload', 'File Upload'
@@ -2319,3 +2548,388 @@ class WorkflowCompilation(models.Model):
 
     def __str__(self):
         return f"Compilation({self.workflow.name}) [{self.status}] @ {self.created_at}"
+
+
+# ---------------------------------------------------------------------------
+# WorkflowLiveEvent — persisted real-time execution events for dashboard
+# ---------------------------------------------------------------------------
+
+class WorkflowLiveEvent(models.Model):
+    """
+    Persists real-time execution events emitted during workflow runs.
+
+    While the in-memory ``live_events.event_bus`` handles instant SSE
+    streaming, this model provides:
+      - Historical timeline replay (what happened in past executions)
+      - Dashboard aggregation (throughput, error rates, node latency)
+      - Audit trail (which nodes ran, when, how many docs, failures)
+
+    Events are written in bulk after each node completes (batch insert)
+    and optionally during long-running nodes (progress events).
+
+    Automatic cleanup: events older than 30 days can be purged via
+    management command or Celery Beat task.
+    """
+
+    class EventType(models.TextChoices):
+        EXECUTION_STARTED = 'execution_started', 'Execution Started'
+        EXECUTION_COMPLETED = 'execution_completed', 'Execution Completed'
+        NODE_STARTED = 'node_started', 'Node Started'
+        NODE_COMPLETED = 'node_completed', 'Node Completed'
+        NODE_FAILED = 'node_failed', 'Node Failed'
+        NODE_PROGRESS = 'node_progress', 'Node Progress'
+        DOCUMENT_PROCESSED = 'document_processed', 'Document Processed'
+        COMPILATION_STARTED = 'compilation_started', 'Compilation Started'
+        COMPILATION_DONE = 'compilation_done', 'Compilation Done'
+        LIVE_TICK = 'live_tick', 'Live Tick'
+        METRIC_UPDATE = 'metric_update', 'Metric Update'
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    workflow = models.ForeignKey(
+        Workflow, on_delete=models.CASCADE, related_name='live_events',
+    )
+    execution = models.ForeignKey(
+        'WorkflowExecution', on_delete=models.CASCADE,
+        null=True, blank=True, related_name='live_events',
+    )
+    node = models.ForeignKey(
+        WorkflowNode, on_delete=models.SET_NULL,
+        null=True, blank=True, related_name='live_events',
+    )
+
+    event_type = models.CharField(
+        max_length=30, choices=EventType.choices,
+    )
+    node_type = models.CharField(max_length=20, blank=True, default='')
+    node_label = models.CharField(max_length=255, blank=True, default='')
+
+    # Numeric metrics for fast aggregation
+    input_count = models.PositiveIntegerField(default=0)
+    output_count = models.PositiveIntegerField(default=0)
+    duration_ms = models.PositiveIntegerField(null=True, blank=True)
+    progress_pct = models.FloatField(null=True, blank=True)
+
+    # Flexible data payload
+    data = models.JSONField(
+        default=dict, blank=True,
+        help_text='Event-specific data: errors, document_ids, metrics, etc.',
+    )
+
+    # Status for quick filtering
+    status = models.CharField(
+        max_length=20, blank=True, default='',
+        help_text='Node/execution status at time of event: running, completed, failed',
+    )
+
+    dag_level = models.PositiveIntegerField(default=0)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['workflow', '-created_at']),
+            models.Index(fields=['workflow', 'execution', 'event_type']),
+            models.Index(fields=['workflow', 'event_type', '-created_at']),
+            models.Index(fields=['execution', 'dag_level', 'created_at']),
+            models.Index(fields=['node', '-created_at']),
+        ]
+
+    def __str__(self):
+        return (
+            f"LiveEvent({self.event_type}) "
+            f"node={self.node_label or '-'} "
+            f"[{self.status}] @ {self.created_at}"
+        )
+
+    @classmethod
+    def record_from_live_event(cls, live_event, workflow_id=None, execution_id=None, node_id=None):
+        """
+        Create a persisted record from an in-memory LiveEvent.
+        Used by the executor to batch-persist events.
+        """
+        return cls(
+            workflow_id=workflow_id or live_event.workflow_id,
+            execution_id=execution_id or live_event.execution_id or None,
+            node_id=node_id or live_event.node_id or None,
+            event_type=live_event.event_type,
+            node_type=live_event.node_type,
+            node_label=live_event.node_label,
+            input_count=live_event.data.get('input_count', 0),
+            output_count=live_event.data.get('output_count', 0),
+            duration_ms=live_event.data.get('duration_ms'),
+            progress_pct=live_event.data.get('progress_pct'),
+            data=live_event.data,
+            status=live_event.data.get('status', ''),
+            dag_level=live_event.data.get('dag_level', 0),
+        )
+
+    @classmethod
+    def cleanup_old_events(cls, days=30):
+        """Delete events older than N days. Call from Celery Beat or management command."""
+        cutoff = timezone.now() - timezone.timedelta(days=days)
+        deleted, _ = cls.objects.filter(created_at__lt=cutoff).delete()
+        return deleted
+
+
+# ---------------------------------------------------------------------------
+# RowActionLog — idempotency guard for side-effect nodes (action, doc_create)
+# ---------------------------------------------------------------------------
+
+class RowActionLog(models.Model):
+    """
+    Prevents duplicate side-effects in live workflows that process sheet rows.
+
+    When an action node (email, webhook, etc.) or doc_create node fires for
+    a specific row, a RowActionLog entry is created with the row's identity
+    (``row_id``) and content hash (``content_hash``).  On subsequent
+    executions, the node checks this table first:
+
+      • Same row_id + same content_hash → **skip** (already processed,
+        nothing changed)
+      • Same row_id + different content_hash → **re-execute** (row data
+        changed since last action)
+      • New row_id → **execute** (never seen before)
+
+    This ensures that live workflows with repeated triggers (e.g. a sheet
+    saved every 30 seconds) don't send duplicate emails or create duplicate
+    documents for rows whose data hasn't changed.
+
+    The ``row_id`` is the SheetRow UUID — a stable identity that survives
+    row reorders, insertions and deletions.  For non-sheet documents, the
+    ``row_id`` stores the WorkflowDocument UUID.
+    """
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    workflow = models.ForeignKey(
+        Workflow, on_delete=models.CASCADE, related_name='row_action_logs',
+    )
+    node = models.ForeignKey(
+        WorkflowNode, on_delete=models.CASCADE, related_name='row_action_logs',
+    )
+    execution = models.ForeignKey(
+        'WorkflowExecution', on_delete=models.SET_NULL,
+        null=True, blank=True, related_name='row_action_logs',
+        help_text='The execution that created this log entry',
+    )
+
+    # Row identity — the SheetRow UUID (or WorkflowDocument UUID for non-sheet)
+    row_id = models.CharField(
+        max_length=255, db_index=True,
+        help_text='Stable row identity (SheetRow UUID or WorkflowDocument UUID)',
+    )
+
+    # SHA-256 of the row data at the time the action was executed.
+    # If the row changes, the hash changes and the action can re-fire.
+    content_hash = models.CharField(
+        max_length=64,
+        help_text='SHA-256 of row data when action was executed',
+    )
+
+    # What happened
+    action_type = models.CharField(
+        max_length=50, blank=True, default='',
+        help_text='Plugin name or action type (e.g. send_email, create_document)',
+    )
+    status = models.CharField(
+        max_length=20, default='executed',
+        help_text='executed | skipped | failed',
+    )
+    result_summary = models.JSONField(
+        default=dict, blank=True,
+        help_text='Brief result data (plugin response, created doc id, etc.)',
+    )
+
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-created_at']
+        indexes = [
+            # Primary lookup: has this node already processed this row with this data?
+            models.Index(
+                fields=['node', 'row_id', 'content_hash'],
+                name='rowactionlog_node_row_hash_idx',
+            ),
+            # Workflow-level queries
+            models.Index(fields=['workflow', 'node', '-created_at']),
+            # Cleanup queries
+            models.Index(fields=['created_at']),
+        ]
+        # Allow re-execution when content changes — unique on (node, row_id, content_hash)
+        unique_together = [('node', 'row_id', 'content_hash')]
+
+    def __str__(self):
+        return (
+            f"RowActionLog(node={self.node_id}, row={self.row_id}, "
+            f"hash={self.content_hash[:8]}..., status={self.status})"
+        )
+
+    @classmethod
+    def has_been_executed(cls, node, row_id: str, content_hash: str) -> bool:
+        """
+        Check if this (node, row_id, content_hash) combination has already
+        been successfully executed.  Returns True if a log entry exists
+        with status='executed'.
+        """
+        return cls.objects.filter(
+            node=node,
+            row_id=str(row_id),
+            content_hash=content_hash,
+            status='executed',
+        ).exists()
+
+    @classmethod
+    def record_execution(
+        cls, workflow, node, execution, row_id: str,
+        content_hash: str, action_type: str = '',
+        status: str = 'executed', result_summary: dict = None,
+    ):
+        """
+        Record that this node processed this row.
+        Uses update_or_create so that failed→executed transitions are captured.
+        """
+        obj, created = cls.objects.update_or_create(
+            node=node,
+            row_id=str(row_id),
+            content_hash=content_hash,
+            defaults={
+                'workflow': workflow,
+                'execution': execution,
+                'action_type': action_type,
+                'status': status,
+                'result_summary': result_summary or {},
+            },
+        )
+        return obj, created
+
+    @classmethod
+    def cleanup_old_logs(cls, days=90):
+        """Delete log entries older than N days."""
+        cutoff = timezone.now() - timezone.timedelta(days=days)
+        deleted, _ = cls.objects.filter(created_at__lt=cutoff).delete()
+        return deleted
+
+
+# ---------------------------------------------------------------------------
+# WorkflowEventTrigger — configurable event triggers for workflows
+# ---------------------------------------------------------------------------
+
+class WorkflowEventTrigger(models.Model):
+    """
+    Defines an event-based trigger for a workflow.
+
+    Each trigger represents a single event source that can automatically
+    start workflow execution when conditions are met.  Multiple triggers
+    can be attached to a workflow (OR semantics — any trigger fires the
+    workflow).
+
+    Trigger types:
+      - webhook:       External HTTP POST to a unique URL
+      - schedule:      Cron-like schedule (e.g. every hour, daily at 9am)
+      - file_upload:   When a file is uploaded to the workflow
+      - email:         When an email arrives at a configured inbox
+      - sheet_update:  When a linked Sheet row is created/updated
+      - field_change:  When a specific extracted field value changes
+      - document_status: When doc extraction completes / status changes
+      - manual:        Button-click only (default, no auto-trigger)
+      - api_call:      Triggered via API call with custom payload
+
+    Config schema per trigger_type:
+      webhook:
+        { "secret": "...", "headers_filter": {"X-Event": "push"} }
+      schedule:
+        { "cron": "0 9 * * *", "timezone": "UTC", "enabled_days": [1,2,3,4,5] }
+      file_upload:
+        { "file_types": ["pdf","docx"], "min_files": 1 }
+      email:
+        { "inbox": "contracts@company.com", "subject_filter": "Invoice*" }
+      sheet_update:
+        { "sheet_id": "uuid", "trigger_on": "row_created"|"row_updated"|"any" }
+      field_change:
+        { "field_name": "contract_value", "condition": "changed"|"gt"|"lt", "threshold": 50000 }
+      document_status:
+        { "status": "completed"|"failed", "node_id": "uuid" }
+      api_call:
+        { "expected_payload_keys": ["document_id", "action"] }
+    """
+
+    class TriggerType(models.TextChoices):
+        WEBHOOK = 'webhook', 'Webhook'
+        SCHEDULE = 'schedule', 'Scheduled'
+        FILE_UPLOAD = 'file_upload', 'File Upload'
+        EMAIL = 'email', 'Email Arrival'
+        SHEET_UPDATE = 'sheet_update', 'Sheet Update'
+        FIELD_CHANGE = 'field_change', 'Field Value Change'
+        DOCUMENT_STATUS = 'document_status', 'Document Status Change'
+        MANUAL = 'manual', 'Manual Only'
+        API_CALL = 'api_call', 'API Call'
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    workflow = models.ForeignKey(
+        Workflow, on_delete=models.CASCADE, related_name='event_triggers',
+    )
+    name = models.CharField(
+        max_length=255, blank=True, default='',
+        help_text='Human-readable trigger name',
+    )
+    trigger_type = models.CharField(
+        max_length=20, choices=TriggerType.choices,
+    )
+    is_active = models.BooleanField(default=True)
+
+    # Trigger-specific config (schema depends on trigger_type)
+    config = models.JSONField(
+        default=dict, blank=True,
+        help_text='Trigger-specific configuration (varies by type)',
+    )
+
+    # Webhook: unique inbound URL token
+    webhook_token = models.UUIDField(
+        null=True, blank=True, unique=True,
+        help_text='Unique token for webhook triggers: /api/clm/triggers/<token>/',
+    )
+    webhook_secret = models.CharField(
+        max_length=255, blank=True, default='',
+        help_text='HMAC secret for webhook payload verification',
+    )
+
+    # Schedule: next scheduled run
+    next_run_at = models.DateTimeField(
+        null=True, blank=True,
+        help_text='Next scheduled trigger time (for schedule type)',
+    )
+    last_triggered_at = models.DateTimeField(
+        null=True, blank=True,
+    )
+
+    # Stats
+    total_triggers = models.PositiveIntegerField(default=0)
+    total_executions = models.PositiveIntegerField(default=0)
+    consecutive_failures = models.PositiveIntegerField(default=0)
+    last_error = models.TextField(blank=True, default='')
+
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL,
+        null=True, blank=True,
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['workflow', 'is_active']),
+            models.Index(fields=['trigger_type', 'is_active']),
+            models.Index(fields=['webhook_token']),
+            models.Index(fields=['next_run_at']),
+        ]
+
+    def __str__(self):
+        return f"{self.name or self.get_trigger_type_display()} → {self.workflow.name}"
+
+    def save(self, *args, **kwargs):
+        """Auto-generate webhook token for webhook triggers."""
+        if self.trigger_type == 'webhook' and not self.webhook_token:
+            self.webhook_token = uuid.uuid4()
+        super().save(*args, **kwargs)
+

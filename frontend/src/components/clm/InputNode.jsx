@@ -1,13 +1,16 @@
 import React from 'react';
-import { Trash2, Search, FileInput, Mail, Globe, Table2, Link2, HardDrive, Cloud, CloudCog, Server, Terminal, Upload } from 'lucide-react';
+import { Trash2, Search, FileInput, Mail, Globe, Table2, Link2, HardDrive, Cloud, CloudCog, Server, Terminal, Upload, Bell, MessageSquare, Users } from 'lucide-react';
 import NodeProgressBar from './NodeProgressBar';
 
 /**
  * Input Node — unified entry point for documents.
  * source_type controls how documents arrive:
- *   upload      — manual file upload (default)
- *   email_inbox — fetch from IMAP mailbox
- *   webhook     — external POST
+ *   upload         — manual file upload (default)
+ *   email_inbox    — fetch from IMAP mailbox
+ *   webhook        — external POST / integration webhook
+ *   gmail          — Gmail integration (notifications)
+ *   slack          — Slack integration (notifications)
+ *   teams          — MS Teams integration (notifications)
  * Modern minimal blue theme.
  */
 export default function InputNode({ node, isSelected, onSelect, onDragStart, onConnectStart, onConnectEnd, onDelete, processingStatus, onDoubleClick }) {
@@ -18,7 +21,11 @@ export default function InputNode({ node, isSelected, onSelect, onDragStart, onC
   const sourceLabels = {
     upload:       { icon: Upload, label: 'Upload', desc: 'Manual upload', color: 'blue' },
     email_inbox:  { icon: Mail, label: 'Email', desc: config.email_user || 'IMAP inbox', color: 'blue' },
-    webhook:      { icon: Link2, label: 'Webhook', desc: 'API ingest', color: 'blue' },
+    webhook:      { icon: Link2, label: 'Webhook',
+      desc: config.integration_plugin ? 'Integration webhook' : 'API ingest', color: 'blue' },
+    gmail:        { icon: Mail, label: 'Gmail', desc: 'Notifications', color: 'red' },
+    slack:        { icon: MessageSquare, label: 'Slack', desc: 'Notifications', color: 'purple' },
+    teams:        { icon: Users, label: 'Teams', desc: 'Notifications', color: 'blue' },
     google_drive: { icon: HardDrive, label: 'Google Drive', desc: config.google_folder_id
       ? `${config.google_access === 'private' ? '🔒' : ''} ${config.google_folder_id.length > 20 ? 'Folder linked' : config.google_folder_id.slice(0,12) + '…'}`
       : 'Connect folder', color: 'blue' },
@@ -33,6 +40,16 @@ export default function InputNode({ node, isSelected, onSelect, onDragStart, onC
   };
   const src = sourceLabels[sourceType] || sourceLabels.upload;
   const SrcIcon = src.icon;
+  const isIntegration = ['gmail', 'slack', 'teams'].includes(sourceType) || !!config.integration_plugin;
+
+  /* Color maps for integration sources */
+  const colorMap = {
+    red:     { bg: 'bg-red-50',    text: 'text-red-600',    ring: 'ring-red-200',    shadow: 'shadow-red-100/60',    border: 'border-red-400' },
+    purple:  { bg: 'bg-purple-50', text: 'text-purple-600', ring: 'ring-purple-200', shadow: 'shadow-purple-100/60', border: 'border-purple-400' },
+    emerald: { bg: 'bg-emerald-50',text: 'text-emerald-600',ring: 'ring-emerald-200',shadow: 'shadow-emerald-100/60',border: 'border-emerald-400' },
+    blue:    { bg: 'bg-blue-50',   text: 'text-blue-600',   ring: 'ring-blue-200',   shadow: 'shadow-blue-100/60',   border: 'border-blue-400' },
+  };
+  const cm = colorMap[src.color] || colorMap.blue;
 
   const docCount = lastResult.count ?? null;
 
@@ -53,10 +70,8 @@ export default function InputNode({ node, isSelected, onSelect, onDragStart, onC
       >
         {/* Header */}
         <div className="px-3 py-2 flex items-center gap-2">
-          <div className={`w-7 h-7 rounded-lg flex items-center justify-center ${
-            sourceType === 'table' ? 'bg-emerald-50' : 'bg-blue-50'
-          }`}>
-            <SrcIcon size={14} className={sourceType === 'table' ? 'text-emerald-600' : 'text-blue-600'} />
+          <div className={`w-7 h-7 rounded-lg flex items-center justify-center ${cm.bg}`}>
+            <SrcIcon size={14} className={cm.text} />
           </div>
           <div className="flex-1 min-w-0">
             <p className="text-[11px] font-semibold text-gray-800 truncate leading-tight">{node.label || 'Input'}</p>
@@ -84,20 +99,7 @@ export default function InputNode({ node, isSelected, onSelect, onDragStart, onC
           {/* Source description */}
           <p className="text-[10px] text-gray-500 truncate">{src.desc}</p>
 
-          {/* Document type badge — hidden for email inbox */}
-          {sourceType !== 'email_inbox' && (
-            config.document_type ? (
-              <span className="inline-flex items-center gap-1 text-[9px] text-indigo-600 font-medium bg-indigo-50 border border-indigo-100 px-1.5 py-0.5 rounded-md">
-                <FileInput size={9} />
-                {config.document_type.replace(/_/g, ' ')}
-              </span>
-            ) : (
-              <span className="inline-flex items-center gap-1 text-[9px] text-amber-600 font-medium bg-amber-50 border border-amber-200/60 px-1.5 py-0.5 rounded-md">
-                <span className="w-3 h-3 rounded-full bg-amber-400/20 flex items-center justify-center text-[8px] leading-none shrink-0">!</span>
-                No type set
-              </span>
-            )
-          )}
+          {/* Document type badge removed */}
 
           {/* Email inbox details */}
           {sourceType === 'email_inbox' && config.email_user && (
@@ -169,6 +171,19 @@ export default function InputNode({ node, isSelected, onSelect, onDragStart, onC
 
           {(config.file_extensions || []).length > 0 && ['google_drive','dropbox','onedrive','s3','ftp'].includes(sourceType) && (
             <p className="text-[9px] text-gray-400">{config.file_extensions.join(', ')}</p>
+          )}
+
+          {/* Integration plugin details */}
+          {isIntegration && (
+            <div className="flex items-center gap-1 flex-wrap">
+              <span className={`inline-flex items-center gap-1 text-[9px] font-medium ${cm.text} ${cm.bg} border border-${src.color}-100 px-1.5 py-0.5 rounded-md`}>
+                <Bell size={8} />
+                Listening
+              </span>
+              {config.integration_settings && Object.keys(config.integration_settings).length > 0 && (
+                <span className="text-[8px] text-gray-400">configured</span>
+              )}
+            </div>
           )}
 
           {/* Document count from last execution */}

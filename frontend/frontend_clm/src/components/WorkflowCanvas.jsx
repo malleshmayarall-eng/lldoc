@@ -223,7 +223,7 @@ export default function WorkflowCanvas() {
         type === 'action' ? { plugin: '', settings: {} } :
         type === 'listener' ? { trigger_type: '', gate_message: '', auto_execute_downstream: true } :
         type === 'validator' ? { description: '' } :
-        type === 'ai' ? { model: 'gemini-2.0-flash', system_prompt: '', output_format: 'json_extract', output_key: 'ai_analysis', json_fields: [], temperature: 0.3, max_tokens: 2048, include_text: true, include_metadata: true } :
+        type === 'ai' ? { model: 'gemini-2.5-flash', system_prompt: '', output_format: 'json_extract', output_key: 'ai_analysis', json_fields: [], temperature: 0.3, max_tokens: 2048, include_text: true, include_metadata: true } :
         type === 'and_gate' ? {} :
         {};
       pushSnapshot();
@@ -818,25 +818,6 @@ export default function WorkflowCanvas() {
               </div>
 
               <hr className="my-2" />
-              <p className="text-[10px] uppercase tracking-wider text-gray-400 font-semibold mb-1">Quick Upload</p>
-              <label className="w-full text-center px-3 py-2.5 rounded-lg text-xs font-medium bg-gray-50 text-gray-600 hover:bg-gray-100 cursor-pointer border border-dashed border-gray-300 hover:border-indigo-300 transition-colors flex items-center justify-center gap-2">
-                {uploading ? <><Spinner size="sm" className="text-indigo-500" /> Uploading…</> : <><Upload size={14} /> Upload Docs</>}
-                <input type="file" multiple accept=".pdf,.docx,.doc,.txt,.xlsx,.xls,.csv,.pptx,.ppt,.jpg,.jpeg,.png,.gif,.bmp,.tiff,.webp,.html,.htm,.md,.rtf,.odt,.zip" onChange={handleQuickUpload} className="hidden" />
-              </label>
-              {/* Upload progress bar */}
-              {uploading && (
-                <div className="mt-2">
-                  <div className="w-full bg-gray-200 rounded-full h-1.5 overflow-hidden">
-                    <div
-                      className="h-full bg-gradient-to-r from-indigo-500 to-purple-500 rounded-full transition-all duration-300 ease-out"
-                      style={{ width: `${uploadProgress}%` }}
-                    />
-                  </div>
-                  <p className="text-[10px] text-gray-400 mt-1 text-center">
-                    {uploadProgress < 100 ? `${uploadProgress}% uploaded` : 'Processing…'}
-                  </p>
-                </div>
-              )}
             </div>
 
             {/* ── Canvas ── */}
@@ -3688,7 +3669,7 @@ function ValidatorConfigPanel({ node, onChange, workflowId, onUpdate }) {
 function AIConfigPanel({ node, onChange, models }) {
   const serverConfig = node.config || {};
 
-  const [model, setModel] = React.useState(serverConfig.model || 'gemini-2.0-flash');
+  const [model, setModel] = React.useState(serverConfig.model || 'gemini-2.5-flash');
   const [systemPrompt, setSystemPrompt] = React.useState(serverConfig.system_prompt || '');
   const [outputFormat, setOutputFormat] = React.useState(serverConfig.output_format || 'json_extract');
   const [outputKey, setOutputKey] = React.useState(serverConfig.output_key || 'ai_analysis');
@@ -3701,7 +3682,7 @@ function AIConfigPanel({ node, onChange, models }) {
 
   React.useEffect(() => {
     const c = node.config || {};
-    setModel(c.model || 'gemini-2.0-flash');
+    setModel(c.model || 'gemini-2.5-flash');
     setSystemPrompt(c.system_prompt || '');
     setOutputFormat(c.output_format || 'json_extract');
     setOutputKey(c.output_key || 'ai_analysis');

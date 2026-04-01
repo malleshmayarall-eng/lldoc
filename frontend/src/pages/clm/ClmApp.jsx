@@ -5,6 +5,7 @@ import WorkflowCanvas from '@components/clm/WorkflowCanvas';
 import ValidationDashboard from '@components/clm/ValidationDashboard';
 import DocumentViewer from '@components/clm/DocumentViewer';
 import PublicUpload from '@components/clm/PublicUpload';
+import SystemDebugPage from './SystemDebugPage';
 
 /**
  * ClmApp — CLM (Contract Lifecycle Management) page wrapper.
@@ -32,6 +33,7 @@ export default function ClmApp() {
       />
       <Routes>
         <Route path="upload/:token" element={<PublicUpload />} />
+        <Route path="debug" element={<SystemDebugPage />} />
         <Route path="workflows" element={<WorkflowList />} />
         <Route path="workflows/:id" element={<WorkflowCanvas />} />
         <Route path="documents/:workflowId/:documentId" element={<DocumentViewer />} />

@@ -60,6 +60,22 @@ export const sheetsService = {
       col_count: colCount,
     }),
 
+  // ── AI edit (Gemini-powered) ──────────────────────────────────────
+
+  /** Propose AI edits on an existing sheet (returns changes, not saved). */
+  aiEdit: (id, prompt, conversationHistory = []) =>
+    api.post(`${BASE}/${id}/ai-edit/`, {
+      prompt,
+      conversation_history: conversationHistory,
+    }),
+
+  /** Apply approved AI changes to the sheet. */
+  aiApply: (id, changes, newColumns = []) =>
+    api.post(`${BASE}/${id}/ai-apply/`, {
+      changes,
+      new_columns: newColumns,
+    }),
+
   // ── Workflow integration ──────────────────────────────────────────
 
   importWorkflow: (id, workflowId, includeInputs = true, includeOutputs = true) =>
@@ -98,6 +114,32 @@ export const sheetsService = {
   duplicate: (id) => api.post(`${BASE}/${id}/duplicate/`),
   exportMetadata: (id) => api.get(`${BASE}/${id}/export-metadata/`),
   cleanEmptyRows: (id) => api.post(`${BASE}/${id}/clean-empty-rows/`),
+
+  // ── Row-level workflow reconciliation ──────────────────────────────
+
+  /** Check for rows with unprocessed changes (hash mismatch). */
+  reconcilePendingCheck: (id) =>
+    api.get(`${BASE}/${id}/reconcile-pending/`),
+
+  /** Re-trigger workflows for all rows with unprocessed changes. */
+  reconcilePendingTrigger: (id) =>
+    api.post(`${BASE}/${id}/reconcile-pending/`),
+
+  // ── Unique Columns (workflow dedup) ───────────────────────────────
+
+  /**
+   * Get the sheet's unique-column config (used by CLM upsert logic).
+   * Returns { unique_columns, labels, available_columns }.
+   */
+  getUniqueColumns: (id) =>
+    api.get(`${BASE}/${id}/unique-columns/`),
+
+  /**
+   * Set which columns form the composite unique key for workflow dedup.
+   * @param {string[]} columns - array of column keys, e.g. ['col_0', 'col_2']
+   */
+  setUniqueColumns: (id, columns) =>
+    api.patch(`${BASE}/${id}/unique-columns/`, { unique_columns: columns }),
 
   // ── Paginated rows (scrollable / infinite-scroll) ─────────────────
 

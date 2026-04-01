@@ -201,7 +201,12 @@ const DocumentViewerPage = () => {
 const LoadingScreen = () => (
   <div className="min-h-screen flex items-center justify-center bg-gray-50">
     <div className="text-center">
-      <Loader2 size={40} className="mx-auto text-blue-500 animate-spin mb-4" />
+      <img
+        src="/clearthread-logo.png"
+        alt="clearthread logo"
+        onError={(e) => { e.currentTarget.onerror = null; e.currentTarget.src = '/latentlayer-logo.svg'; }}
+        className="mx-auto h-16 w-16 mb-4 animate-pulse"
+      />
       <p className="text-gray-500 text-sm">Loading document…</p>
     </div>
   </div>

@@ -19,6 +19,8 @@ Supported creation modes (from ``node.config.creation_mode``):
   - **quick_latex** → ``_clone_quick_latex()`` or new quick-latex doc
   - **structured**  → ``DocumentDrafter.create_structured_document()``
 """
+import hashlib
+import json
 import logging
 
 from django.contrib.auth.models import User
@@ -27,6 +29,7 @@ from django.utils import timezone
 
 from .models import (
     DocumentCreationResult,
+    RowActionLog,
     WorkflowDocument,
     WorkflowNode,
 )
@@ -341,6 +344,7 @@ def execute_doc_create_node(
     node: WorkflowNode,
     incoming_document_ids: list,
     triggered_by=None,
+    workflow_execution=None,
 ) -> dict:
     """
     Execute a ``doc_create`` node for every incoming CLM document.
@@ -403,9 +407,40 @@ def execute_doc_create_node(
     created = 0
     skipped = 0
     failed = 0
+    deduped = 0
 
     for doc in documents:
         mapped = _build_mapped_metadata(doc, field_mappings)
+
+        # ── Row identity & content hash for dedup ─────────────────
+        _gm = doc.global_metadata or {}
+        _row_id = _gm.get('_row_id') or str(doc.id)
+        _content_hash = doc.file_hash or ''
+        if not _content_hash:
+            _content_hash = hashlib.sha256(
+                json.dumps(doc.extracted_metadata or {}, sort_keys=True, default=str).encode()
+            ).hexdigest()
+
+        # ── Idempotency guard: skip if already created for this data ──
+        if _content_hash and RowActionLog.has_been_executed(node, _row_id, _content_hash):
+            logger.info(
+                f"[doc-create-dedup] Skipping doc {doc.id} (row={_row_id}, "
+                f"hash={_content_hash[:12]}…) — already created by node {node.id}"
+            )
+            result = DocumentCreationResult.objects.create(
+                workflow=node.workflow,
+                node=node,
+                source_clm_document=doc,
+                status='skipped',
+                creation_mode=creation_mode,
+                metadata_used=mapped,
+                error_message='Deduplicated: document already created for this row data',
+                triggered_by=triggered_by,
+            )
+            deduped += 1
+            skipped += 1
+            results.append(_result_to_dict(result, doc))
+            continue
 
         # Check required fields
         missing = [f for f in required if not mapped.get(f)]
@@ -443,6 +478,22 @@ def execute_doc_create_node(
             created += 1
             results.append(_result_to_dict(result, doc))
 
+            # ── Record successful creation in RowActionLog ────────
+            if _content_hash:
+                RowActionLog.record_execution(
+                    workflow=node.workflow,
+                    node=node,
+                    execution=workflow_execution,
+                    row_id=_row_id,
+                    content_hash=_content_hash,
+                    action_type=f'doc_create:{creation_mode}',
+                    status='executed',
+                    result_summary={
+                        'created_doc_id': str(editor_doc.id),
+                        'source_doc_id': str(doc.id),
+                    },
+                )
+
         except Exception as e:
             logger.error(
                 "doc_create failed for CLM doc %s on node %s: %s",
@@ -479,6 +530,7 @@ def execute_doc_create_node(
         'created': created,
         'skipped': skipped,
         'failed': failed,
+        'deduped': deduped,
         'status': overall_status,
         'created_document_ids': [
             r['created_document_id'] for r in results
@@ -495,6 +547,7 @@ def execute_doc_create_node(
         'created': created,
         'skipped': skipped,
         'failed': failed,
+        'deduped': deduped,
         'results': results,
         'created_document_ids': [
             r['created_document_id'] for r in results

@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 240 300" role="img" aria-label="clearthread Logo">
+  <defs>
+    <linearGradient id="petalGradient" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#ff69b4"/>
+      <stop offset="100%" stop-color="#ff8ec8"/>
+    </linearGradient>
+    <linearGradient id="leafGradient" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#00c18d"/>
+      <stop offset="100%" stop-color="#4ecea0"/>
+    </linearGradient>
+  </defs>
+
+  <rect x="0" y="0" width="240" height="300" rx="24" fill="white"/>
+  <path d="M120 40c-45 24-55 78-28 123 16-33 35-54 35-54s19 21 35 54c27-45 18-99-28-123z" fill="url(#petalGradient)"/>
+  <path d="M120 40c-16 12-31 50-25 90 7-30 18-59 25-68 7 9 18 38 25 68 6-40-9-78-25-90z" fill="#ff1f95" opacity="0.8"/>
+  <path d="M95 138c-17 12-30 32-33 63-1 13 10 17 14 15 0 0 9-47 19-70z" fill="url(#leafGradient)"/>
+  <path d="M145 138c17 12 30 32 33 63 1 13-10 17-14 15 0 0-9-47-19-70z" fill="url(#leafGradient)"/>
+  <path d="M120 170v110" stroke="#00a86b" stroke-width="10" stroke-linecap="round"/>
+  <text x="50%" y="280" font-family="Inter, sans-serif" font-size="28" fill="#2f2f2f" text-anchor="middle">clearthread</text>
+</svg>

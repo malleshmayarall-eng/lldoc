@@ -229,7 +229,7 @@ Use placeholder values for user-specific settings (emails, phone numbers, URLs).
 ### 6. ai — AI model processing. Runs an LLM on each document's text.
 Config:
 {
-  "model": "gemini-2.0-flash",
+  "model": "gemini-2.5-flash",
   "system_prompt": "<clear instructions for what the AI should extract or analyze>",
   "output_format": "json_extract" | "yes_no" | "text",
   "output_key": "<metadata_key_for_result>",
@@ -389,7 +389,7 @@ def _call_gemini_for_workflow(user_prompt: str, previous_answers: list | None = 
     genai.configure(api_key=api_key)
 
     model = genai.GenerativeModel(
-        model_name='gemini-2.0-flash',
+        model_name='gemini-2.5-flash',
         system_instruction=SYSTEM_PROMPT,
         generation_config=genai.GenerationConfig(
             temperature=0.4,

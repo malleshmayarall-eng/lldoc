@@ -20,6 +20,7 @@ import {
 } from 'lucide-react';
 import { useInvitationAcceptance, useSharePermissions, useAccessLogs } from '../hooks/useSharing';
 import { SUCCESS_MESSAGES } from '../constants/sharingConstants';
+import { openDocumentInEditor } from '../utils/documentRouting';
 
 const ROLE_ICON = { editor: Pencil, commenter: MessageSquare, viewer: Eye };
 
@@ -124,7 +125,11 @@ const SharedContentPage = () => {
             {permissions?.canEdit && (
               <div className="mt-6 pt-6 border-t border-gray-100">
                 <button
-                  onClick={() => navigate(`/drafter/${shareData.object_id}`)}
+                  onClick={() => openDocumentInEditor(navigate, {
+                    object_id: shareData.object_id,
+                    document_mode: contentData?.document_mode,
+                    mode: contentData?.mode,
+                  })}
                   className="inline-flex items-center gap-2 px-4 py-2 text-sm font-medium text-white bg-blue-600 rounded-lg hover:bg-blue-700 transition"
                 >
                   <Pencil size={14} /> Edit Document <ArrowRight size={14} />

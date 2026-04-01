@@ -185,7 +185,6 @@ const Documents = () => {
     status: '',
     category: '',
     created_by_me: false,
-    assigned_to_me: false,
     shared_with_me: false,
     date_from: '',
     date_to: '',
@@ -273,7 +272,6 @@ const Documents = () => {
       status: '',
       category: '',
       created_by_me: false,
-      assigned_to_me: false,
       shared_with_me: false,
       date_from: '',
       date_to: '',
@@ -376,10 +374,7 @@ const Documents = () => {
     const badges = {
       draft: 'bg-gray-100 text-gray-700',
       under_review: 'bg-yellow-100 text-yellow-700',
-      analyzed: 'bg-blue-100 text-blue-700',
-      approved: 'bg-green-100 text-green-700',
-      finalized: 'bg-purple-100 text-purple-700',
-      executed: 'bg-indigo-100 text-indigo-700',
+      done: 'bg-emerald-100 text-emerald-700',
     };
     return badges[status] || 'bg-gray-100 text-gray-700';
   };
@@ -440,10 +435,9 @@ const Documents = () => {
         {/* ═══════ QUICK FILTER TABS — always visible ═══════ */}
         <div className="flex items-center gap-2 mb-4">
           {[
-            { key: 'all', label: 'All Documents', icon: '📄', active: !filters.created_by_me && !filters.assigned_to_me && !filters.shared_with_me, color: 'blue' },
-            { key: 'mine', label: 'Mine', icon: '✏️', active: filters.created_by_me && !filters.assigned_to_me && !filters.shared_with_me, color: 'purple' },
-            { key: 'assigned', label: 'Assigned to Me', icon: '📋', active: filters.assigned_to_me && !filters.created_by_me && !filters.shared_with_me, color: 'orange' },
-            { key: 'shared', label: 'Shared with Me', icon: '🔗', active: filters.shared_with_me && !filters.created_by_me && !filters.assigned_to_me, color: 'green' },
+            { key: 'all', label: 'All Documents', icon: '📄', active: !filters.created_by_me && !filters.shared_with_me, color: 'blue' },
+            { key: 'mine', label: 'Mine', icon: '✏️', active: filters.created_by_me && !filters.shared_with_me, color: 'purple' },
+            { key: 'shared', label: 'Shared with Me', icon: '🔗', active: filters.shared_with_me && !filters.created_by_me, color: 'green' },
           ].map((item) => {
             const colorMap = {
               blue: { active: 'bg-blue-600 text-white shadow-md ring-2 ring-blue-200', inactive: 'bg-white text-gray-700 border border-gray-200 hover:border-blue-300 hover:bg-blue-50' },
@@ -456,12 +450,11 @@ const Documents = () => {
                 key={item.key}
                 onClick={() => {
                   if (item.key === 'all') {
-                    setFilters(prev => ({ ...prev, created_by_me: false, assigned_to_me: false, shared_with_me: false }));
+                      setFilters(prev => ({ ...prev, created_by_me: false, shared_with_me: false }));
                   } else {
                     setFilters(prev => ({
                       ...prev,
                       created_by_me: item.key === 'mine',
-                      assigned_to_me: item.key === 'assigned',
                       shared_with_me: item.key === 'shared',
                     }));
                   }
@@ -522,10 +515,7 @@ const Documents = () => {
                   { value: '', label: 'All', activeBg: 'bg-gray-800', activeRing: 'ring-gray-300', inactiveBg: 'bg-gray-50', inactiveText: 'text-gray-700' },
                   { value: 'draft', label: '📝 Draft', activeBg: 'bg-yellow-500', activeRing: 'ring-yellow-200', inactiveBg: 'bg-yellow-50', inactiveText: 'text-yellow-700' },
                   { value: 'under_review', label: '👀 Review', activeBg: 'bg-blue-600', activeRing: 'ring-blue-200', inactiveBg: 'bg-blue-50', inactiveText: 'text-blue-700' },
-                  { value: 'analyzed', label: '🔍 Analyzed', activeBg: 'bg-indigo-600', activeRing: 'ring-indigo-200', inactiveBg: 'bg-indigo-50', inactiveText: 'text-indigo-700' },
-                  { value: 'approved', label: '✅ Approved', activeBg: 'bg-green-600', activeRing: 'ring-green-200', inactiveBg: 'bg-green-50', inactiveText: 'text-green-700' },
-                  { value: 'finalized', label: '🏁 Final', activeBg: 'bg-purple-600', activeRing: 'ring-purple-200', inactiveBg: 'bg-purple-50', inactiveText: 'text-purple-700' },
-                  { value: 'executed', label: '⚡ Done', activeBg: 'bg-emerald-600', activeRing: 'ring-emerald-200', inactiveBg: 'bg-emerald-50', inactiveText: 'text-emerald-700' },
+                  { value: 'done', label: '⚡ Done', activeBg: 'bg-emerald-600', activeRing: 'ring-emerald-200', inactiveBg: 'bg-emerald-50', inactiveText: 'text-emerald-700' },
                 ].map((s) => (
                   <button
                     key={s.value || 'all'}

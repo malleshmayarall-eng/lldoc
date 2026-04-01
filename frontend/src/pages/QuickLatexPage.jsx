@@ -36,6 +36,7 @@ import {
   Users,
   Filter,
   ChevronDown,
+  ChevronLeft,
   LayoutGrid,
   LayoutList,
   Database,
@@ -103,6 +104,24 @@ const AMOUNT_RANGES = [
   { value: '10k_100k', label: '$10,000 – $100,000' },
   { value: 'over_100k', label: '> $100,000' },
 ];
+
+const PAGE_SIZE = 12;
+
+/* ── Highlight matching text spans ── */
+const HighlightText = ({ text, query }) => {
+  if (!query || !text) return <>{text}</>;
+  const str = String(text);
+  const q = query.toLowerCase();
+  const idx = str.toLowerCase().indexOf(q);
+  if (idx === -1) return <>{str}</>;
+  return (
+    <>
+      {str.slice(0, idx)}
+      <mark className="bg-yellow-200 text-yellow-900 rounded-sm px-0.5">{str.slice(idx, idx + query.length)}</mark>
+      {str.slice(idx + query.length)}
+    </>
+  );
+};
 
 /* ─── Operator options for metadata filters ─── */
 const METADATA_OPERATORS = [
@@ -224,11 +243,23 @@ const Badge = ({ children, color = 'gray' }) => {
 /*  QuickLatexCard                                                     */
 /* ------------------------------------------------------------------ */
 
-const QuickLatexCard = ({ doc, onSelect, onDuplicate, onDelete }) => {
+const QuickLatexCard = ({ doc, onSelect, onDuplicate, onDelete, searchQuery = '' }) => {
   const [menuOpen, setMenuOpen] = useState(false);
 
   const placeholderCount = doc.placeholders?.length || 0;
   const preview = (doc.latex_block?.latex_code || '').slice(0, 120);
+  const meta = doc.document_metadata || doc.custom_metadata || {};
+
+  // Collect which metadata keys matched the search
+  const q = searchQuery.toLowerCase();
+  const matchedMetaKeys = useMemo(() => {
+    if (!q) return [];
+    const hits = [];
+    Object.entries(meta).forEach(([key, val]) => {
+      if (String(val).toLowerCase().includes(q)) hits.push(key);
+    });
+    return hits;
+  }, [q, meta]);
 
   return (
     <div
@@ -242,7 +273,9 @@ const QuickLatexCard = ({ doc, onSelect, onDuplicate, onDelete }) => {
             <div className="bg-indigo-50 p-1.5 rounded flex-shrink-0">
               <Code size={14} className="text-indigo-600" />
             </div>
-            <h3 className="text-sm font-semibold text-gray-900 truncate">{doc.title}</h3>
+            <h3 className="text-sm font-semibold text-gray-900 truncate">
+              <HighlightText text={doc.title} query={searchQuery} />
+            </h3>
           </div>
 
           {/* Action menu */}
@@ -281,14 +314,36 @@ const QuickLatexCard = ({ doc, onSelect, onDuplicate, onDelete }) => {
 
         {/* Meta badges */}
         <div className="flex flex-wrap gap-1.5 mb-3">
-          <Badge color="indigo">{doc.document_type || 'contract'}</Badge>
-          <Badge color={doc.status === 'draft' ? 'gray' : doc.status === 'finalized' ? 'green' : 'blue'}>
-            {doc.status}
+          <Badge color="indigo">
+            <HighlightText text={doc.document_type || 'contract'} query={searchQuery} />
           </Badge>
+          <Badge color={doc.status === 'draft' ? 'gray' : doc.status === 'finalized' ? 'green' : 'blue'}>
+            <HighlightText text={doc.status} query={searchQuery} />
+          </Badge>
+          {doc.category && (
+            <Badge color="purple">
+              <HighlightText text={doc.category} query={searchQuery} />
+            </Badge>
+          )}
           {placeholderCount > 0 && (
             <Badge color="purple">{placeholderCount} fields</Badge>
           )}
         </div>
+
+        {/* Matched metadata fields */}
+        {matchedMetaKeys.length > 0 && (
+          <div className="flex flex-wrap gap-1 mb-2">
+            {matchedMetaKeys.slice(0, 4).map((key) => (
+              <span key={key} className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] bg-yellow-50 border border-yellow-200 text-yellow-800">
+                <span className="font-medium text-yellow-600">{key}:</span>
+                <HighlightText text={String(meta[key]).slice(0, 40)} query={searchQuery} />
+              </span>
+            ))}
+            {matchedMetaKeys.length > 4 && (
+              <span className="text-[10px] text-yellow-600">+{matchedMetaKeys.length - 4} more</span>
+            )}
+          </div>
+        )}
 
         {/* Code preview */}
         {preview && (
@@ -299,7 +354,7 @@ const QuickLatexCard = ({ doc, onSelect, onDuplicate, onDelete }) => {
 
         {/* Footer */}
         <div className="flex items-center justify-between text-xs text-gray-400 pt-1 border-t border-gray-100">
-          <span>{doc.author || '—'}</span>
+          <span><HighlightText text={doc.author || '—'} query={searchQuery} /></span>
           <span>{new Date(doc.updated_at).toLocaleDateString()}</span>
         </div>
       </div>
@@ -881,6 +936,7 @@ const QuickLatexPage = () => {
   const [sortOrder, setSortOrder] = useState('desc');
   const [showAdvancedFilters, setShowAdvancedFilters] = useState(false);
   const [viewMode, setViewMode] = useState('grid'); // 'grid' | 'table'
+  const [currentPage, setCurrentPage] = useState(1);
 
   // Procurement-specific filters
   const [vendorFilter, setVendorFilter] = useState('');
@@ -922,8 +978,15 @@ const QuickLatexPage = () => {
     fetchDocuments();
   }, [fetchDocuments]);
 
+  // Track intentional back-navigation so the fetch effect doesn't re-select
+  const isGoingBackRef = useRef(false);
+
   useEffect(() => {
     if (!requestedDocumentId || selectedDocument?.id === requestedDocumentId) {
+      return;
+    }
+    // Skip re-fetching when the user just pressed Back
+    if (isGoingBackRef.current) {
       return;
     }
 
@@ -932,7 +995,9 @@ const QuickLatexPage = () => {
 
   useEffect(() => {
     if (!selectedDocument?.id) {
+      // Reset the back-navigation guard once the URL is clean
       if (!searchParams.get('document')) {
+        isGoingBackRef.current = false;
         return;
       }
 
@@ -950,6 +1015,12 @@ const QuickLatexPage = () => {
     nextParams.set('document', selectedDocument.id);
     setSearchParams(nextParams, { replace: true });
   }, [selectedDocument?.id, searchParams, setSearchParams]);
+
+  // Back handler: flag the intentional navigation, then clear selection
+  const handleBack = useCallback(() => {
+    isGoingBackRef.current = true;
+    clearSelection();
+  }, [clearSelection]);
 
   // ── Export Studio: fetch settings when a document is selected ──────
   useEffect(() => {
@@ -1194,17 +1265,28 @@ const QuickLatexPage = () => {
       });
     }
     
-    // Search
+    // Search — fuzzy across title, author, type, category, and ALL metadata values
     if (searchQuery) {
       const q = searchQuery.toLowerCase();
-      result = result.filter((d) =>
-        d.title?.toLowerCase().includes(q) ||
-        d.author?.toLowerCase().includes(q) ||
-        d.document_type?.toLowerCase().includes(q) ||
-        d.category?.toLowerCase().includes(q) ||
-        d.document_metadata?.vendor?.toLowerCase().includes(q) ||
-        d.document_metadata?.po_number?.toLowerCase().includes(q)
-      );
+      result = result.filter((d) => {
+        // Core fields
+        if (d.title?.toLowerCase().includes(q)) return true;
+        if (d.author?.toLowerCase().includes(q)) return true;
+        if (d.document_type?.toLowerCase().includes(q)) return true;
+        if (d.category?.toLowerCase().includes(q)) return true;
+        if (d.status?.toLowerCase().includes(q)) return true;
+        // All document_metadata values
+        const docMeta = d.document_metadata || {};
+        for (const val of Object.values(docMeta)) {
+          if (String(val).toLowerCase().includes(q)) return true;
+        }
+        // All custom_metadata values
+        const custMeta = d.custom_metadata || {};
+        for (const val of Object.values(custMeta)) {
+          if (String(val).toLowerCase().includes(q)) return true;
+        }
+        return false;
+      });
     }
 
     // Metadata filters (key-operator-value)
@@ -1241,7 +1323,37 @@ const QuickLatexPage = () => {
     
     return result;
   }, [documents, typeFilter, statusFilter, dateFrom, dateTo, searchQuery, sortBy, sortOrder, vendorFilter, departmentFilter, procCatFilter, amountRangeFilter, metadataFilters]);
-  
+
+  // ── Pagination ────────────────────────────────────────────────────────
+  const totalPages = Math.max(1, Math.ceil(filteredDocs.length / PAGE_SIZE));
+
+  // Reset to page 1 when filters / search change
+  useEffect(() => {
+    setCurrentPage(1);
+  }, [searchQuery, typeFilter, statusFilter, dateFrom, dateTo, sortBy, sortOrder, vendorFilter, departmentFilter, procCatFilter, amountRangeFilter, metadataFilters]);
+
+  const paginatedDocs = useMemo(() => {
+    const start = (currentPage - 1) * PAGE_SIZE;
+    return filteredDocs.slice(start, start + PAGE_SIZE);
+  }, [filteredDocs, currentPage]);
+
+  // Build page number buttons (show max 7 with ellipsis)
+  const pageNumbers = useMemo(() => {
+    const pages = [];
+    if (totalPages <= 7) {
+      for (let i = 1; i <= totalPages; i++) pages.push(i);
+    } else {
+      pages.push(1);
+      if (currentPage > 3) pages.push('…');
+      const start = Math.max(2, currentPage - 1);
+      const end = Math.min(totalPages - 1, currentPage + 1);
+      for (let i = start; i <= end; i++) pages.push(i);
+      if (currentPage < totalPages - 2) pages.push('…');
+      pages.push(totalPages);
+    }
+    return pages;
+  }, [totalPages, currentPage]);
+
   const activeMetaCount = metadataFilters.filter((mf) => mf.key && mf.value).length;
   const activeFilterCount = [typeFilter, statusFilter, dateFrom, dateTo, vendorFilter, departmentFilter, procCatFilter, amountRangeFilter].filter(Boolean).length + activeMetaCount;
 
@@ -1288,7 +1400,7 @@ const QuickLatexPage = () => {
           chatMessages={getChatMessages(selectedDocument.id)}
           resolvedImages={resolvedImages}
           onUpdate={updateDocument}
-          onDelete={(id) => { deleteDocument(id); clearSelection(); }}
+          onDelete={(id) => { deleteDocument(id); handleBack(); }}
           onDuplicate={duplicateDocument}
           onBulkDuplicate={bulkDuplicate}
           onAIGenerate={aiGenerate}
@@ -1301,7 +1413,7 @@ const QuickLatexPage = () => {
           onClearChat={deleteChatHistory}
           onResolveImages={resolveImages}
           onMapImage={mapImage}
-          onBack={clearSelection}
+          onBack={handleBack}
           // Export Studio
           exportDraft={exportSettingsDraft}
           exportLoading={exportSettingsLoading}
@@ -1378,7 +1490,7 @@ const QuickLatexPage = () => {
             <input
               value={searchQuery}
               onChange={(e) => setSearch(e.target.value)}
-              placeholder="Search by title, author, type..."
+              placeholder="Search by title, author, type, metadata..."
               className="w-full pl-9 pr-3 py-2 border border-gray-200 rounded-md text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
             />
             {searchQuery && (
@@ -1750,7 +1862,7 @@ const QuickLatexPage = () => {
                 </tr>
               </thead>
               <tbody className="divide-y divide-gray-100">
-                {filteredDocs.map((doc) => {
+                {paginatedDocs.map((doc) => {
                   const meta = doc.document_metadata || doc.custom_metadata || {};
                   return (
                   <tr
@@ -1763,16 +1875,20 @@ const QuickLatexPage = () => {
                         <div className="bg-indigo-50 p-1 rounded flex-shrink-0">
                           <Code size={12} className="text-indigo-600" />
                         </div>
-                        <span className="text-sm font-medium text-gray-900 truncate max-w-[280px]">{doc.title}</span>
+                        <span className="text-sm font-medium text-gray-900 truncate max-w-[280px]">
+                          <HighlightText text={doc.title} query={searchQuery} />
+                        </span>
                       </div>
                     </td>
                     <td className="px-4 py-3">
                       <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-indigo-100 text-indigo-700">
-                        {doc.document_type || 'contract'}
+                        <HighlightText text={doc.document_type || 'contract'} query={searchQuery} />
                       </span>
                     </td>
                     {isProcurement && (
-                      <td className="px-4 py-3 text-sm text-gray-600 truncate max-w-[140px]">{meta.vendor || '—'}</td>
+                      <td className="px-4 py-3 text-sm text-gray-600 truncate max-w-[140px]">
+                        <HighlightText text={meta.vendor || '—'} query={searchQuery} />
+                      </td>
                     )}
                     {isProcurement && (
                       <td className="px-4 py-3 text-sm text-gray-600">
@@ -1789,13 +1905,17 @@ const QuickLatexPage = () => {
                         doc.status === 'expired' ? 'bg-red-50 text-red-600' :
                         'bg-blue-100 text-blue-700'
                       }`}>
-                        {(doc.status || 'draft').replace(/_/g, ' ')}
+                        <HighlightText text={(doc.status || 'draft').replace(/_/g, ' ')} query={searchQuery} />
                       </span>
                     </td>
                     {isProcurement && (
-                      <td className="px-4 py-3 text-sm text-gray-500 capitalize">{meta.department || '—'}</td>
+                      <td className="px-4 py-3 text-sm text-gray-500 capitalize">
+                        <HighlightText text={meta.department || '—'} query={searchQuery} />
+                      </td>
                     )}
-                    <td className="px-4 py-3 text-sm text-gray-500">{doc.author || '—'}</td>
+                    <td className="px-4 py-3 text-sm text-gray-500">
+                      <HighlightText text={doc.author || '—'} query={searchQuery} />
+                    </td>
                     <td className="px-4 py-3 text-sm text-gray-400">{new Date(doc.updated_at).toLocaleDateString()}</td>
                     <td className="px-4 py-3 text-right">
                       <div className="flex items-center justify-end gap-1">
@@ -1824,15 +1944,60 @@ const QuickLatexPage = () => {
         ) : (
           /* ── Grid view ── */
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
-            {filteredDocs.map((doc) => (
+            {paginatedDocs.map((doc) => (
               <QuickLatexCard
                 key={doc.id}
                 doc={doc}
                 onSelect={handleSelectCard}
                 onDuplicate={handleDuplicate}
                 onDelete={handleDelete}
+                searchQuery={searchQuery}
               />
             ))}
+          </div>
+        )}
+
+        {/* ── Pagination controls ── */}
+        {totalPages > 1 && (
+          <div className="flex items-center justify-between pt-6 pb-2">
+            <p className="text-xs text-gray-400">
+              Showing {(currentPage - 1) * PAGE_SIZE + 1}–{Math.min(currentPage * PAGE_SIZE, filteredDocs.length)} of {filteredDocs.length} document{filteredDocs.length !== 1 ? 's' : ''}
+            </p>
+            <div className="flex items-center gap-1">
+              <button
+                onClick={() => setCurrentPage((p) => Math.max(1, p - 1))}
+                disabled={currentPage === 1}
+                className="p-1.5 rounded-md border border-gray-200 text-gray-500 hover:bg-gray-50 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+                aria-label="Previous page"
+              >
+                <ChevronLeft size={16} />
+              </button>
+              {pageNumbers.map((pg, i) =>
+                pg === '…' ? (
+                  <span key={`ellipsis-${i}`} className="px-2 text-gray-400 text-sm select-none">…</span>
+                ) : (
+                  <button
+                    key={pg}
+                    onClick={() => setCurrentPage(pg)}
+                    className={`min-w-[32px] h-8 rounded-md text-sm font-medium transition-colors ${
+                      pg === currentPage
+                        ? 'bg-blue-600 text-white shadow-sm'
+                        : 'text-gray-600 hover:bg-gray-100'
+                    }`}
+                  >
+                    {pg}
+                  </button>
+                )
+              )}
+              <button
+                onClick={() => setCurrentPage((p) => Math.min(totalPages, p + 1))}
+                disabled={currentPage === totalPages}
+                className="p-1.5 rounded-md border border-gray-200 text-gray-500 hover:bg-gray-50 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+                aria-label="Next page"
+              >
+                <ChevronRight size={16} />
+              </button>
+            </div>
           </div>
         )}
       </div>

@@ -690,6 +690,7 @@ class DocumentSerializer(serializers.ModelSerializer):
         model = Document
         fields = [
             'id', 'title', 'raw_text', 'current_text',
+            'document_mode',
             'is_latex_code', 'latex_code',
             'document_type', 'category', 'jurisdiction', 'governing_law',
             'author', 'parties', 'signatories',
@@ -897,7 +898,7 @@ class FullDocumentEditSerializer(serializers.Serializer):
     )
     jurisdiction = serializers.CharField(required=False, allow_blank=True, allow_null=True)
     status = serializers.ChoiceField(
-        choices=['draft', 'under_review', 'analyzed', 'approved', 'finalized', 'done'],
+        choices=['draft', 'under_review', 'done'],
         required=False
     )
     
@@ -941,6 +942,9 @@ class DocumentImageSerializer(serializers.ModelSerializer):
     thumbnail_url = serializers.SerializerMethodField()
     type_display = serializers.SerializerMethodField()
     uploaded_by_username = serializers.SerializerMethodField()
+    scope_display = serializers.SerializerMethodField()
+    team_name = serializers.SerializerMethodField()
+    organization_name = serializers.SerializerMethodField()
     
     class Meta:
         model = DocumentImage
@@ -948,16 +952,18 @@ class DocumentImageSerializer(serializers.ModelSerializer):
             'id', 'name', 'image_type', 'type_display', 'caption', 'description',
             'image', 'thumbnail', 'url', 'thumbnail_url',
             'width', 'height', 'file_size', 'format', 'mime_type',
-            'document', 'page_number', 'position_x', 'position_y',
-            'extracted_text', 'ocr_confidence',
+            'document',
             'uploaded_by', 'uploaded_by_username', 'uploaded_at', 'updated_at',
-            'is_public', 'usage_count', 'last_used_at', 'tags', 'metadata'
+            'is_public', 'usage_count', 'last_used_at', 'tags', 'metadata',
+            'scope', 'scope_display', 'organization', 'organization_name',
+            'team', 'team_name',
         ]
         read_only_fields = [
             'id', 'url', 'thumbnail_url', 'type_display',
             'width', 'height', 'file_size', 'format', 'mime_type',
             'uploaded_at', 'updated_at', 'usage_count', 'last_used_at',
-            'uploaded_by', 'uploaded_by_username'
+            'uploaded_by', 'uploaded_by_username',
+            'scope_display', 'organization_name', 'team_name',
         ]
     
     def get_url(self, obj):
@@ -971,6 +977,15 @@ class DocumentImageSerializer(serializers.ModelSerializer):
     
     def get_uploaded_by_username(self, obj):
         return obj.uploaded_by.username if obj.uploaded_by else None
+    
+    def get_scope_display(self, obj):
+        return obj.get_scope_display() if hasattr(obj, 'get_scope_display') else obj.scope
+    
+    def get_team_name(self, obj):
+        return obj.team.name if obj.team else None
+    
+    def get_organization_name(self, obj):
+        return obj.organization.name if obj.organization else None
     
     def create(self, validated_data):
         """Auto-set uploaded_by from request context."""
@@ -987,7 +1002,7 @@ class ImageUploadSerializer(serializers.ModelSerializer):
         model = DocumentImage
         fields = [
             'name', 'image_type', 'image', 'caption', 'description',
-            'document', 'is_public', 'tags'
+            'document', 'is_public', 'tags', 'scope', 'team',
         ]
     
     def validate_image(self, value):
@@ -1251,7 +1266,8 @@ class CompleteDocumentSerializer(serializers.ModelSerializer):
         fields = [
             # Core fields
             'id', 'title', 'raw_text', 'author', 'version', 'document_type',
-            
+            'document_mode',
+
             # Nested data
             'sections', 'issues', 'latex_codes',
             
@@ -2429,6 +2445,8 @@ class DocumentFileSerializer(serializers.ModelSerializer):
     file_size_display = serializers.SerializerMethodField()
     can_access = serializers.SerializerMethodField()
     uploaded_by_username = serializers.SerializerMethodField()
+    organization_name = serializers.SerializerMethodField()
+    team_name = serializers.SerializerMethodField()
     
     class Meta:
         model = DocumentFile
@@ -2436,6 +2454,7 @@ class DocumentFileSerializer(serializers.ModelSerializer):
             'id', 'file', 'name', 'description', 'file_type', 'category',
             'original_filename', 'file_size', 'mime_type', 'file_hash',
             'access_level', 'uploaded_by', 'uploaded_at', 'updated_at',
+            'organization', 'organization_name', 'team', 'team_name',
             'download_count', 'usage_count', 'last_used_at', 'last_downloaded_at',
             'version', 'is_latest_version', 'previous_version',
             'tags', 'metadata', 'is_active', 'is_confidential',
@@ -2448,7 +2467,8 @@ class DocumentFileSerializer(serializers.ModelSerializer):
             'id', 'uploaded_at', 'updated_at', 'file_hash', 'original_filename',
             'file_size', 'mime_type', 'download_count', 'usage_count',
             'last_used_at', 'last_downloaded_at', 'file_url', 'file_extension',
-            'file_size_display', 'can_access', 'uploaded_by_username'
+            'file_size_display', 'can_access', 'uploaded_by_username',
+            'organization_name', 'team_name'
         ]
     
     def get_file_url(self, obj):
@@ -2479,6 +2499,18 @@ class DocumentFileSerializer(serializers.ModelSerializer):
         """Get username of uploader."""
         if obj.uploaded_by:
             return obj.uploaded_by.username
+        return None
+
+    def get_organization_name(self, obj):
+        """Get organization name."""
+        if obj.organization:
+            return obj.organization.name
+        return None
+
+    def get_team_name(self, obj):
+        """Get team name."""
+        if obj.team:
+            return obj.team.name
         return None
 
 
@@ -2553,6 +2585,11 @@ class DocumentFileUploadSerializer(serializers.Serializer):
         required=False,
         help_text="Mark as template for reuse"
     )
+    team = serializers.UUIDField(
+        required=False,
+        allow_null=True,
+        help_text="Team UUID — required when access_level='team'"
+    )
     
     def create(self, validated_data):
         """Create DocumentFile with uploaded file."""
@@ -2599,6 +2636,17 @@ class DocumentFileUploadSerializer(serializers.Serializer):
         request = self.context.get('request')
         if request and hasattr(request, 'user'):
             validated_data['uploaded_by'] = request.user
+
+            # Auto-set organization from user profile
+            try:
+                validated_data.setdefault('organization', request.user.profile.organization)
+            except Exception:
+                pass
+
+        # Convert team UUID to FK
+        team_uuid = validated_data.pop('team', None)
+        if team_uuid:
+            validated_data['team_id'] = team_uuid
         
         return DocumentFile.objects.create(**validated_data)
 

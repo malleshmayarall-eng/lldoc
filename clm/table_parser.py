@@ -445,7 +445,7 @@ Rules:
 - Numbers should be numbers (not strings) when clearly numeric
 - Return ONLY the JSON object, no markdown, no explanation"""
 
-    model = genai.GenerativeModel('gemini-2.0-flash')
+    model = genai.GenerativeModel('gemini-2.5-flash')
 
     response = model.generate_content(
         [
@@ -495,7 +495,7 @@ Rules:
         'col_count': len(headers),
         'original_headers': [str(h).strip() for h in raw_headers],
         'source': 'ai_vision',
-        'ai_model': 'gemini-2.0-flash',
+        'ai_model': 'gemini-2.5-flash',
     }
 
 
@@ -569,7 +569,7 @@ def extract_tables_from_pdf_ai(file_bytes: bytes,
         'col_count': len(merged_headers),
         'original_headers': original_headers,
         'source': 'ai_vision_multipage',
-        'ai_model': 'gemini-2.0-flash',
+        'ai_model': 'gemini-2.5-flash',
         'pages_processed': page_count,
     }
 

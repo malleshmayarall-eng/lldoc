@@ -89,6 +89,9 @@ class QuickLatexDocumentSerializer(serializers.ModelSerializer):
     placeholders = serializers.SerializerMethodField()
     image_placeholders = serializers.SerializerMethodField()
     image_slots = serializers.SerializerMethodField()
+    # Creator info (expose the user id so clients can link to profiles)
+    created_by_id = serializers.SerializerMethodField()
+    created_by_username = serializers.SerializerMethodField()
 
     class Meta:
         model = Document
@@ -115,6 +118,8 @@ class QuickLatexDocumentSerializer(serializers.ModelSerializer):
             'custom_metadata',
             'created_at',
             'updated_at',
+            'created_by_id',
+            'created_by_username',
             # Inline extras
             'section_id',
             'latex_block',
@@ -125,6 +130,7 @@ class QuickLatexDocumentSerializer(serializers.ModelSerializer):
         read_only_fields = [
             'id', 'document_mode', 'is_latex_code',
             'created_at', 'updated_at',
+            'created_by_id', 'created_by_username',
             'section_id', 'latex_block', 'placeholders', 'image_placeholders',
             'image_slots',
         ]
@@ -238,6 +244,22 @@ class QuickLatexDocumentSerializer(serializers.ModelSerializer):
             })
         return result
 
+    # ── Created-by helpers ─────────────────────────────────────────────────
+    def get_created_by_id(self, obj):
+        """Return the UUID string of the user who created this document, or None."""
+        if getattr(obj, 'created_by', None):
+            try:
+                return str(obj.created_by.id)
+            except Exception:
+                return None
+        return None
+
+    def get_created_by_username(self, obj):
+        """Return the username of the creator (for convenience)."""
+        if getattr(obj, 'created_by', None):
+            return obj.created_by.username
+        return None
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Update (PATCH)
@@ -315,6 +337,21 @@ class QuickLatexAIGenerateSerializer(serializers.Serializer):
         help_text=(
             "'generate' (default) — create new code from scratch or extend existing. "
             "'edit' — modify existing code based on the prompt instructions."
+        ),
+    )
+    suggestions = serializers.CharField(
+        required=False, allow_blank=True, default='',
+        help_text=(
+            "Optional user hints, corrections, or additional instructions for the AI. "
+            "These are appended to the prompt as extra guidance."
+        ),
+    )
+    max_retries = serializers.IntegerField(
+        required=False, default=5, min_value=1, max_value=10,
+        help_text=(
+            "Maximum compile-fix iterations. The AI generates code, compiles it, "
+            "and if it fails, feeds errors back to the AI for correction — up to "
+            "this many times. Defaults to 5, capped at 10."
         ),
     )
 

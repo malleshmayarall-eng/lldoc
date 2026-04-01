@@ -11,7 +11,7 @@ import {
   Calendar,
   Tag
 } from 'lucide-react';
-import { imageService } from '../services/imageService';
+import attachmentService from '../services/attachmentService';
 import ImageUploadModal from './ImageUploadModal';
 import './ImageLibraryBrowser.css';
 
@@ -41,7 +41,7 @@ const ImageLibraryBrowser = ({
   const loadImages = async () => {
     try {
       setLoading(true);
-      const data = await imageService.getImages();
+      const data = await attachmentService.list({ file_kind: 'image' });
       // Handle different response formats
       let imageArray = [];
       if (Array.isArray(data)) {
@@ -65,7 +65,7 @@ const ImageLibraryBrowser = ({
   const handleImageUploaded = (uploadedImage) => {
     console.log('📸 Image uploaded, adding to library:', uploadedImage);
     
-    // The uploadedImage from imageService.uploadImage should already have fixed URLs
+    // The uploadedImage from attachmentService.upload should already have fixed URLs
     // But we'll add it to the beginning of the list
     setImages(prev => [uploadedImage, ...prev]);
     setUploadModalOpen(false);

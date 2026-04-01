@@ -14,7 +14,7 @@ const api = axios.create({
 
 // ── Workflows ────────────────────────────────────────────────────────────
 export const workflowApi = {
-  list:    ()          => api.get('/workflows/'),
+  list:    (params)    => api.get('/workflows/', { params }),
   get:     (id)        => api.get(`/workflows/${id}/`),
   create:  (data)      => api.post('/workflows/', data),
   update:  (id, data)  => api.patch(`/workflows/${id}/`, data),
@@ -84,6 +84,9 @@ export const workflowApi = {
   // Live mode toggle
   getLive:  (id) => api.get(`/workflows/${id}/live/`),
   setLive:  (id, data) => api.patch(`/workflows/${id}/live/`, data),
+  goLive:   (id, data = {}) => api.post(`/workflows/${id}/go-live/`, data),
+  pause:    (id) => api.post(`/workflows/${id}/pause/`),
+  compile:  (id) => api.post(`/workflows/${id}/compile/`),
 
   // Smart execution: nodes config change detection
   nodesStatus:      (id) => api.get(`/workflows/${id}/nodes-status/`),
@@ -116,6 +119,12 @@ export const workflowApi = {
   actionExecution:    (wfId, execId) => api.get(`/workflows/${wfId}/action-execution/${execId}/`),
   actionRetry:        (wfId, data) => api.post(`/workflows/${wfId}/action-retry/`, data),
   actionRetryAll:     (wfId, execId) => api.post(`/workflows/${wfId}/action-retry-all/${execId}/`),
+
+  // Input plugins (processing + integration)
+  inputPlugins:              (type) => api.get('/workflows/input-plugins/', { params: type ? { type } : {} }),
+  inputPluginIntegrations:   () => api.get('/workflows/input-plugins/integrations/'),
+  integrationSettings:       () => api.get('/workflows/input-plugins/integration-settings/'),
+  updateIntegrationSettings: (plugins) => api.patch('/workflows/input-plugins/integration-settings/', { plugins }),
 
   // Document Creator (doc_create) nodes
   docCreateResults:   (wfId, params) => api.get(`/workflows/${wfId}/doc-create-results/`, { params }),
@@ -189,6 +198,27 @@ export const workflowApi = {
   folderUpload:       (wfId, nodeId, data = {}) => api.post(`/workflows/${wfId}/folder-upload/${nodeId}/`, data),
   dmsImport:          (wfId, nodeId, data = {}) => api.post(`/workflows/${wfId}/dms-import/${nodeId}/`, data),
   sheetsImport:       (wfId, nodeId, data = {}) => api.post(`/workflows/${wfId}/sheets-import/${nodeId}/`, data),
+
+  // ── Workflow Settings & Event Triggers ───────────────────────
+  getSettings:         (id) => api.get(`/workflows/${id}/workflow-settings/`),
+  updateSettings:      (id, data) => api.patch(`/workflows/${id}/workflow-settings/`, data),
+
+  // Event triggers CRUD
+  eventTriggers:       (id) => api.get(`/workflows/${id}/event-triggers/`),
+  createEventTrigger:  (id, data) => api.post(`/workflows/${id}/event-triggers/`, data),
+  updateEventTrigger:  (id, triggerId, data) => api.patch(`/workflows/${id}/event-triggers/${triggerId}/`),
+  deleteEventTrigger:  (id, triggerId) => api.delete(`/workflows/${id}/event-triggers/${triggerId}/`),
+
+  // Trigger types (schemas for frontend forms)
+  triggerTypes:        () => api.get('/workflows/trigger-types/'),
+
+  // ── Live Dashboard / SSE endpoints ─────────────────────────
+  liveDashboard:     (id) => api.get(`/workflows/${id}/live-dashboard/`),
+  liveMetrics:       (id, params) => api.get(`/workflows/${id}/live-metrics/`, { params }),
+  executionTimeline: (id, params) => api.get(`/workflows/${id}/execution-timeline/`, { params }),
+  nodePerformance:   (id, params) => api.get(`/workflows/${id}/node-performance/`, { params }),
+  orgDashboard:      () => api.get('/workflows/org-dashboard/'),
+  liveWorkflows:     () => api.get('/workflows/live-workflows/'),
 };
 // ── Nodes ────────────────────────────────────────────────────────────────
 export const nodeApi = {
@@ -255,5 +285,30 @@ export function triggerBlobDownload(response, fallbackName = 'download') {
   a.remove();
   window.URL.revokeObjectURL(url);
 }
+
+
+// ─── System Debug API ──────────────────────────────────────────────
+// Endpoints at /api/clm/debug/*
+// ────────────────────────────────────────────────────────────────────
+
+export const debugApi = {
+  /** Full system snapshot (Celery + Redis + queues + workflows + executions) */
+  systemStatus:      ()                 => api.get('/debug/system-status/'),
+  /** Celery worker health */
+  celeryHealth:      ()                 => api.get('/debug/celery-health/'),
+  /** Redis connection + memory + key counts */
+  redisHealth:       ()                 => api.get('/debug/redis-health/'),
+  /** Active, reserved, scheduled tasks across workers */
+  taskQueue:         ()                 => api.get('/debug/task-queue/'),
+  /** All live workflows with execution state */
+  liveWorkflows:     ()                 => api.get('/debug/live-workflows/'),
+  /** Recent executions (filterable by status, limit) */
+  recentExecutions:  (params = {})      => api.get('/debug/recent-executions/', { params }),
+  /** Celery Beat periodic schedule */
+  beatSchedule:      ()                 => api.get('/debug/beat-schedule/'),
+  /** 24h task result history with aggregate stats */
+  taskHistory:       (params = {})      => api.get('/debug/task-history/', { params }),
+};
+
 
 export default api;

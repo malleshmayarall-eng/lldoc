@@ -4,6 +4,7 @@ import { userService } from '../services/userService';
 import {
   Settings as SettingsIcon, Bell, Lock, Globe, Save, FileText, Eye,
   Sparkles, Clock, CheckCircle, AlertCircle, Building, ToggleLeft,
+  KeyRound, Plus, Trash2, Pencil, X,
 } from 'lucide-react';
 import AIPresetManager from '../components/AIPresetManager';
 import DomainSettings from '../components/DomainSettings';
@@ -129,6 +130,326 @@ const DEFAULT_DASHBOARD_AI_SETTINGS = {
   enabled: true,
   provider: 'ollama',
   model: 'llama3.2',
+};
+
+// ─── Credential Type Definitions ──────────────────────────────────────────────
+
+const CREDENTIAL_TYPES = [
+  { value: 'email_inbox',  label: 'Email / IMAP',        icon: '📧',
+    fields: [
+      { key: 'email_host', label: 'IMAP Host', placeholder: 'imap.gmail.com' },
+      { key: 'email_user', label: 'Email', placeholder: 'contracts@company.com' },
+      { key: 'email_password', label: 'App Password', placeholder: '16-char app password', secret: true },
+    ]},
+  { value: 'google_drive', label: 'Google Drive',        icon: '📁',
+    fields: [
+      { key: 'google_access', label: 'Access Mode', type: 'select', options: [
+        { value: 'public', label: 'Public (API Key)' }, { value: 'private', label: 'Private (Service Account)' },
+      ]},
+      { key: 'google_api_key', label: 'API Key', placeholder: 'AIzaSy…', secret: true },
+      { key: 'google_credentials_json', label: 'Service Account JSON', placeholder: 'Paste JSON…', secret: true, multiline: true },
+    ]},
+  { value: 'dropbox',      label: 'Dropbox',             icon: '📦',
+    fields: [
+      { key: 'dropbox_access_token', label: 'Access Token', placeholder: 'OAuth2 access token', secret: true },
+    ]},
+  { value: 'onedrive',     label: 'OneDrive / SharePoint', icon: '☁️',
+    fields: [
+      { key: 'onedrive_access_token', label: 'Access Token', placeholder: 'Microsoft Graph Bearer token', secret: true },
+      { key: 'onedrive_drive_id', label: 'Drive ID (optional)', placeholder: 'For shared/team drives' },
+    ]},
+  { value: 's3',           label: 'AWS S3',              icon: '🪣',
+    fields: [
+      { key: 's3_access_key', label: 'Access Key', placeholder: 'AKIA…' },
+      { key: 's3_secret_key', label: 'Secret Key', placeholder: '••••••', secret: true },
+      { key: 's3_region', label: 'Region', placeholder: 'us-east-1' },
+    ]},
+  { value: 'ftp',          label: 'FTP / SFTP',          icon: '🖥️',
+    fields: [
+      { key: 'ftp_protocol', label: 'Protocol', type: 'select', options: [
+        { value: 'ftp', label: 'FTP' }, { value: 'sftp', label: 'SFTP' },
+      ]},
+      { key: 'ftp_host', label: 'Host', placeholder: 'ftp.company.com' },
+      { key: 'ftp_port', label: 'Port', placeholder: '21' },
+      { key: 'ftp_user', label: 'Username', placeholder: 'user' },
+      { key: 'ftp_password', label: 'Password', placeholder: '••••', secret: true },
+    ]},
+];
+
+// ─── Input Node Credential Manager ───────────────────────────────────────────
+
+const InputNodeCredentialManager = ({ showToast }) => {
+  const [credentials, setCredentials] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [editingId, setEditingId] = useState(null);     // null=list, 'new'=add, uuid=edit
+  const [form, setForm] = useState({ label: '', credential_type: 'email_inbox', credentials: {} });
+  const [saving, setSaving] = useState(false);
+
+  const load = async () => {
+    try {
+      const data = await userService.getMyInputCredentials();
+      setCredentials(data);
+    } catch { /* empty */ }
+    setLoading(false);
+  };
+
+  useEffect(() => { load(); }, []);
+
+  const openAdd = () => {
+    setForm({ label: '', credential_type: 'email_inbox', credentials: {} });
+    setEditingId('new');
+  };
+
+  const openEdit = (cred) => {
+    setForm({ label: cred.label, credential_type: cred.credential_type, credentials: { ...cred.credentials } });
+    setEditingId(cred.id);
+  };
+
+  const handleDelete = async (id) => {
+    if (!confirm('Delete this saved credential?')) return;
+    try {
+      await userService.deleteInputCredential(id);
+      setCredentials(prev => prev.filter(c => c.id !== id));
+      showToast?.('Credential deleted');
+    } catch {
+      showToast?.('Failed to delete', 'error');
+    }
+  };
+
+  const handleSave = async () => {
+    if (!form.label.trim()) { showToast?.('Please enter a label', 'error'); return; }
+    setSaving(true);
+    try {
+      // Strip out masked values (••••••) — don't overwrite with mask
+      const cleanCreds = {};
+      Object.entries(form.credentials).forEach(([k, v]) => {
+        if (v && v !== '••••••') cleanCreds[k] = v;
+      });
+      const payload = { label: form.label, credential_type: form.credential_type, credentials: cleanCreds };
+
+      if (editingId === 'new') {
+        const created = await userService.saveInputCredential(payload);
+        setCredentials(prev => [...prev, created]);
+        showToast?.('Credential saved');
+      } else {
+        const updated = await userService.updateInputCredential(editingId, payload);
+        setCredentials(prev => prev.map(c => c.id === editingId ? updated : c));
+        showToast?.('Credential updated');
+      }
+      setEditingId(null);
+    } catch (e) {
+      showToast?.(e.response?.data?.error || e.response?.data?.credentials?.[0] || 'Failed to save', 'error');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const typeDef = CREDENTIAL_TYPES.find(t => t.value === form.credential_type) || CREDENTIAL_TYPES[0];
+
+  if (loading) return null;
+
+  return (
+    <SectionCard
+      title="Input Node Credentials"
+      icon={KeyRound}
+      description="Save credentials for email, cloud storage and other input sources. These can be reused across all CLM workflows instead of entering secrets per node."
+    >
+      {editingId === null ? (
+        /* ── List view ── */
+        <>
+          {credentials.length === 0 ? (
+            <p className="text-sm text-gray-400 italic py-3">No saved credentials yet.</p>
+          ) : (
+            <div className="divide-y divide-gray-100">
+              {credentials.map(cred => {
+                const td = CREDENTIAL_TYPES.find(t => t.value === cred.credential_type);
+                return (
+                  <div key={cred.id} className="flex items-center justify-between py-3">
+                    <div className="flex items-center gap-3 min-w-0">
+                      <span className="text-lg">{td?.icon || '🔌'}</span>
+                      <div className="min-w-0">
+                        <p className="text-sm font-medium text-gray-900 truncate">{cred.label}</p>
+                        <p className="text-xs text-gray-400">{td?.label || cred.credential_type}</p>
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-1 shrink-0">
+                      <button onClick={() => openEdit(cred)}
+                        className="p-1.5 text-gray-400 hover:text-blue-600 hover:bg-blue-50 rounded-lg transition-colors"
+                        title="Edit"><Pencil className="h-3.5 w-3.5" /></button>
+                      <button onClick={() => handleDelete(cred.id)}
+                        className="p-1.5 text-gray-400 hover:text-red-500 hover:bg-red-50 rounded-lg transition-colors"
+                        title="Delete"><Trash2 className="h-3.5 w-3.5" /></button>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+          <div className="flex justify-end mt-4">
+            <button onClick={openAdd}
+              className="bg-blue-600 text-white px-4 py-2 rounded-lg hover:bg-blue-700 flex items-center gap-2 text-sm font-medium transition-colors">
+              <Plus className="h-4 w-4" /> Add Credential
+            </button>
+          </div>
+        </>
+      ) : (
+        /* ── Add / Edit form ── */
+        <div className="space-y-4">
+          <div className="flex items-center justify-between">
+            <h3 className="text-sm font-semibold text-gray-800">{editingId === 'new' ? 'Add Credential' : 'Edit Credential'}</h3>
+            <button onClick={() => setEditingId(null)} className="p-1 text-gray-400 hover:text-gray-600 rounded-lg transition-colors">
+              <X className="h-4 w-4" />
+            </button>
+          </div>
+
+          {/* Label */}
+          <div>
+            <label className="block text-xs font-medium text-gray-600 mb-1">Label</label>
+            <input value={form.label} onChange={e => setForm(f => ({ ...f, label: e.target.value }))}
+              placeholder="e.g. Work Gmail, Contracts S3"
+              className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" />
+          </div>
+
+          {/* Credential type selector */}
+          {editingId === 'new' && (
+            <div>
+              <label className="block text-xs font-medium text-gray-600 mb-1">Type</label>
+              <select value={form.credential_type}
+                onChange={e => setForm(f => ({ ...f, credential_type: e.target.value, credentials: {} }))}
+                className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+                {CREDENTIAL_TYPES.map(t => (
+                  <option key={t.value} value={t.value}>{t.icon} {t.label}</option>
+                ))}
+              </select>
+            </div>
+          )}
+
+          {/* Dynamic fields */}
+          <div className="space-y-3 bg-gray-50 rounded-lg p-4 border border-gray-100">
+            <p className="text-xs font-semibold text-gray-500 uppercase tracking-wider">{typeDef.icon} {typeDef.label} Fields</p>
+            {typeDef.fields.map(field => (
+              <div key={field.key}>
+                <label className="block text-xs font-medium text-gray-600 mb-1">{field.label}</label>
+                {field.type === 'select' ? (
+                  <select value={form.credentials[field.key] || field.options?.[0]?.value || ''}
+                    onChange={e => setForm(f => ({ ...f, credentials: { ...f.credentials, [field.key]: e.target.value } }))}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+                    {field.options.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+                  </select>
+                ) : field.multiline ? (
+                  <textarea value={form.credentials[field.key] || ''} rows={3}
+                    onChange={e => setForm(f => ({ ...f, credentials: { ...f.credentials, [field.key]: e.target.value } }))}
+                    placeholder={field.placeholder}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500" />
+                ) : (
+                  <input type={field.secret ? 'password' : 'text'}
+                    value={form.credentials[field.key] || ''}
+                    onChange={e => setForm(f => ({ ...f, credentials: { ...f.credentials, [field.key]: e.target.value } }))}
+                    placeholder={field.placeholder}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" />
+                )}
+              </div>
+            ))}
+          </div>
+
+          {/* Action buttons */}
+          <div className="flex justify-end gap-2">
+            <button onClick={() => setEditingId(null)}
+              className="px-4 py-2 text-sm text-gray-600 border border-gray-300 rounded-lg hover:bg-gray-50 transition-colors">
+              Cancel
+            </button>
+            <button onClick={handleSave} disabled={saving}
+              className="bg-blue-600 text-white px-4 py-2 rounded-lg hover:bg-blue-700 disabled:opacity-50 flex items-center gap-2 text-sm font-medium transition-colors">
+              <Save className="h-4 w-4" />
+              {saving ? 'Saving…' : editingId === 'new' ? 'Save Credential' : 'Update Credential'}
+            </button>
+          </div>
+        </div>
+      )}
+    </SectionCard>
+  );
+};
+
+// ─── CLM Integration Plugin Settings ──────────────────────────────────────────
+
+const CLMIntegrationPluginSettings = ({ showToast }) => {
+  const [plugins, setPlugins] = useState({});
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    import('../services/clm/clmApi').then(({ workflowApi }) => {
+      workflowApi.integrationSettings().then(({ data }) => {
+        if (!cancelled) {
+          // Convert API format to simple { name: enabled } map
+          const map = {};
+          Object.entries(data.plugins || {}).forEach(([name, info]) => {
+            map[name] = { ...info };
+          });
+          setPlugins(map);
+        }
+      }).catch(() => {}).finally(() => { if (!cancelled) setLoading(false); });
+    });
+    return () => { cancelled = true; };
+  }, []);
+
+  const toggle = (name) => {
+    setPlugins(prev => ({
+      ...prev,
+      [name]: { ...prev[name], enabled: !prev[name]?.enabled },
+    }));
+  };
+
+  const handleSave = async () => {
+    setSaving(true);
+    try {
+      const { workflowApi } = await import('../services/clm/clmApi');
+      const payload = {};
+      Object.entries(plugins).forEach(([name, info]) => {
+        payload[name] = info.enabled;
+      });
+      await workflowApi.updateIntegrationSettings(payload);
+      showToast?.('Integration plugin settings saved');
+    } catch (e) {
+      showToast?.(e.response?.data?.error || 'Failed to save', 'error');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  if (loading) return null;
+  if (Object.keys(plugins).length === 0) return null;
+
+  return (
+    <SectionCard
+      title="CLM Integration Plugins"
+      icon={ToggleLeft}
+      description="Enable or disable integration plugins for CLM input nodes. When enabled, these appear as selectable input types on workflow input nodes."
+    >
+      <div className="space-y-1 divide-y divide-gray-50">
+        {Object.entries(plugins).map(([name, info]) => (
+          <ToggleRow
+            key={name}
+            label={`${info.icon || '🔌'} ${info.display_name || name}`}
+            description={info.description}
+            checked={info.enabled}
+            onChange={() => toggle(name)}
+          />
+        ))}
+      </div>
+      <div className="flex justify-end mt-4">
+        <button
+          onClick={handleSave}
+          disabled={saving}
+          className="bg-purple-600 text-white px-4 py-2 rounded-lg hover:bg-purple-700 disabled:opacity-50 flex items-center gap-2 text-sm font-medium transition-colors"
+        >
+          <Save className="h-4 w-4" />
+          {saving ? 'Saving…' : 'Save Plugin Settings'}
+        </button>
+      </div>
+    </SectionCard>
+  );
 };
 
 // ─── Main Component ───────────────────────────────────────────────────────────
@@ -389,11 +710,15 @@ const Settings = () => {
                 options={[
                   { value: 'llama3.2', label: 'llama3.2' },
                   { value: 'qwen3:8b', label: 'qwen3:8b' },
-                  { value: 'gemini-2.0-flash', label: 'gemini-2.0-flash' },
+                  { value: 'gemini-2.5-flash', label: 'Gemini 2.5 Flash' },
+                  { value: 'gemini-2.5-pro-preview-05-06', label: 'Gemini 2.5 Pro' },
                 ]}
               />
             </div>
           </SectionCard>
+
+          {/* ── Input Node Credentials ─────────────────────────────────── */}
+          <InputNodeCredentialManager showToast={showToast} />
 
           {/* Save User Settings */}
           <div className="flex justify-end">
@@ -442,6 +767,18 @@ const Settings = () => {
                     value={orgSettings.default_language}
                     onChange={(e) => changeOrgSetting('default_language', e.target.value)}
                     options={LANGUAGE_OPTIONS}
+                  />
+                  <SelectRow
+                    label="Default AI Model"
+                    description="Default AI model for CLM workflows, document analysis, and all AI features"
+                    value={orgSettings.default_ai_model || 'gemini-2.5-flash'}
+                    onChange={(e) => changeOrgSetting('default_ai_model', e.target.value)}
+                    options={[
+                      { value: 'gemini-2.5-flash', label: 'Gemini 2.5 Flash' },
+                      { value: 'gemini-2.5-pro-preview-05-06', label: 'Gemini 2.5 Pro' },
+                      { value: 'gpt-4o', label: 'GPT-4o' },
+                      { value: 'gpt-4o-mini', label: 'GPT-4o Mini' },
+                    ]}
                   />
                 </div>
               </SectionCard>
@@ -503,6 +840,9 @@ const Settings = () => {
 
               {/* ── AI Service Presets ─────────────────────────────────── */}
               <AIPresetManager />
+
+              {/* ── CLM Integration Plugins ──────────────────────── */}
+              <CLMIntegrationPluginSettings showToast={showToast} />
 
               {/* Save Org Settings */}
               <div className="flex justify-end">

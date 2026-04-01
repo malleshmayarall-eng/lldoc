@@ -1,6 +1,6 @@
 """
-CLM Celery Tasks — Async workflow execution + email inbox polling
-==================================================================
+CLM Celery Tasks — Async workflow execution + email inbox polling + DB cleanup
+===============================================================================
 
 Architecture
 ------------
@@ -28,6 +28,15 @@ Architecture
      UNSEEN + cached-Message-ID dedup, auto-extract, auto-execute).
      A cache-based lock prevents the same node from being checked
      concurrently by two tasks (duplicate-dispatch guard).
+
+  **DB retention / cleanup**
+  5. ``cleanup_clm_tables`` runs daily (every 6 hours).  Prunes high-volume
+     tables that grow unboundedly during live-mode operation:
+     - ``SheetNodeQuery``  → keep 7 days, hard cap 50k rows
+     - ``NodeExecutionLog`` → keep 14 days
+     - ``WorkflowLiveEvent`` → keep 7 days
+     - ``WorkflowExecution`` → keep 60 days
+     - SQLite WAL checkpoint after deletions
 
 Efficiency safeguards
 ---------------------
@@ -108,13 +117,13 @@ def execute_workflow_async(
     try:
         workflow = Workflow.objects.get(id=workflow_id)
     except Workflow.DoesNotExist:
-        logger.error(f'[async-exec] Workflow {workflow_id} not found')
+        logger.error('[async-exec] Workflow %s not found', workflow_id)
         return {'status': 'workflow_not_found'}
 
     try:
         execution = WorkflowExecution.objects.get(id=execution_id)
     except WorkflowExecution.DoesNotExist:
-        logger.error(f'[async-exec] Execution {execution_id} not found')
+        logger.error('[async-exec] Execution %s not found', execution_id)
         return {'status': 'execution_not_found'}
 
     # Resolve user (Celery tasks receive serializable args, not model instances)
@@ -130,8 +139,10 @@ def execute_workflow_async(
     execution.save(update_fields=['status'])
 
     logger.info(
-        f'[async-exec] Starting workflow {workflow.name} '
-        f'(exec={execution_id}, mode={mode}, smart={smart})'
+        '[async-exec] STARTING workflow=%s (%s) exec=%s mode=%s smart=%s '
+        'is_live=%s compiled=%s doc_ids=%s',
+        workflow.name, workflow_id, execution_id, mode, smart,
+        workflow.is_live, workflow.compilation_status, document_ids,
     )
 
     start = time.time()
@@ -154,8 +165,8 @@ def execute_workflow_async(
         execution.refresh_from_db()
 
         logger.info(
-            f'[async-exec] ✅ Workflow {workflow.name} completed '
-            f'({elapsed_ms}ms, status={execution.status})'
+            '[async-exec] Workflow %s COMPLETED (%dms, status=%s)',
+            workflow.name, elapsed_ms, execution.status,
         )
         return {
             'status': execution.status,
@@ -165,7 +176,10 @@ def execute_workflow_async(
 
     except Exception as exc:
         elapsed_ms = int((time.time() - start) * 1000)
-        logger.error(f'[async-exec] ❌ Workflow {workflow.name} failed: {exc}')
+        logger.error(
+            '[async-exec] Workflow %s FAILED (%dms): %s',
+            workflow.name, elapsed_ms, exc,
+        )
         # execute_workflow's try/finally already resets execution_state,
         # but the execution record may not have been finalised if the
         # crash happened before the executor could save it.
@@ -216,6 +230,11 @@ def dispatch_live_workflows():
         is_live=True,
     ).select_related('organization')
 
+    logger.info(
+        '[live-dispatch] dispatch_live_workflows — found %d live+active workflows',
+        live_workflows.count(),
+    )
+
     # Event-driven source types — workflows using ONLY these don't need
     # cron-based polling.
     _EVENT_DRIVEN_TYPES = {'sheet', 'webhook'}
@@ -234,6 +253,7 @@ def dispatch_live_workflows():
         )
         if active_subs and all(st in _EVENT_DRIVEN_TYPES for st in active_subs):
             skipped_event_driven += 1
+            logger.debug('[live-dispatch] %s — fully event-driven (%s), skipped', workflow.name, active_subs)
             continue
 
         # ── Interval check — has enough time elapsed? ────────────
@@ -241,13 +261,14 @@ def dispatch_live_workflows():
         if workflow.last_executed_at:
             elapsed = (now - workflow.last_executed_at).total_seconds()
             if elapsed < interval:
+                logger.debug('[live-dispatch] %s — not due yet (%.0fs / %ds)', workflow.name, elapsed, interval)
                 continue  # Not due yet
 
         # ── Duplicate-dispatch guard ─────────────────────────────
         lock_key = f'clm:workflow_exec:{wf_id}'
         lock_ttl = max(interval * 3, 300)  # auto-expire even if task crashes
         if not cache.add(lock_key, 'dispatched', lock_ttl):
-            logger.debug(f'[live-dispatch] Skipping {workflow.name} — lock held')
+            logger.debug('[live-dispatch] %s — lock held, skipped', workflow.name)
             continue
 
         # Create a queued execution record
@@ -267,12 +288,12 @@ def dispatch_live_workflows():
             smart=True,  # Live mode always uses smart execution
         )
         due_count += 1
-        logger.info(f'[live-dispatch] Dispatched async exec for "{workflow.name}"')
+        logger.info('[live-dispatch] Dispatched async exec for "%s" (exec=%s)', workflow.name, execution.id)
 
     if due_count or skipped_event_driven:
         logger.info(
-            f'[live-dispatch] Dispatched {due_count} live workflow(s), '
-            f'skipped {skipped_event_driven} event-driven workflow(s)'
+            '[live-dispatch] Result: dispatched=%d, skipped_event_driven=%d',
+            due_count, skipped_event_driven,
         )
 
 
@@ -568,3 +589,152 @@ def poll_single_subscription(self, subscription_id: str):
         )
 
     return result
+
+
+# ---------------------------------------------------------------------------
+# DB Retention / Cleanup — prevents unbounded table growth
+# ---------------------------------------------------------------------------
+
+# Retention policy constants (easily tunable)
+_SHEET_QUERY_RETENTION_DAYS = 7
+_SHEET_QUERY_HARD_CAP = 50_000          # absolute max rows across all workflows
+_NODE_LOG_RETENTION_DAYS = 14
+_LIVE_EVENT_RETENTION_DAYS = 7
+_EXECUTION_RETENTION_DAYS = 60
+_EXECUTION_KEEP_PER_WORKFLOW = 200      # always keep the most recent N per workflow
+
+# Batch-delete size to avoid long-held locks on SQLite
+_DELETE_BATCH_SIZE = 5000
+
+
+@shared_task(
+    name='clm.tasks.cleanup_clm_tables',
+    time_limit=300,
+    soft_time_limit=270,
+)
+def cleanup_clm_tables():
+    """
+    Periodic retention task — prunes high-volume CLM tables.
+
+    Runs every 6 hours via Celery Beat.  Targets the tables that grow
+    fastest during live-mode operation:
+
+      1. ``SheetNodeQuery``  — one row per sheet cell read/written per
+         execution.  Retention: 7 days, hard cap 50k rows total.
+      2. ``NodeExecutionLog`` — one row per node per execution.
+         Retention: 14 days.
+      3. ``WorkflowLiveEvent`` — event triggers for live workflows.
+         Retention: 7 days.
+      4. ``WorkflowExecution`` — top-level execution records.
+         Retention: 60 days, always keep last 200 per workflow.
+
+    After deletions, issues a WAL checkpoint on SQLite to reclaim space
+    immediately (otherwise the WAL can grow to match the deleted data).
+
+    Deletes are done in batches of 5000 to avoid locking the DB for
+    too long on SQLite.
+    """
+    from datetime import timedelta
+
+    from django.db import connection
+
+    from .models import (
+        NodeExecutionLog,
+        SheetNodeQuery,
+        WorkflowExecution,
+        WorkflowLiveEvent,
+    )
+
+    now = timezone.now()
+    totals = {}
+
+    # ── 1. SheetNodeQuery — age-based + hard cap ─────────────────
+    cutoff = now - timedelta(days=_SHEET_QUERY_RETENTION_DAYS)
+    deleted = _batch_delete(SheetNodeQuery.objects.filter(created_at__lt=cutoff))
+    totals['sheet_queries_age'] = deleted
+
+    # Hard cap: if still over limit, delete oldest surplus
+    remaining = SheetNodeQuery.objects.count()
+    if remaining > _SHEET_QUERY_HARD_CAP:
+        surplus = remaining - _SHEET_QUERY_HARD_CAP
+        oldest_ids = list(
+            SheetNodeQuery.objects.order_by('created_at')
+            .values_list('id', flat=True)[:surplus]
+        )
+        deleted = _batch_delete(SheetNodeQuery.objects.filter(id__in=oldest_ids))
+        totals['sheet_queries_cap'] = deleted
+    else:
+        totals['sheet_queries_cap'] = 0
+
+    # ── 2. NodeExecutionLog — age-based ──────────────────────────
+    cutoff = now - timedelta(days=_NODE_LOG_RETENTION_DAYS)
+    deleted = _batch_delete(NodeExecutionLog.objects.filter(created_at__lt=cutoff))
+    totals['node_logs'] = deleted
+
+    # ── 3. WorkflowLiveEvent — age-based ─────────────────────────
+    cutoff = now - timedelta(days=_LIVE_EVENT_RETENTION_DAYS)
+    deleted = _batch_delete(WorkflowLiveEvent.objects.filter(created_at__lt=cutoff))
+    totals['live_events'] = deleted
+
+    # ── 4. WorkflowExecution — age-based, keep last N per wf ────
+    cutoff = now - timedelta(days=_EXECUTION_RETENTION_DAYS)
+    # First pass: delete anything older than retention period
+    # BUT protect the most recent N per workflow.
+    old_execs = WorkflowExecution.objects.filter(started_at__lt=cutoff)
+    # Exclude IDs that are in the "keep" set for their workflow
+    keep_ids = set()
+    for wf_id in (
+        old_execs.values_list('workflow_id', flat=True).distinct()
+    ):
+        recent = list(
+            WorkflowExecution.objects.filter(workflow_id=wf_id)
+            .order_by('-started_at')
+            .values_list('id', flat=True)[:_EXECUTION_KEEP_PER_WORKFLOW]
+        )
+        keep_ids.update(recent)
+
+    deletable = old_execs.exclude(id__in=keep_ids)
+    deleted = _batch_delete(deletable)
+    totals['executions'] = deleted
+
+    # ── WAL checkpoint (SQLite only) ─────────────────────────────
+    _wal_checkpoint(connection)
+
+    total_deleted = sum(totals.values())
+    if total_deleted > 0:
+        logger.info('[cleanup] 🧹 CLM table cleanup: %s  (total=%d)', totals, total_deleted)
+    else:
+        logger.debug('[cleanup] CLM table cleanup: nothing to prune')
+
+    return totals
+
+
+def _batch_delete(queryset, batch_size: int = _DELETE_BATCH_SIZE) -> int:
+    """Delete a queryset in batches to avoid long SQLite locks.
+
+    Returns total number of rows deleted.
+    """
+    total = 0
+    while True:
+        # Get a batch of PKs
+        batch_ids = list(queryset.values_list('pk', flat=True)[:batch_size])
+        if not batch_ids:
+            break
+        count, _ = queryset.model.objects.filter(pk__in=batch_ids).delete()
+        total += count
+    return total
+
+
+def _wal_checkpoint(connection):
+    """Issue a WAL checkpoint on SQLite to reclaim space after deletes.
+
+    No-op on other database backends.
+    """
+    if connection.vendor == 'sqlite':
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute('PRAGMA wal_checkpoint(TRUNCATE);')
+                result = cursor.fetchone()
+                logger.debug('[cleanup] WAL checkpoint: %s', result)
+        except Exception as exc:
+            logger.warning('[cleanup] WAL checkpoint failed: %s', exc)

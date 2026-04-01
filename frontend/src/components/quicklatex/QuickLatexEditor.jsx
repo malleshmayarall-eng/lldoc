@@ -31,6 +31,9 @@ import {
   Zap,
   AlertTriangle,
   ArrowRightLeft,
+  Undo2,
+  ChevronDown,
+  ChevronRight,
 } from 'lucide-react';
 import PlaceholderForm from './PlaceholderForm';
 import AIChatPanel from './AIChatPanel';
@@ -38,6 +41,62 @@ import DuplicateDialog from './DuplicateDialog';
 import BulkDuplicateDialog from './BulkDuplicateDialog';
 import QuickLatexImageSidebar from './QuickLatexImageSidebar';
 import ExportSettingsPanel from '../ExportSettingsPanel';
+
+/* ------------------------------------------------------------------ */
+/*  ErrorDetails — collapsible compilation error detail panel           */
+/* ------------------------------------------------------------------ */
+
+const ErrorDetails = ({ errorLines = [], missingPackages = [] }) => {
+  const [expanded, setExpanded] = useState(false);
+
+  if (errorLines.length === 0 && missingPackages.length === 0) return null;
+
+  return (
+    <div className="bg-gray-50 border border-gray-200 rounded-lg overflow-hidden">
+      <button
+        onClick={() => setExpanded(!expanded)}
+        className="w-full flex items-center gap-1.5 px-3 py-2 text-[11px] font-medium text-gray-600 hover:bg-gray-100 transition-colors"
+      >
+        {expanded ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
+        Error details ({errorLines.length} {errorLines.length === 1 ? 'error' : 'errors'})
+      </button>
+      {expanded && (
+        <div className="px-3 pb-3 space-y-2">
+          {/* Missing packages */}
+          {missingPackages.length > 0 && (
+            <div className="bg-amber-50 border border-amber-200 rounded px-2.5 py-1.5">
+              <p className="text-[10px] font-medium text-amber-700 mb-0.5">Missing packages:</p>
+              <p className="text-[10px] text-amber-600 font-mono">
+                {missingPackages.map(p => `\\usepackage{${p}}`).join(', ')}
+              </p>
+            </div>
+          )}
+          {/* Error lines */}
+          {errorLines.map((err, idx) => (
+            <div key={idx} className="bg-white border border-gray-200 rounded px-2.5 py-1.5">
+              <div className="flex items-center gap-2">
+                {err.line && (
+                  <span className="text-[10px] font-mono bg-red-100 text-red-700 px-1.5 py-0.5 rounded flex-shrink-0">
+                    L{err.line}
+                  </span>
+                )}
+                <p className="text-[10px] text-gray-700 font-mono leading-relaxed break-all">
+                  {err.message}
+                </p>
+              </div>
+              {err.context && (
+                <p className="text-[9px] text-gray-400 font-mono mt-1 pl-1 border-l-2 border-gray-200 break-all">
+                  {err.context}
+                </p>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+};
+
 
 /* ------------------------------------------------------------------ */
 /*  QuickLatexEditor                                                    */
@@ -708,22 +767,77 @@ const QuickLatexEditor = ({
               </div>
             )}
 
-            {/* Error state */}
-            {previewError && (
-              <div className="flex flex-col items-center justify-center h-full text-center px-6 p-4">
-                <div className="w-10 h-10 rounded-full bg-red-50 flex items-center justify-center mb-3">
-                  <AlertTriangle size={18} className="text-red-400" />
+            {/* Error state — rich error panel */}
+            {previewError && (() => {
+              const err = typeof previewError === 'object' ? previewError : { message: previewError };
+              const errorLines = err.errorLines || [];
+              const missingPkgs = err.missingPackages || [];
+              const hasUndoable = chatMessages.length > 0;
+              return (
+                <div className="flex flex-col gap-3 p-4">
+                  {/* Error banner */}
+                  <div className="bg-red-50 border border-red-200 rounded-lg p-3">
+                    <div className="flex items-start gap-2">
+                      <div className="w-7 h-7 rounded-full bg-red-100 flex items-center justify-center flex-shrink-0 mt-0.5">
+                        <AlertTriangle size={14} className="text-red-500" />
+                      </div>
+                      <div className="flex-1 min-w-0">
+                        <p className="text-xs font-semibold text-red-700 mb-0.5">Compilation Error</p>
+                        <p className="text-[11px] text-red-600 leading-relaxed">{err.message || 'Render failed'}</p>
+                        {err.hint && (
+                          <p className="text-[10px] text-amber-600 mt-1 italic">{err.hint}</p>
+                        )}
+                      </div>
+                    </div>
+
+                    {/* Action buttons */}
+                    <div className="flex items-center gap-2 mt-2.5 ml-9">
+                      <button
+                        onClick={() => onRenderPreview?.(doc.id, latexCode, {}, codeType, exportDraft?.processing_settings)}
+                        className="text-[11px] text-blue-600 hover:text-blue-700 font-medium flex items-center gap-1 px-2 py-1 rounded hover:bg-blue-50 transition-colors"
+                      >
+                        <RefreshCw size={11} />
+                        Retry
+                      </button>
+                      {hasUndoable && (
+                        <button
+                          onClick={() => {
+                            // Find the last AI message with previous_code and undo it
+                            const lastAI = [...chatMessages].reverse().find(m => m.role === 'assistant' && m.previous_code);
+                            if (lastAI) handleUndo(lastAI.id, lastAI.previous_code);
+                          }}
+                          className="text-[11px] text-amber-600 hover:text-amber-700 font-medium flex items-center gap-1 px-2 py-1 rounded hover:bg-amber-50 transition-colors"
+                        >
+                          <Undo2 size={11} />
+                          Undo AI change
+                        </button>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* Error details (collapsible) */}
+                  {errorLines.length > 0 && (
+                    <ErrorDetails errorLines={errorLines} missingPackages={missingPkgs} />
+                  )}
+
+                  {/* Show stale preview underneath if available */}
+                  {previewPages.length > 0 && (
+                    <div className="relative">
+                      <div className="absolute inset-0 bg-white/40 z-10 pointer-events-none rounded-md" />
+                      <p className="text-[10px] text-gray-400 text-center mb-1">Last working preview</p>
+                      {previewPages.map((pageSrc, idx) => (
+                        <img
+                          key={idx}
+                          src={pageSrc}
+                          alt={`Page ${idx + 1} (stale)`}
+                          className="w-full rounded-md border border-gray-200 shadow-sm bg-white opacity-60"
+                        />
+                      ))}
+                    </div>
+                  )}
                 </div>
-                <p className="text-xs font-medium text-gray-700 mb-1">Render failed</p>
-                <p className="text-[11px] text-gray-400 leading-relaxed max-w-[240px]">{previewError}</p>
-                <button
-                  onClick={() => onRenderPreview?.(doc.id, latexCode, {}, codeType, exportDraft?.processing_settings)}
-                  className="mt-3 text-[11px] text-blue-500 hover:text-blue-600 font-medium"
-                >
-                  Try again
-                </button>
-              </div>
-            )}
+              );
+            })()}
 
             {/* Multi-page PDF preview — scrollable list of all pages */}
             {!previewLoading && !previewError && previewPages.length > 0 && (

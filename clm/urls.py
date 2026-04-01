@@ -14,8 +14,10 @@ from .views import (
     WorkflowNodeViewSet,
     WorkflowViewSet,
 )
+from .debug_views import SystemDebugViewSet
 
 router = DefaultRouter()
+router.register(r'debug', SystemDebugViewSet, basename='clm-debug')
 router.register(r'workflows', WorkflowViewSet, basename='clm-workflow')
 router.register(r'nodes', WorkflowNodeViewSet, basename='clm-node')
 router.register(r'connections', NodeConnectionViewSet, basename='clm-connection')

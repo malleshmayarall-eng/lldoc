@@ -106,7 +106,10 @@ def _execute_sheet_input(node, incoming_document_ids, execution=None, triggered_
     If ``changed_row_ids`` or ``changed_row_orders`` are provided (from
     an event-triggered execution), **only those rows** are read — this
     avoids re-processing the entire sheet on every keystroke.  When
-    neither is provided (manual run, first execution) all rows are read.
+    neither is provided (manual run, first execution) all rows are read
+    but each row's content hash is compared against the last successful
+    READ query for that (node, sheet, row).  Unchanged rows are skipped
+    so downstream nodes don't re-process them.
 
     Each row is recorded as a READ query in SheetNodeQuery.
     """
@@ -158,9 +161,39 @@ def _execute_sheet_input(node, incoming_document_ids, execution=None, triggered_
             f"changed row(s) by order"
         )
 
+    # ── Pre-load last-read hashes for change detection ────────────
+    # When processing all rows (manual execution), compare each row's
+    # content hash against the last completed READ query for that row.
+    # If the hash matches, the row hasn't changed — skip it.
+    _last_read_hashes = {}
+    if not changed_row_ids and not changed_row_orders:
+        # Load the most recent completed READ hash per row for this node+sheet.
+        # We order by -created_at so the first occurrence per row_id is the
+        # latest.  Dict insertion deduplicates — first write wins.
+        _all_reads = (
+            SheetNodeQuery.objects.filter(
+                node=node,
+                sheet=sheet,
+                operation='read',
+                status='completed',
+            )
+            .order_by('-created_at')
+            .values_list('row_id', 'content_hash')
+        )
+        for rid, chash in _all_reads:
+            if rid and rid not in _last_read_hashes:
+                _last_read_hashes[rid] = chash
+
+        if _last_read_hashes:
+            logger.info(
+                f"Sheet input node {node.id}: loaded {len(_last_read_hashes)} "
+                f"previous read hashes for change detection"
+            )
+
     result_rows = []
     queries = []
     query_count = 0
+    cache_hits = 0
 
     for row in rows_qs:
         row_data = {}
@@ -174,6 +207,25 @@ def _execute_sheet_input(node, incoming_document_ids, execution=None, triggered_
 
         content_hash = _compute_row_hash(row_data)
         query_count += 1
+
+        # ── Hash-based change detection: skip unchanged rows ──────
+        if _last_read_hashes and row.id in _last_read_hashes:
+            if _last_read_hashes[row.id] == content_hash:
+                # Row hasn't changed since last read — skip it
+                cache_hits += 1
+                queries.append(SheetNodeQuery(
+                    workflow=node.workflow,
+                    node=node,
+                    execution=execution,
+                    sheet=sheet,
+                    operation='read',
+                    status='cached',
+                    row_order=row.order,
+                    row_id=row.id,
+                    content_hash=content_hash,
+                    row_data=row_data,
+                ))
+                continue
 
         queries.append(SheetNodeQuery(
             workflow=node.workflow,
@@ -198,6 +250,12 @@ def _execute_sheet_input(node, incoming_document_ids, execution=None, triggered_
     if queries:
         SheetNodeQuery.objects.bulk_create(queries, ignore_conflicts=True)
 
+    if cache_hits:
+        logger.info(
+            f"Sheet input node {node.id}: skipped {cache_hits} unchanged "
+            f"row(s) (cache hits), returning {len(result_rows)} changed row(s)"
+        )
+
     return {
         'status': 'completed',
         'mode': 'input',
@@ -205,7 +263,7 @@ def _execute_sheet_input(node, incoming_document_ids, execution=None, triggered_
         'sheet_title': sheet.title,
         'row_count': len(result_rows),
         'query_count': query_count,
-        'cache_hits': 0,
+        'cache_hits': cache_hits,
         'rows': result_rows,
     }
 
@@ -222,8 +280,13 @@ def _execute_sheet_storage(
 
     For each incoming document, the extracted metadata (global + workflow)
     is flattened into a row.  The write_mode controls behaviour:
-      - 'append': always add a new row
+      - 'append': always add a new row (unless unique_columns match → upsert)
       - 'overwrite': match by source_document and update existing row
+
+    When the sheet has ``unique_columns`` defined, append mode becomes
+    an upsert: if a row already exists whose unique-column values match
+    the incoming data, that row is **updated** instead of creating a
+    duplicate.  This prevents duplicate documents, emails, etc.
 
     Content-hash dedup prevents re-writing identical data (cache hit).
     """
@@ -253,11 +316,15 @@ def _execute_sheet_storage(
     documents = WorkflowDocument.objects.filter(id__in=doc_ids)
 
     rows_written = 0
+    rows_updated = 0
     rows_overwritten = 0
     cache_hits = 0
     query_count = 0
     queries = []
     results_detail = []
+
+    # Check if the sheet has unique columns for upsert logic
+    unique_cols = sheet.unique_columns or []
 
     with transaction.atomic():
         # ── Overwrite: clear ALL existing rows first ──────────────
@@ -328,30 +395,60 @@ def _execute_sheet_storage(
             # ── Resolve col_key for each metadata field ──
             field_to_col = _build_field_to_col_map(sheet, meta, column_mapping)
 
-            # ── Always append (overwrite already cleared everything) ──
-            row = _append_row(sheet, meta, field_to_col, doc)
+            # ── Unique-column upsert check ──────────────────────
+            existing_row = None
+            if unique_cols and write_mode != 'overwrite':
+                existing_row = sheet.find_row_by_unique_values(meta, field_to_col)
 
-            rows_written += 1
-            queries.append(SheetNodeQuery(
-                workflow=node.workflow,
-                node=node,
-                execution=execution,
-                sheet=sheet,
-                operation='append' if write_mode == 'append' else 'write',
-                status='completed',
-                row_order=row.order,
-                row_id=row.id,
-                source_document=doc,
-                content_hash=content_hash,
-                row_data=meta,
-            ))
-            results_detail.append({
-                'document_id': str(doc.id),
-                'document_title': doc.title,
-                'status': 'written',
-                'row_order': row.order,
-                'content_hash': content_hash[:12],
-            })
+            if existing_row:
+                # Update the existing row instead of appending
+                _update_row_cells(existing_row, meta, field_to_col)
+                rows_updated += 1
+                queries.append(SheetNodeQuery(
+                    workflow=node.workflow,
+                    node=node,
+                    execution=execution,
+                    sheet=sheet,
+                    operation='upsert',
+                    status='completed',
+                    row_order=existing_row.order,
+                    row_id=existing_row.id,
+                    source_document=doc,
+                    content_hash=content_hash,
+                    row_data=meta,
+                ))
+                results_detail.append({
+                    'document_id': str(doc.id),
+                    'document_title': doc.title,
+                    'status': 'updated',
+                    'row_order': existing_row.order,
+                    'content_hash': content_hash[:12],
+                    'matched_unique_columns': unique_cols,
+                })
+            else:
+                # Append new row
+                row = _append_row(sheet, meta, field_to_col, doc)
+                rows_written += 1
+                queries.append(SheetNodeQuery(
+                    workflow=node.workflow,
+                    node=node,
+                    execution=execution,
+                    sheet=sheet,
+                    operation='append' if write_mode == 'append' else 'write',
+                    status='completed',
+                    row_order=row.order,
+                    row_id=row.id,
+                    source_document=doc,
+                    content_hash=content_hash,
+                    row_data=meta,
+                ))
+                results_detail.append({
+                    'document_id': str(doc.id),
+                    'document_title': doc.title,
+                    'status': 'written',
+                    'row_order': row.order,
+                    'content_hash': content_hash[:12],
+                })
 
         # Update sheet row count
         sheet.row_count = sheet.rows.count()
@@ -368,10 +465,12 @@ def _execute_sheet_storage(
         'sheet_id': str(sheet.id),
         'sheet_title': sheet.title,
         'rows_written': rows_written,
+        'rows_updated': rows_updated,
         'rows_overwritten': rows_overwritten,
         'query_count': query_count,
         'cache_hits': cache_hits,
         'total_documents': len(doc_ids),
+        'unique_columns': unique_cols,
         'results': results_detail,
     }
 

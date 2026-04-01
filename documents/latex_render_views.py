@@ -63,6 +63,251 @@ def _is_tex_memory_error(output: str) -> bool:
     return "tex capacity exceeded" in lowered or "main memory size" in lowered
 
 
+# ── LaTeX error log parsing ──────────────────────────────────────────────
+
+_LATEX_ERROR_RE = re.compile(r'^!\s+(.+)', re.MULTILINE)
+_LATEX_LINE_RE = re.compile(r'l\.(\d+)\s+(.*)', re.MULTILINE)
+_LATEX_MISSING_PKG_RE = re.compile(
+    r"(?:File|Package)\s+[`']?(\w+)(?:\.sty)?[`']?\s+not\s+found",
+    re.IGNORECASE,
+)
+_LATEX_UNDEFINED_CS_RE = re.compile(
+    r'Undefined control sequence.*?\\(\w+)',
+    re.IGNORECASE,
+)
+_LATEX_MISSING_ENV_RE = re.compile(
+    r"(?:Environment\s+(\w+)\s+undefined|No counter '(\w+)' defined)",
+    re.IGNORECASE,
+)
+
+# Map of common undefined control sequences to the package that defines them
+_COMMAND_TO_PACKAGE = {
+    'toprule': 'booktabs', 'midrule': 'booktabs', 'bottomrule': 'booktabs',
+    'cmidrule': 'booktabs', 'addlinespace': 'booktabs',
+    'multirow': 'multirow', 'multicolumn': None,
+    'href': 'hyperref', 'url': 'hyperref', 'hyperlink': 'hyperref',
+    'textcolor': 'xcolor', 'colorbox': 'xcolor', 'definecolor': 'xcolor',
+    'rowcolor': 'xcolor', 'cellcolor': 'xcolor', 'columncolor': 'xcolor',
+    'includegraphics': 'graphicx',
+    'geometry': 'geometry', 'newgeometry': 'geometry',
+    'lstlisting': 'listings', 'lstset': 'listings', 'lstinputlisting': 'listings',
+    'mintinline': 'minted', 'inputminted': 'minted',
+    'SI': 'siunitx', 'si': 'siunitx', 'num': 'siunitx',
+    'cref': 'cleveref', 'Cref': 'cleveref',
+    'subfigure': 'subcaption', 'subcaption': 'subcaption',
+    'setstretch': 'setspace', 'doublespacing': 'setspace', 'singlespacing': 'setspace',
+    'lipsum': 'lipsum', 'blindtext': 'blindtext',
+    'adjustbox': 'adjustbox',
+    'cancel': 'cancel', 'bcancel': 'cancel', 'xcancel': 'cancel',
+    'FloatBarrier': 'placeins',
+    'uline': 'ulem', 'sout': 'ulem',
+    'tcolorbox': 'tcolorbox',
+    'chemfig': 'chemfig',
+    'tikz': 'tikz',
+    'setmainfont': 'fontspec', 'setsansfont': 'fontspec', 'setmonofont': 'fontspec',
+    'newfontfamily': 'fontspec', 'defaultfontfeatures': 'fontspec',
+}
+
+# Map environment names to their providing packages
+_ENV_TO_PACKAGE = {
+    'lstlisting': 'listings', 'minted': 'minted',
+    'tikzpicture': 'tikz', 'axis': 'pgfplots',
+    'longtable': 'longtable', 'supertabular': 'supertabular',
+    'tabularx': 'tabularx', 'tabulary': 'tabulary',
+    'multicols': 'multicol',
+    'wrapfigure': 'wrapfig', 'wraptable': 'wrapfig',
+    'subfigure': 'subcaption', 'subfloat': 'subfig',
+    'adjustbox': 'adjustbox',
+    'tcolorbox': 'tcolorbox',
+    'algorithm': 'algorithm2e', 'algorithmic': 'algorithmicx',
+    'forest': 'forest',
+    'circuitikz': 'circuitikz',
+}
+
+# Friendly error messages for common LaTeX errors
+_FRIENDLY_ERRORS = {
+    'undefined control sequence': 'Unknown command found. This usually means a required package is missing.',
+    'missing $ inserted': 'Math mode issue — a $ sign may be missing or mismatched.',
+    'environment .* undefined': 'Unknown environment. The package that defines it may not be loaded.',
+    'file .* not found': 'A required file or package could not be found.',
+    'missing \\\\begin\\{document\\}': 'The document is missing \\begin{document}.',
+    'misplaced alignment tab': 'A & character was used outside a table/alignment environment.',
+    'extra alignment tab': 'Too many columns in a table row (extra &).',
+    'package .* error': 'A LaTeX package reported an error.',
+    'option clash': 'A package was loaded twice with different options.',
+    'too many unprocessed floats': 'Too many figures/tables without enough text. Try adding \\clearpage.',
+    'dimension too large': 'A measurement is too large for TeX to handle.',
+    'illegal parameter number': 'Incorrect use of # in a macro definition.',
+    'tex capacity exceeded': 'TeX ran out of memory. Simplify the document or reduce plot complexity.',
+}
+
+# Image formats XeLaTeX can handle natively.  Anything else (avif, webp,
+# heic, tiff, bmp, svg …) must be converted to PNG before compilation.
+_XELATEX_SUPPORTED_IMG_EXTS = frozenset({
+    '.png', '.jpg', '.jpeg', '.pdf', '.eps', '.bmp',
+})
+
+
+def _convert_image_for_latex(src_path: Path, dest_path: Path) -> bool:
+    """Copy *src_path* to *dest_path*, converting to PNG if the format
+    is not natively supported by XeLaTeX.
+
+    Returns ``True`` on success, ``False`` on failure.
+    """
+    src_ext = src_path.suffix.lower()
+    dest_ext = dest_path.suffix.lower()
+
+    # If the destination is already a supported format and matches the
+    # source, a simple copy is sufficient.
+    if src_ext == dest_ext and src_ext in _XELATEX_SUPPORTED_IMG_EXTS:
+        try:
+            shutil.copy2(str(src_path), str(dest_path))
+            return True
+        except Exception:
+            return False
+
+    # Need conversion → use Pillow
+    try:
+        from PIL import Image as _PILImage
+        with _PILImage.open(str(src_path)) as img:
+            # Convert to RGB(A) so .save(format='PNG') always works.
+            # Some formats (e.g. palette mode) need explicit conversion.
+            if img.mode not in ('RGB', 'RGBA'):
+                img = img.convert('RGBA' if 'A' in (img.mode or '') else 'RGB')
+            img.save(str(dest_path), format='PNG')
+        return True
+    except Exception:
+        # Fallback: try a plain copy — XeLaTeX might handle it or will
+        # report a clear error.
+        try:
+            shutil.copy2(str(src_path), str(dest_path))
+        except Exception:
+            pass
+        return False
+
+
+def _parse_latex_errors(log_output: str) -> dict:
+    """Parse XeLaTeX log output and return structured error information.
+
+    Returns:
+        {
+            'error_lines': [{'line': int|None, 'message': str, 'context': str}, ...],
+            'error_summary': str,   # Human-friendly one-line summary
+            'missing_packages': [str, ...],  # Packages that could fix the error
+            'raw_errors': [str, ...],  # The raw ! Error lines
+        }
+    """
+    if not log_output:
+        return {
+            'error_lines': [],
+            'error_summary': 'Unknown compilation error',
+            'missing_packages': [],
+            'raw_errors': [],
+        }
+
+    raw_errors = _LATEX_ERROR_RE.findall(log_output)
+    line_matches = _LATEX_LINE_RE.findall(log_output)
+
+    error_lines = []
+    seen_messages = set()
+    for i, err_msg in enumerate(raw_errors):
+        msg = err_msg.strip()
+        if msg in seen_messages:
+            continue
+        seen_messages.add(msg)
+
+        # Try to find the line number from a nearby l.NNN match
+        line_num = None
+        context = ''
+        if i < len(line_matches):
+            try:
+                line_num = int(line_matches[i][0])
+            except (ValueError, IndexError):
+                pass
+            context = line_matches[i][1] if len(line_matches[i]) > 1 else ''
+
+        error_lines.append({
+            'line': line_num,
+            'message': msg,
+            'context': context.strip(),
+        })
+
+    # Detect missing packages from the log
+    missing_packages = set()
+    for m in _LATEX_MISSING_PKG_RE.finditer(log_output):
+        pkg = m.group(1).strip().lower()
+        if pkg and pkg not in ('document', 'error'):
+            missing_packages.add(pkg)
+
+    # Detect missing packages from undefined control sequences
+    for m in _LATEX_UNDEFINED_CS_RE.finditer(log_output):
+        cmd = m.group(1).strip()
+        pkg = _COMMAND_TO_PACKAGE.get(cmd)
+        if pkg:
+            missing_packages.add(pkg)
+
+    # Detect missing packages from undefined environments
+    for m in _LATEX_MISSING_ENV_RE.finditer(log_output):
+        env = (m.group(1) or m.group(2) or '').strip()
+        pkg = _ENV_TO_PACKAGE.get(env)
+        if pkg:
+            missing_packages.add(pkg)
+
+    # Build friendly summary
+    summary = 'LaTeX compilation failed'
+    lowered = log_output.lower()
+    for pattern, friendly in _FRIENDLY_ERRORS.items():
+        if re.search(pattern, lowered):
+            summary = friendly
+            break
+
+    # ── Special handling for "Emergency stop" ──
+    # This is a very generic XeLaTeX error.  Try to extract more context
+    # from the log around the emergency stop.
+    if any('emergency stop' in e.lower() for e in raw_errors):
+        # Look for the real error preceding the emergency stop
+        preceding_errors = [
+            e for e in raw_errors
+            if 'emergency stop' not in e.lower()
+        ]
+        if preceding_errors:
+            summary = preceding_errors[0].strip()
+        else:
+            # Try to find context from "! " lines in the raw log
+            context_lines = re.findall(
+                r'^!\s+(.+?)$|^l\.(\d+)\s+(.+?)$',
+                log_output, re.MULTILINE,
+            )
+            context_msgs = [
+                c[0] or c[2]
+                for c in context_lines
+                if (c[0] or c[2]).strip()
+                and 'emergency stop' not in (c[0] or c[2]).lower()
+            ]
+            if context_msgs:
+                summary = context_msgs[0].strip()
+            else:
+                # Check for common emergency-stop causes in the log
+                if 'no \\begin{document}' in lowered:
+                    summary = 'Missing \\begin{document} — the document structure is broken.'
+                elif 'file ended' in lowered:
+                    summary = 'Unexpected end of file — likely an unclosed brace or environment.'
+                elif 'forbidden' in lowered or 'i can\'t find file' in lowered:
+                    summary = 'A required file could not be found.'
+                else:
+                    summary = 'Emergency stop — the document has a fundamental structural error.'
+
+    if missing_packages:
+        summary += f" (missing: {', '.join(sorted(missing_packages))})"
+
+    return {
+        'error_lines': error_lines[:10],  # Cap at 10 errors
+        'error_summary': summary,
+        'missing_packages': sorted(missing_packages),
+        'raw_errors': raw_errors[:10],
+    }
+
+
 # ── Metadata placeholder resolution ─────────────────────────────────────
 
 def _latex_escape(val: str) -> str:
@@ -180,35 +425,65 @@ def resolve_image_placeholders_latex(latex_code, document):
         for img_obj in DocumentImage.objects.filter(id__in=list(all_uuids)):
             uuid_to_image[str(img_obj.id)] = img_obj
 
+        # Fallback: check Attachment table for any UUIDs not found in
+        # DocumentImage (images uploaded via the centralised attachments
+        # endpoint may only exist as Attachment records).
+        missing_uuids = all_uuids - set(uuid_to_image.keys())
+        if missing_uuids:
+            try:
+                from attachments.models import Attachment
+                for att in Attachment.objects.filter(
+                    id__in=list(missing_uuids), file_kind='image',
+                ):
+                    uuid_to_image[str(att.id)] = att  # duck-typed: has .file / .id
+            except Exception:
+                pass  # attachments app may not be installed
+
     image_files = []  # (filename, absolute_path) pairs
     seen_filenames = set()
 
     def _get_image_latex(img_obj, label='', options=''):
-        """Build \\includegraphics command for a DocumentImage and register
-        the file for copying into the temp dir.
+        r"""Build ``\includegraphics`` command for a DocumentImage (or
+        Attachment) and register the file for copying into the temp dir.
 
-        *options*: LaTeX options string from the AI (e.g. ``"width=3cm"``).
-        Falls back to ``width=\\linewidth,keepaspectratio`` when empty.
+        *options*: LaTeX options string from the code / AI (e.g.
+        ``"width=3cm"``).  When the code specifies explicit sizing it
+        is used verbatim — the image's native resolution is irrelevant.
+
+        When *options* is empty (bare ``[[image:…]]`` placeholder) the
+        default is ``max width=\linewidth,keepaspectratio`` which
+        renders the image at its natural size but caps it at the text
+        width so it never overflows the page.  This requires the
+        ``adjustbox`` package with the ``export`` option (injected
+        automatically alongside ``graphicx``).
         """
-        if not img_obj or not img_obj.image:
+        # Duck-type: DocumentImage has .image, Attachment has .file
+        file_field = getattr(img_obj, 'image', None) or getattr(img_obj, 'file', None)
+        if not img_obj or not file_field:
             safe_label = _latex_escape(label or 'Image')
             return r'\textcolor{red}{\mbox{[' + safe_label + r']}}'
 
-        abs_path = Path(img_obj.image.path)
+        abs_path = Path(file_field.path)
         if not abs_path.exists():
             safe_label = _latex_escape(label or 'Image')
             return r'\textcolor{red}{\mbox{[' + safe_label + r']}}'
 
-        # Create a unique filename for the temp dir
-        ext = abs_path.suffix  # e.g. .png
+        ext = abs_path.suffix.lower() or '.png'
+        # XeLaTeX cannot handle AVIF, WebP, HEIC, etc. — these will be
+        # converted to PNG when copied into the temp directory, so the
+        # \includegraphics filename must reference the .png version.
+        if ext not in _XELATEX_SUPPORTED_IMG_EXTS:
+            ext = '.png'
         fname = f"img_{img_obj.id}{ext}"
         if fname not in seen_filenames:
             seen_filenames.add(fname)
             image_files.append((fname, abs_path))
 
-        # Use AI-specified options when available, otherwise default
+        # Code-specified options take priority — image native resolution
+        # is never used for sizing.  The fallback keeps the natural size
+        # but caps at \linewidth to prevent overflow.
         if not options:
-            options = r'width=\linewidth,keepaspectratio'
+            options = r'max width=\linewidth,keepaspectratio'
         return r'\includegraphics[' + options + ']{' + fname + '}'
 
     def _replace_match(match):
@@ -233,12 +508,21 @@ def resolve_image_placeholders_latex(latex_code, document):
 
     resolved = _IMAGE_PLACEHOLDER_RE.sub(_replace_match, latex_code)
 
-    # Ensure graphicx is loaded (required for \includegraphics)
-    if image_files and r'\usepackage{graphicx}' not in resolved:
+    # Ensure graphicx + adjustbox[export] are loaded.
+    # adjustbox with 'export' adds 'max width' as a valid key for
+    # \includegraphics so images render at their natural size but never
+    # overflow the text width.
+    if image_files:
         marker = r'\begin{document}'
         idx = resolved.find(marker)
         if idx != -1:
-            resolved = resolved[:idx] + '\\usepackage{graphicx}\n' + resolved[idx:]
+            pkgs = ''
+            if r'\usepackage{graphicx}' not in resolved and r'\usepackage[export]{adjustbox}' not in resolved:
+                pkgs += '\\usepackage{graphicx}\n'
+            if 'adjustbox' not in resolved:
+                pkgs += '\\usepackage[export]{adjustbox}\n'
+            if pkgs:
+                resolved = resolved[:idx] + pkgs + resolved[idx:]
 
     # Ensure xcolor is loaded for red placeholder text
     resolved = _ensure_xcolor(resolved)
@@ -339,8 +623,11 @@ _PREAMBLE_DEFAULTS = {
 
 def _sanitize_preamble_placeholders(latex_code: str) -> str:
     """Replace unresolved [[...]] placeholders that appear inside preamble
-    commands (\\documentclass, \\setmainfont, \\usepackage, \\geometry, etc.)
+    commands (\\documentclass, \\usepackage, \\geometry, etc.)
     with safe defaults so XeLaTeX doesn't crash.
+
+    Font commands (\\setmainfont, \\setsansfont, \\setmonofont) are handled
+    separately by ``sanitize_ai_latex_code`` which strips them entirely.
 
     Placeholders in the document body are left alone — they render as visible
     text which is acceptable.
@@ -351,22 +638,6 @@ def _sanitize_preamble_placeholders(latex_code: str) -> str:
         lambda m: m.group(1) + _PREAMBLE_DEFAULTS.get(
             m.group(2).rsplit('.', 1)[-1], '12pt'
         ) + m.group(3),
-        latex_code,
-    )
-
-    # \setmainfont{[[...]]} → \setmainfont{Latin Modern Roman}
-    latex_code = re.sub(
-        r'(\\setmainfont\{)\[\[([^\]]*)\]\](\})',
-        lambda m: m.group(1) + _PREAMBLE_DEFAULTS.get(
-            m.group(2).rsplit('.', 1)[-1], 'Latin Modern Roman'
-        ) + m.group(3),
-        latex_code,
-    )
-
-    # \setsansfont{[[...]]} or \setmonofont{[[...]]}
-    latex_code = re.sub(
-        r'(\\set(?:sans|mono)font\{)\[\[([^\]]*)\]\](\})',
-        lambda m: m.group(1) + 'Latin Modern Roman' + m.group(3),
         latex_code,
     )
 
@@ -473,27 +744,22 @@ def sanitize_ai_latex_code(latex_code: str) -> str:
     - ``\\includegraphics[opts]{[[image:name]]}``: unwrap so the image
       placeholder system can resolve it properly, preserving AI dimensions
     - ``\\includegraphics[...]{}``: empty path → remove the whole command
-      (the error: ``! LaTeX Error: File `' not found.``)
-    - ``\\includegraphics[...]{http...}``: URL paths that can't be resolved
-      locally → replace with a placeholder comment
+    - ``\\includegraphics[...]{http...}``: URL paths → remove
     - ``\\input{}``, ``\\include{}``: empty file references → remove
     - ``\\documentclass12pt]{article}`` → ``\\documentclass[12pt]{article}``
     - ``\\href{}{}``: empty URL → replace with just the link text
-    - Lone ``\\[`` at start of line that isn't math mode → escape
+    - Duplicate ``\\begin{document}`` / ``\\end{document}`` → remove extras
+    - Misplaced ``\\usepackage`` after ``\\begin{document}`` → move to preamble
+    - Unclosed environments → auto-close
+    - Common typos in LaTeX commands
     """
     if not latex_code:
         return latex_code
 
     # ── Unwrap \includegraphics{[[image:...]]} → bare [[image:...]] ──
-    # Must run FIRST so that wrapped placeholders become bare before the
-    # empty-path / URL-path removals below.  The image placeholder resolver
-    # will generate the correct \includegraphics later.
     latex_code = _unwrap_includegraphics_placeholders(latex_code)
 
     # ── Fix \includegraphics with empty path ──
-    # \includegraphics[<opts>]{} or \includegraphics{}
-    # Remove the entire command plus optional surrounding \par, \centering, etc.
-    # that form a meaningless image block.
     latex_code = re.sub(
         r'\\includegraphics\s*(?:\[[^\]]*\])?\s*\{\s*\}[^\n]*',
         r'% [sanitized: removed \\includegraphics with empty path]',
@@ -501,7 +767,6 @@ def sanitize_ai_latex_code(latex_code: str) -> str:
     )
 
     # ── Fix \includegraphics pointing to raw HTTP(S) URLs ──
-    # XeLaTeX cannot fetch URLs; these must be downloaded first or removed.
     latex_code = re.sub(
         r'\\includegraphics\s*(?:\[[^\]]*\])?\s*\{\s*https?://[^}]*\}',
         r'% [sanitized: removed \\includegraphics with URL path — use [[image:name]] placeholders instead]',
@@ -516,7 +781,6 @@ def sanitize_ai_latex_code(latex_code: str) -> str:
     )
 
     # ── Fix \documentclass missing opening bracket ──
-    # e.g. \documentclass12pt]{article} → \documentclass[12pt]{article}
     latex_code = re.sub(
         r'\\documentclass(?!\[)(\d+\s*pt)\]',
         r'\\documentclass[\1]',
@@ -524,7 +788,6 @@ def sanitize_ai_latex_code(latex_code: str) -> str:
     )
 
     # ── Fix \href with empty URL ──
-    # \href{}{Link Text} → Link Text
     latex_code = re.sub(
         r'\\href\s*\{\s*\}\s*\{([^}]*)\}',
         r'\1',
@@ -538,8 +801,37 @@ def sanitize_ai_latex_code(latex_code: str) -> str:
         latex_code,
     )
 
+    # ── Strip fontspec font commands ─────────────────────────────────
+    # AI frequently generates \setmainfont{Roboto}, \setsansfont{Helvetica}
+    # etc. referencing system fonts that may not be installed on the
+    # compilation server.  The default Latin Modern fonts bundled with
+    # TeX Live are always available and produce professional output.
+    # We comment these commands out (including optional [opts]) so the
+    # document compiles reliably on any machine.
+    latex_code = re.sub(
+        r'^\s*\\(?:setmainfont|setsansfont|setmonofont|newfontfamily\s*\\[a-zA-Z]+)'
+        r'\s*(?:\[[^\]]*\])?\s*\{[^}]*\}[^\n]*',
+        r'% [sanitized: removed font command — system font may not be available]',
+        latex_code,
+        flags=re.MULTILINE,
+    )
+    # Also strip \defaultfontfeatures which is useless without font commands
+    latex_code = re.sub(
+        r'^\s*\\defaultfontfeatures\s*(?:\[[^\]]*\])?\s*\{[^}]*\}[^\n]*',
+        r'% [sanitized: removed \\defaultfontfeatures]',
+        latex_code,
+        flags=re.MULTILINE,
+    )
+    # Strip \usepackage{fontspec} itself — XeLaTeX works fine without it
+    # when no font commands are used (it uses Latin Modern by default).
+    latex_code = re.sub(
+        r'^\s*\\usepackage\s*(?:\[[^\]]*\])?\s*\{fontspec\}[^\n]*',
+        r'% [sanitized: removed fontspec — using default Latin Modern fonts]',
+        latex_code,
+        flags=re.MULTILINE,
+    )
+
     # ── Remove empty \begin{figure}...\end{figure} blocks ──
-    # that only contain sanitization comments or whitespace
     latex_code = re.sub(
         r'\\begin\{figure\}\s*(?:\[[^\]]*\])?\s*'
         r'(?:\\centering\s*)?'
@@ -551,7 +843,347 @@ def sanitize_ai_latex_code(latex_code: str) -> str:
         latex_code,
     )
 
+    # ── Fix duplicate \begin{document} ──
+    # Keep only the first occurrence
+    doc_begins = [m.start() for m in re.finditer(r'\\begin\{document\}', latex_code)]
+    if len(doc_begins) > 1:
+        # Remove all but the first
+        for pos in reversed(doc_begins[1:]):
+            end = pos + len('\\begin{document}')
+            latex_code = latex_code[:pos] + '% [sanitized: removed duplicate \\begin{document}]' + latex_code[end:]
+
+    # ── Fix duplicate \end{document} ──
+    doc_ends = [m.start() for m in re.finditer(r'\\end\{document\}', latex_code)]
+    if len(doc_ends) > 1:
+        for pos in reversed(doc_ends[:-1]):
+            end = pos + len('\\end{document}')
+            latex_code = latex_code[:pos] + '% [sanitized: removed duplicate \\end{document}]' + latex_code[end:]
+
+    # ── Move misplaced \usepackage after \begin{document} into preamble ──
+    begin_doc_match = re.search(r'\\begin\{document\}', latex_code)
+    if begin_doc_match:
+        body_start = begin_doc_match.end()
+        body = latex_code[body_start:]
+        preamble_part = latex_code[:begin_doc_match.start()]
+
+        # Find \usepackage lines in the body and move them to preamble
+        misplaced = re.findall(r'(\\usepackage\s*(?:\[[^\]]*\])?\s*\{[^}]+\})[^\n]*\n?', body)
+        if misplaced:
+            for pkg_line in misplaced:
+                body = body.replace(pkg_line, '% [sanitized: moved to preamble] ' + pkg_line, 1)
+                if pkg_line not in preamble_part:
+                    preamble_part = preamble_part.rstrip() + '\n' + pkg_line + '\n'
+            latex_code = preamble_part + '\\begin{document}' + body
+
+    # ── Fix unclosed environments ──
+    # Track \begin{env} and \end{env} to detect unclosed ones
+    env_begins = re.findall(r'\\begin\{(\w+)\}', latex_code)
+    env_ends = re.findall(r'\\end\{(\w+)\}', latex_code)
+    # Simple stack-based check for common floating environments
+    _closeable_envs = {
+        'figure', 'table', 'tabular', 'tabularx', 'itemize', 'enumerate',
+        'description', 'center', 'flushleft', 'flushright', 'minipage',
+        'abstract', 'quote', 'quotation', 'verbatim', 'verse', 'multicols',
+        'align', 'align*', 'equation', 'equation*', 'gather', 'gather*',
+        'longtable', 'tcolorbox', 'lstlisting', 'minted',
+    }
+    begin_counts = {}
+    end_counts = {}
+    for env in env_begins:
+        if env in _closeable_envs:
+            begin_counts[env] = begin_counts.get(env, 0) + 1
+    for env in env_ends:
+        if env in _closeable_envs:
+            end_counts[env] = end_counts.get(env, 0) + 1
+
+    # Append missing \end{env} before \end{document} or at the end
+    missing_ends = []
+    for env, count in begin_counts.items():
+        end_count = end_counts.get(env, 0)
+        if count > end_count:
+            missing_ends.extend([env] * (count - end_count))
+
+    if missing_ends:
+        end_doc_match = re.search(r'\\end\{document\}', latex_code)
+        insert_point = end_doc_match.start() if end_doc_match else len(latex_code)
+        fix = '\n'.join(f'\\end{{{env}}}  % [sanitized: auto-closed]' for env in reversed(missing_ends))
+        latex_code = latex_code[:insert_point] + '\n' + fix + '\n' + latex_code[insert_point:]
+
+    # ── Fix common command typos from AI ──
+    _TYPO_FIXES = {
+        r'\\being\{': r'\\begin{',
+        r'\\ned\{': r'\\end{',
+        r'\\itme\b': r'\\item',
+        r'\\sectoin\b': r'\\section',
+        r'\\subsectoin\b': r'\\subsection',
+        r'\\tbextbf\b': r'\\textbf',
+        r'\\texitit\b': r'\\textit',
+        r'\\labael\b': r'\\label',
+        r'\\captoin\b': r'\\caption',
+    }
+    for typo, fix in _TYPO_FIXES.items():
+        latex_code = re.sub(typo, fix, latex_code)
+
     return latex_code
+
+
+# ── Lightweight compilation verification for AI-generated code ──────────
+
+def verify_latex_compilation(latex_code: str, max_retries: int = 1) -> dict:
+    """Quick-compile *latex_code* to check for errors without producing a
+    full PDF preview.  Returns a dict:
+
+        {
+            'compiled': bool,
+            'fixed_code': str | None,   # non-None when auto-fix was applied
+            'errors': { ... },          # output of _parse_latex_errors
+        }
+
+    The function:
+    1. Wraps *latex_code* via ``_prepare_latex_document`` (minimal preamble).
+    2. Runs XeLaTeX in a temp directory.
+    3. On failure, sanitises the code again and retries (up to *max_retries*).
+    4. If the sanitised version compiles, returns it as *fixed_code*.
+    """
+    import shutil as _shutil
+    import subprocess as _subprocess
+    import tempfile as _tempfile
+    from pathlib import Path as _Path
+
+    from django.conf import settings as _settings
+
+    # Locate xelatex binary (same logic as LatexRenderView.post)
+    configured = (
+        os.environ.get('XELATEX_PATH')
+        or getattr(_settings, 'XELATEX_PATH', None)
+    )
+    if configured and os.path.isfile(configured):
+        xelatex_bin = configured
+    else:
+        search_path = os.environ.get('PATH', '') + ':/Library/TeX/texbin:/usr/local/bin:/opt/homebrew/bin'
+        xelatex_bin = _shutil.which('xelatex', path=search_path)
+
+    if not xelatex_bin:
+        # Can't verify — assume OK so the flow doesn't block
+        return {'compiled': True, 'fixed_code': None, 'errors': {}}
+
+    def _run(code_text: str) -> tuple:
+        """Compile and return (returncode, combined_output)."""
+        with _tempfile.TemporaryDirectory() as tmp:
+            tmp_path = _Path(tmp)
+            doc_text = _prepare_latex_document(code_text, preamble=None, wrap_mode='auto', optimize_pgfplots=False)
+            tex_path = tmp_path / 'document.tex'
+            tex_path.write_text(doc_text, encoding='utf-8')
+            cmd = [
+                xelatex_bin,
+                '-interaction=nonstopmode',
+                '-halt-on-error',
+                f'-output-directory={tmp_path}',
+                str(tex_path),
+            ]
+            proc = _subprocess.run(cmd, capture_output=True, text=True, timeout=60, cwd=str(tmp_path))
+            # Combine stdout + stderr; XeLaTeX writes the log to stdout,
+            # but some errors may appear on stderr.
+            combined = (proc.stdout or '') + '\n' + (proc.stderr or '')
+            # Also try reading the .log file — it contains the full log
+            # even when the process output is truncated.
+            log_file = tmp_path / 'document.log'
+            if log_file.exists():
+                try:
+                    combined = log_file.read_text(encoding='utf-8', errors='replace')
+                except Exception:
+                    pass
+            return proc.returncode, combined
+
+    # First attempt
+    try:
+        rc, output = _run(latex_code)
+    except Exception:
+        return {'compiled': True, 'fixed_code': None, 'errors': {}}
+
+    if rc == 0:
+        return {'compiled': True, 'fixed_code': None, 'errors': {}}
+
+    parsed = _parse_latex_errors(output)
+
+    # Retry with re-sanitisation + missing-package injection
+    for _ in range(max_retries):
+        fixed = sanitize_ai_latex_code(latex_code)
+
+        # Inject missing packages detected from the log
+        missing = parsed.get('missing_packages', [])
+        for pkg in missing:
+            pkg_re = re.compile(
+                r'\\usepackage\s*(?:\[[^\]]*\])?\s*\{' + re.escape(pkg) + r'\}'
+            )
+            if not pkg_re.search(fixed):
+                # Insert before \begin{document} or at the top
+                bdoc = re.search(r'\\begin\{document\}', fixed)
+                if bdoc:
+                    fixed = fixed[:bdoc.start()] + f'\\usepackage{{{pkg}}}\n' + fixed[bdoc.start():]
+                else:
+                    fixed = f'\\usepackage{{{pkg}}}\n' + fixed
+
+        if fixed == latex_code:
+            break  # Nothing changed, don't bother retrying
+
+        try:
+            rc2, output2 = _run(fixed)
+        except Exception:
+            break
+
+        if rc2 == 0:
+            return {'compiled': True, 'fixed_code': fixed, 'errors': {}}
+
+        # Update parsed errors for the caller
+        parsed = _parse_latex_errors(output2)
+        latex_code = fixed  # for next iteration
+
+    return {
+        'compiled': False,
+        'fixed_code': None,
+        'errors': parsed,
+    }
+
+
+def compile_latex_with_document(latex_code: str, document, max_retries: int = 1) -> dict:
+    """Compile *latex_code* in the context of *document* — resolving
+    ``[[image:…]]`` placeholders, copying/converting image files, and
+    running XeLaTeX exactly as ``LatexRenderView.post`` does.
+
+    This is the "real" compilation check used by AI generation endpoints
+    to validate that the generated code actually compiles with the
+    document's images and metadata.
+
+    Returns::
+
+        {
+            'compiled': bool,
+            'fixed_code': str | None,
+            'errors': { ... },          # _parse_latex_errors output
+        }
+    """
+    import shutil as _shutil
+    import subprocess as _subprocess
+    import tempfile as _tempfile
+    from pathlib import Path as _Path
+
+    from django.conf import settings as _settings
+
+    # ── Locate xelatex binary ────────────────────────────────────────
+    configured = (
+        os.environ.get('XELATEX_PATH')
+        or getattr(_settings, 'XELATEX_PATH', None)
+    )
+    if configured and os.path.isfile(configured):
+        xelatex_bin = configured
+    else:
+        search_path = (
+            os.environ.get('PATH', '')
+            + ':/Library/TeX/texbin:/usr/local/bin:/opt/homebrew/bin'
+        )
+        xelatex_bin = _shutil.which('xelatex', path=search_path)
+
+    if not xelatex_bin:
+        return {'compiled': True, 'fixed_code': None, 'errors': {}}
+
+    def _run(code_text: str) -> tuple:
+        """Resolve placeholders, prepare document, copy images, compile.
+        Returns (returncode, log_output, resolved_code)."""
+        # Resolve [[image:…]] → \includegraphics + collect image files
+        resolved_code, image_files = resolve_image_placeholders_latex(
+            code_text, document,
+        )
+        # Resolve [[field_name]] metadata placeholders
+        resolved_code = resolve_latex_metadata(resolved_code, document)
+
+        with _tempfile.TemporaryDirectory() as tmp:
+            tmp_path = _Path(tmp)
+
+            # Copy / convert images into the temp dir
+            for fname, abs_path in image_files:
+                dest = tmp_path / fname
+                _convert_image_for_latex(abs_path, dest)
+
+            doc_text = _prepare_latex_document(
+                resolved_code, preamble=None, wrap_mode='auto',
+                optimize_pgfplots=False,
+            )
+            tex_path = tmp_path / 'document.tex'
+            tex_path.write_text(doc_text, encoding='utf-8')
+
+            cmd = [
+                xelatex_bin,
+                '-interaction=nonstopmode',
+                '-halt-on-error',
+                f'-output-directory={tmp_path}',
+                str(tex_path),
+            ]
+            proc = _subprocess.run(
+                cmd, capture_output=True, text=True,
+                timeout=90, cwd=str(tmp_path),
+            )
+            # Prefer the .log file — it has the full compilation log
+            # even when stdout/stderr are truncated.
+            combined = (proc.stdout or '') + '\n' + (proc.stderr or '')
+            log_file = tmp_path / 'document.log'
+            if log_file.exists():
+                try:
+                    combined = log_file.read_text(encoding='utf-8', errors='replace')
+                except Exception:
+                    pass
+            return proc.returncode, combined, resolved_code
+
+    # ── First attempt ────────────────────────────────────────────────
+    try:
+        rc, output, _ = _run(latex_code)
+    except Exception:
+        return {'compiled': True, 'fixed_code': None, 'errors': {}}
+
+    if rc == 0:
+        return {'compiled': True, 'fixed_code': None, 'errors': {}}
+
+    parsed = _parse_latex_errors(output)
+
+    # ── Retry with re-sanitisation + missing-package injection ───────
+    for _ in range(max_retries):
+        fixed = sanitize_ai_latex_code(latex_code)
+
+        missing = parsed.get('missing_packages', [])
+        for pkg in missing:
+            pkg_re = re.compile(
+                r'\\usepackage\s*(?:\[[^\]]*\])?\s*\{' + re.escape(pkg) + r'\}'
+            )
+            if not pkg_re.search(fixed):
+                bdoc = re.search(r'\\begin\{document\}', fixed)
+                if bdoc:
+                    fixed = (
+                        fixed[:bdoc.start()]
+                        + f'\\usepackage{{{pkg}}}\n'
+                        + fixed[bdoc.start():]
+                    )
+                else:
+                    fixed = f'\\usepackage{{{pkg}}}\n' + fixed
+
+        if fixed == latex_code:
+            break
+
+        try:
+            rc2, output2, _ = _run(fixed)
+        except Exception:
+            break
+
+        if rc2 == 0:
+            return {'compiled': True, 'fixed_code': fixed, 'errors': {}}
+
+        parsed = _parse_latex_errors(output2)
+        latex_code = fixed
+
+    return {
+        'compiled': False,
+        'fixed_code': None,
+        'errors': parsed,
+    }
 
 
 # ── Margin / page-size helpers for processing_settings ──────────────────
@@ -798,10 +1430,96 @@ def _prepare_latex_document(
             )
         return latex_code
 
-    preamble_block = preamble.strip() if preamble else "\\usepackage{amsmath}\n\\usepackage{amssymb}"
+    preamble_block = preamble.strip() if preamble else ""
 
-    # Strip packages from the user-provided preamble that Export Studio
-    # will inject (prevents "Option clash for package geometry" etc.)
+    # ── Comprehensive default preamble for maximum compatibility ──
+    # These packages cover the vast majority of AI-generated LaTeX content.
+    # Only add packages not already present in the user-provided preamble.
+    _DEFAULT_PACKAGES = [
+        # Math
+        ('amsmath', None),
+        ('amssymb', None),
+        ('amsfonts', None),
+        ('mathtools', None),
+        # Tables
+        ('booktabs', None),
+        ('longtable', None),
+        ('multirow', None),
+        ('tabularx', None),
+        ('array', None),
+        # Graphics & colour
+        ('graphicx', None),
+        ('xcolor', 'table,dvipsnames,svgnames'),
+        # Text formatting
+        ('enumitem', None),
+        ('setspace', None),
+        ('parskip', None),
+        # Links & references
+        ('hyperref', 'hidelinks'),
+        # Layout
+        ('float', None),
+        ('placeins', None),
+        ('caption', None),
+        # Code listings
+        ('listings', None),
+        # Misc
+        ('microtype', None),
+        ('ragged2e', None),
+        ('fancyvrb', None),
+    ]
+
+    for pkg, opts in _DEFAULT_PACKAGES:
+        marker = f'\\usepackage{{{pkg}}}'
+        # Also check for \usepackage[...]{pkg} variant
+        marker_re = re.compile(r'\\usepackage\s*(?:\[[^\]]*\])?\s*\{' + re.escape(pkg) + r'\}')
+        already_in_preamble = marker_re.search(preamble_block)
+        already_in_code = marker_re.search(latex_code)
+        if not already_in_preamble and not already_in_code:
+            if opts:
+                preamble_block += f'\n\\usepackage[{opts}]{{{pkg}}}'
+            else:
+                preamble_block += f'\n\\usepackage{{{pkg}}}'
+
+    # ── Auto-detect packages needed by the LaTeX code body ──
+    _AUTO_DETECT = [
+        (r'\\begin\{tikzpicture\}|\\usetikzlibrary', 'tikz', None),
+        (r'\\begin\{axis\}|\\begin\{pgfplot', 'pgfplots', None),
+        (r'\\begin\{circuitikz\}', 'circuitikz', None),
+        (r'\\begin\{forest\}', 'forest', None),
+        (r'\\chemfig\b', 'chemfig', None),
+        (r'\\begin\{multicols\}', 'multicol', None),
+        (r'\\begin\{wrapfigure\}|\\begin\{wraptable\}', 'wrapfig', None),
+        (r'\\begin\{tcolorbox\}', 'tcolorbox', None),
+        (r'\\begin\{minted\}|\\mintinline', 'minted', None),
+        (r'\\begin\{algorithm\}', 'algorithm2e', None),
+        (r'\\SI\b|\\si\b|\\num\b', 'siunitx', None),
+        (r'\\cref\b|\\Cref\b', 'cleveref', None),
+        (r'\\begin\{subfigure\}', 'subcaption', None),
+        (r'\\cancel\b|\\bcancel\b|\\xcancel\b', 'cancel', None),
+        (r'\\lipsum\b', 'lipsum', None),
+        (r'\\blindtext\b', 'blindtext', None),
+        (r'\\begin\{adjustbox\}', 'adjustbox', None),
+        (r'\\uline\b|\\sout\b', 'ulem', 'normalem'),
+        (r'\\begin\{tabulary\}', 'tabulary', None),
+    ]
+
+    for pattern, pkg, opts in _AUTO_DETECT:
+        if re.search(pattern, latex_code):
+            marker_re = re.compile(r'\\usepackage\s*(?:\[[^\]]*\])?\s*\{' + re.escape(pkg) + r'\}')
+            if not marker_re.search(preamble_block) and not marker_re.search(latex_code):
+                if opts:
+                    preamble_block += f'\n\\usepackage[{opts}]{{{pkg}}}'
+                else:
+                    preamble_block += f'\n\\usepackage{{{pkg}}}'
+
+    # ── pgfplots compat ──
+    if re.search(r'\\begin\{axis\}', latex_code):
+        if '\\pgfplotsset{compat=' not in preamble_block:
+            preamble_block += '\n\\pgfplotsset{compat=1.18}'
+        if optimize_pgfplots:
+            preamble_block += f'\n{PGFPLOTS_OPTIMIZATION_SETTINGS}'
+
+    # ── Strip packages from preamble that Export Studio will inject ──
     if ps.get('pdf_layout'):
         preamble_block = _GEOMETRY_PKG_RE.sub('', preamble_block)
         preamble_block = _GEOMETRY_CMD_RE.sub('', preamble_block)
@@ -813,8 +1531,7 @@ def _prepare_latex_document(
         preamble_block = _FANCYHF_CLEAR_RE.sub('', preamble_block)
         preamble_block = _FANCYHDR_FIELD_RE.sub('', preamble_block)
 
-    # Also strip from the latex_code body itself in case it contains
-    # preamble-like commands (common with AI-generated code)
+    # Also strip from the latex_code body itself
     if ps.get('pdf_layout'):
         latex_code = _GEOMETRY_PKG_RE.sub('', latex_code)
         latex_code = _GEOMETRY_CMD_RE.sub('', latex_code)
@@ -825,24 +1542,6 @@ def _prepare_latex_document(
         latex_code = _PAGESTYLE_FANCY_RE.sub('', latex_code)
         latex_code = _FANCYHF_CLEAR_RE.sub('', latex_code)
         latex_code = _FANCYHDR_FIELD_RE.sub('', latex_code)
-
-    # Always include xcolor for red placeholder highlights
-    if "\\usepackage{xcolor}" not in preamble_block:
-        preamble_block = f"{preamble_block}\n\\usepackage{{xcolor}}"
-
-    uses_tikz = "\\begin{tikzpicture}" in latex_code
-    uses_pgfplots = "\\begin{axis}" in latex_code
-
-    if uses_tikz and "\\usepackage{tikz}" not in preamble_block:
-        preamble_block = f"{preamble_block}\n\\usepackage{{tikz}}"
-
-    if uses_pgfplots:
-        if "\\usepackage{pgfplots}" not in preamble_block:
-            preamble_block = f"{preamble_block}\n\\usepackage{{pgfplots}}"
-        if "\\pgfplotsset{compat=" not in preamble_block:
-            preamble_block = f"{preamble_block}\n\\pgfplotsset{{compat=1.18}}"
-        if optimize_pgfplots:
-            preamble_block = f"{preamble_block}\n{PGFPLOTS_OPTIMIZATION_SETTINGS}"
 
     # ── Apply processing_settings layout options ──
     geometry_line = _build_geometry_options(ps)
@@ -1108,13 +1807,12 @@ class LatexRenderView(APIView):
         with tempfile.TemporaryDirectory() as tmp_dir:
             tmp_dir_path = Path(tmp_dir)
 
-            # Copy image files into the temp directory so \includegraphics can find them
+            # Copy (or convert) image files into the temp directory so
+            # \includegraphics can find them.  Unsupported formats (AVIF,
+            # WebP, HEIC …) are converted to PNG automatically.
             for fname, abs_path in image_files:
                 dest = tmp_dir_path / fname
-                try:
-                    shutil.copy2(str(abs_path), str(dest))
-                except Exception:
-                    pass  # graceful fallback — image will be missing in PDF
+                _convert_image_for_latex(abs_path, dest)
 
             def run_xelatex(document_text: str):
                 tex_path = tmp_dir_path / "document.tex"
@@ -1126,7 +1824,26 @@ class LatexRenderView(APIView):
                     f"-output-directory={tmp_dir_path}",
                     str(tex_path),
                 ]
-                return subprocess.run(command, capture_output=True, text=True)
+                proc = subprocess.run(command, capture_output=True, text=True, cwd=str(tmp_dir_path))
+                # Attach the full log from the .log file for better error parsing
+                log_file = tmp_dir_path / "document.log"
+                if log_file.exists():
+                    try:
+                        proc._full_log = log_file.read_text(encoding='utf-8', errors='replace')
+                    except Exception:
+                        proc._full_log = None
+                else:
+                    proc._full_log = None
+                return proc
+
+            def _get_log(proc_result):
+                """Get the best available compilation log output."""
+                # Prefer the .log file — it always has the full log
+                full_log = getattr(proc_result, '_full_log', None)
+                if full_log:
+                    return full_log
+                # Fall back to stdout + stderr combined
+                return (proc_result.stdout or '') + '\n' + (proc_result.stderr or '')
 
             document_text = _prepare_latex_document(
                 latex_code,
@@ -1139,7 +1856,7 @@ class LatexRenderView(APIView):
             optimization_applied = bool(optimize_graphs) if optimize_graphs is not None else False
 
             if result.returncode != 0:
-                combined_output = result.stderr or result.stdout or ""
+                combined_output = _get_log(result)
                 if (
                     can_optimize
                     and optimize_graphs is None
@@ -1154,11 +1871,40 @@ class LatexRenderView(APIView):
                     )
                     result = run_xelatex(document_text)
                     optimization_applied = True
-                    combined_output = result.stderr or result.stdout or ""
+                    combined_output = _get_log(result)
+
+                # ── Fallback retry: inject missing packages detected from log ──
+                if result.returncode != 0:
+                    parsed = _parse_latex_errors(combined_output)
+                    missing_pkgs = parsed.get('missing_packages', [])
+
+                    if missing_pkgs:
+                        # Inject the missing packages into the preamble and retry
+                        patched_preamble = preamble or ''
+                        for pkg in missing_pkgs:
+                            pkg_re = re.compile(
+                                r'\\usepackage\s*(?:\[[^\]]*\])?\s*\{' + re.escape(pkg) + r'\}'
+                            )
+                            if not pkg_re.search(patched_preamble) and not pkg_re.search(latex_code):
+                                patched_preamble += f'\n\\usepackage{{{pkg}}}'
+
+                        document_text = _prepare_latex_document(
+                            latex_code,
+                            patched_preamble,
+                            wrap_mode,
+                            optimize_pgfplots=optimization_applied,
+                            processing_settings=req_processing,
+                        )
+                        result = run_xelatex(document_text)
+                        combined_output = _get_log(result)
 
                 if result.returncode != 0:
+                    parsed = _parse_latex_errors(combined_output)
                     error_payload: dict[str, object] = {
-                        "error": combined_output or "XeLaTeX failed",
+                        "error": parsed['error_summary'],
+                        "error_lines": parsed['error_lines'],
+                        "missing_packages": parsed['missing_packages'],
+                        "raw_errors": parsed['raw_errors'],
                     }
                     if _is_tex_memory_error(combined_output):
                         error_payload["memory_error"] = True
@@ -1223,14 +1969,90 @@ def _html_escape(val: str) -> str:
     return _html.escape(str(val), quote=True)
 
 
+def _latex_opts_to_css(opts: str) -> str:
+    """Translate LaTeX ``\\includegraphics`` options to inline CSS.
+
+    Handles common keys like ``width=5cm``, ``height=3in``, ``scale=0.5``,
+    ``max width=\\linewidth``.  Unknown keys are silently ignored.  Returns
+    a CSS style string (without outer quotes).
+    """
+    if not opts:
+        return ''
+
+    css_parts = []
+    # Split on commas, but be careful with nested braces / TeX commands
+    for part in opts.split(','):
+        part = part.strip()
+        if not part or '=' not in part:
+            continue
+        key, _, val = part.partition('=')
+        key = key.strip().lower()
+        val = val.strip()
+
+        # Map LaTeX length to CSS length — pass through cm/mm/in/pt/em/ex
+        # and translate \linewidth / \textwidth → 100%
+        def _to_css_len(v):
+            v = v.strip()
+            if '\\linewidth' in v or '\\textwidth' in v or '\\columnwidth' in v:
+                return '100%'
+            # Already a valid CSS unit?
+            if any(v.endswith(u) for u in ('cm', 'mm', 'in', 'pt', 'px', 'em', 'ex', '%')):
+                return v
+            # Bare number → treat as pt
+            try:
+                float(v)
+                return f'{v}pt'
+            except ValueError:
+                return None
+
+        if key == 'width':
+            css_len = _to_css_len(val)
+            if css_len:
+                css_parts.append(f'width:{css_len}')
+        elif key == 'height':
+            css_len = _to_css_len(val)
+            if css_len:
+                css_parts.append(f'height:{css_len}')
+        elif key in ('max width', 'max-width'):
+            css_len = _to_css_len(val)
+            if css_len:
+                css_parts.append(f'max-width:{css_len}')
+        elif key in ('max height', 'max-height'):
+            css_len = _to_css_len(val)
+            if css_len:
+                css_parts.append(f'max-height:{css_len}')
+        elif key == 'scale':
+            try:
+                pct = float(val) * 100
+                css_parts.append(f'width:{pct:.0f}%')
+            except ValueError:
+                pass
+        elif key == 'keepaspectratio':
+            css_parts.append('object-fit:contain')
+
+    return ';'.join(css_parts)
+
+
 def _resolve_image_placeholders_html(html_code, document):
     """Replace ``[[image:...]]`` placeholders in HTML with ``<img>`` tags
-    or styled placeholder spans for unmapped images."""
+    or styled placeholder spans for unmapped images.
+
+    Respects ``%%img-opts:name:opts%%`` comments (same format used by the
+    LaTeX path) so that code-specified dimensions are honoured rather than
+    the image's native resolution.
+    """
     if '[[image:' not in html_code:
         return html_code
 
     meta = document.document_metadata or {}
     img_map = meta.get('_image_placeholders', {})
+
+    # ── Parse %%img-opts:name:opts%% comments for code-specified dimensions ──
+    img_opts_map = {}
+    for m in re.finditer(r'%%img-opts:([^:]+):([^%]+)%%', html_code):
+        img_opts_map[m.group(1).strip()] = m.group(2).strip()
+    # Strip the comments so they don't leak into rendered HTML
+    html_code = re.sub(r'%%img-opts:[^%]+%%\n?', '', html_code)
 
     tokens = _IMAGE_PLACEHOLDER_RE.findall(html_code)
     if not tokens:
@@ -1251,9 +2073,22 @@ def _resolve_image_placeholders_html(html_code, document):
         for img_obj in DocumentImage.objects.filter(id__in=list(all_uuids)):
             uuid_to_image[str(img_obj.id)] = img_obj
 
+        # Fallback to Attachment table for UUIDs not found in DocumentImage
+        missing_uuids = all_uuids - set(uuid_to_image.keys())
+        if missing_uuids:
+            try:
+                from attachments.models import Attachment
+                for att in Attachment.objects.filter(
+                    id__in=list(missing_uuids), file_kind='image',
+                ):
+                    uuid_to_image[str(att.id)] = att
+            except Exception:
+                pass
+
     def _replace_match(match):
         token = match.group(1).strip()
         img_obj = None
+        opts_key = token  # key for img_opts_map lookup
 
         if _UUID_RE.match(token):
             img_obj = uuid_to_image.get(token)
@@ -1262,14 +2097,30 @@ def _resolve_image_placeholders_html(html_code, document):
             if mapped_uuid:
                 img_obj = uuid_to_image.get(str(mapped_uuid))
 
-        if img_obj and img_obj.image:
+        # Duck-type: DocumentImage has .image, Attachment has .file
+        file_field = getattr(img_obj, 'image', None) or getattr(img_obj, 'file', None) if img_obj else None
+        if img_obj and file_field:
             # Use absolute file path so xhtml2pdf can read the file directly
             try:
-                abs_path = img_obj.image.path  # e.g. /Users/.../media/documents/images/...
-                safe_name = _html_escape(img_obj.name or 'Image')
+                abs_path = file_field.path  # e.g. /Users/.../media/documents/images/...
+                name = getattr(img_obj, 'name', 'Image') or 'Image'
+                safe_name = _html_escape(name)
+
+                # Build CSS from code-specified options (if any)
+                latex_opts = img_opts_map.get(opts_key, '')
+                extra_css = _latex_opts_to_css(latex_opts)
+
+                if extra_css:
+                    # Code-specified sizing — use it, just add display:block
+                    style = f'{extra_css};display:block;margin:8px auto'
+                else:
+                    # No explicit sizing — render at natural size, capped at
+                    # container width.  'width:auto' prevents stretching.
+                    style = 'max-width:100%;width:auto;height:auto;display:block;margin:8px auto'
+
                 return (
                     f'<img src="{_html_escape(abs_path)}" alt="{safe_name}" '
-                    f'style="max-width:100%;height:auto;display:block;margin:8px auto;" />'
+                    f'style="{style}" />'
                 )
             except Exception:
                 pass

@@ -1033,10 +1033,8 @@ class DashboardViewSet(viewsets.ViewSet):
         )
         funnel = {
             'draft': status_counts.get('draft', 0),
-            'submitted': status_counts.get('under_review', 0) + status_counts.get('review', 0),
-            'under_review': status_counts.get('analyzed', 0),
-            'approved': status_counts.get('approved', 0),
-            'completed': status_counts.get('finalized', 0) + status_counts.get('executed', 0),
+            'under_review': status_counts.get('under_review', 0),
+            'done': status_counts.get('done', 0),
         }
 
         # ── 3. Alerts & Exceptions ────────────────────────────────────

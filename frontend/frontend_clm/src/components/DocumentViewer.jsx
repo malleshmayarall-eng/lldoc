@@ -113,9 +113,9 @@ export default function DocumentViewer() {
 
   const fileUrl = doc ? getDocumentFileUrl(doc) : null;
   // Ensure the URL works — if relative, prefix with origin for the iframe
-  // Append PDF viewer params to fit the page in view
+  // Append PDF viewer params to set zoom to 50%
   const pdfUrl = fileUrl
-    ? (fileUrl.includes('#') ? fileUrl : fileUrl + '#view=FitH')
+    ? (fileUrl.split('#')[0] + '#zoom=50')
     : null;
 
   if (loading) {

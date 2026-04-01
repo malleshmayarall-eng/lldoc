@@ -416,11 +416,12 @@ const useWorkflowStore = create((set, get) => ({
   fetchNotifications: async (params = {}) => {
     set((state) => ({ loading: { ...state.loading, notifications: true }, error: null }));
     try {
-      // Fetch all three sources in parallel
-      const [workflowData, editorData, systemData] = await Promise.allSettled([
+      // Fetch all sources + accurate unread count in parallel
+      const [workflowData, editorData, systemData, systemCountData] = await Promise.allSettled([
         workflowService.getNotifications(params),
         getEditorAlerts({ page_size: 50 }),
-        notificationService.getAlerts({ page_size: 50 }),
+        notificationService.getAlerts({ page_size: 100 }),
+        notificationService.getUnreadCount(),
       ]);
 
       const workflowNotifs = workflowData.status === 'fulfilled'
@@ -434,6 +435,11 @@ const useWorkflowStore = create((set, get) => ({
       const rawSystemAlerts = systemData.status === 'fulfilled'
         ? (Array.isArray(systemData.value) ? systemData.value : systemData.value.results || [])
         : [];
+
+      // Accurate unread count from the dedicated endpoint (includes all, not just page)
+      const systemUnreadAccurate = systemCountData.status === 'fulfilled'
+        ? (systemCountData.value.unread_count || 0)
+        : rawSystemAlerts.filter(a => !a.is_read).length;
 
       // Normalize editor alerts to look like notifications
       const normalizedEditorAlerts = editorAlerts.map(a => ({
@@ -463,9 +469,10 @@ const useWorkflowStore = create((set, get) => ({
         ...normalizedSystemAlerts,
       ].sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
 
-      const totalUnread = merged.filter(n => !n.is_read).length;
+      const workflowUnread = workflowNotifs.filter(n => !n.is_read).length;
       const editorUnread = editorData.status === 'fulfilled' ? (editorData.value.unread_count ?? normalizedEditorAlerts.filter(a => !a.is_read).length) : 0;
-      const systemUnread = normalizedSystemAlerts.filter(a => !a.is_read).length;
+      // Use the accurate count from the dedicated endpoint, not the page subset
+      const totalUnread = workflowUnread + editorUnread + systemUnreadAccurate;
 
       set({ 
         notifications: merged,
@@ -473,7 +480,7 @@ const useWorkflowStore = create((set, get) => ({
         editorAlerts: normalizedEditorAlerts,
         editorAlertsUnreadCount: editorUnread,
         systemAlerts: normalizedSystemAlerts,
-        systemAlertsUnreadCount: systemUnread,
+        systemAlertsUnreadCount: systemUnreadAccurate,
         loading: { ...get().loading, notifications: false }
       });
       return { notifications: merged, unreadCount: totalUnread };
@@ -484,10 +491,10 @@ const useWorkflowStore = create((set, get) => ({
   },
 
   /**
-   * Fetch unread notifications (workflow + editor alerts + system alerts)
+   * Fetch unread notification counts only (for badge display).
+   * Does NOT replace the full notifications list — that is only done by fetchNotifications().
    */
   fetchUnreadNotifications: async () => {
-    set((state) => ({ loading: { ...state.loading, notifications: true }, error: null }));
     try {
       const [workflowData, editorData, systemData] = await Promise.allSettled([
         workflowService.getUnreadNotifications(),
@@ -495,45 +502,30 @@ const useWorkflowStore = create((set, get) => ({
         notificationService.getUnreadCount(),
       ]);
 
-      const workflowNotifs = workflowData.status === 'fulfilled'
-        ? (workflowData.value.notifications || workflowData.value.results || [])
-        : [];
       const workflowCount = workflowData.status === 'fulfilled'
-        ? (workflowData.value.count || workflowNotifs.length)
+        ? (workflowData.value.count || workflowData.value.notifications?.length || workflowData.value.results?.length || 0)
         : 0;
 
-      const editorAlerts = editorData.status === 'fulfilled'
-        ? (editorData.value.alerts || [])
-        : [];
       const editorCount = editorData.status === 'fulfilled'
-        ? (editorData.value.total || editorAlerts.length)
+        ? (editorData.value.total || editorData.value.alerts?.length || 0)
         : 0;
 
       const systemCount = systemData.status === 'fulfilled'
         ? (systemData.value.unread_count || 0)
         : 0;
 
-      const normalizedAlerts = editorAlerts.map(a => ({
-        ...a,
-        _source: 'editor_alert',
-        notification_type: a.alert_type,
-      }));
+      const totalUnread = workflowCount + editorCount + systemCount;
 
-      const merged = [...workflowNotifs.map(n => ({ ...n, _source: 'workflow' })), ...normalizedAlerts]
-        .sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
-
-      set({ 
-        notifications: merged,
-        unreadCount: workflowCount + editorCount + systemCount,
-        editorAlerts: normalizedAlerts,
+      set({
+        unreadCount: totalUnread,
         editorAlertsUnreadCount: editorCount,
         systemAlertsUnreadCount: systemCount,
-        loading: { ...get().loading, notifications: false }
       });
-      return { count: workflowCount + editorCount + systemCount };
+      return { count: totalUnread };
     } catch (error) {
-      set({ error: error.message, loading: { ...get().loading, notifications: false } });
-      throw error;
+      // Silent fail for badge polling — don't disrupt UI
+      console.warn('Failed to fetch unread counts:', error.message);
+      return { count: get().unreadCount };
     }
   },
 

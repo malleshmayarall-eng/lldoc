@@ -1,6 +1,6 @@
 import React, { useState, useRef } from 'react';
 import { Upload, X, Image as ImageIcon, Loader } from 'lucide-react';
-import { imageService } from '../services/imageService';
+import attachmentService from '../services/attachmentService';
 import { validateImageFile } from '../utils/imageUtils';
 import './ImageUploadModal.css';
 
@@ -102,15 +102,18 @@ const ImageUploadModal = ({ onClose, onImageUploaded }) => {
         ? formData.tags.split(',').map(tag => tag.trim()).filter(tag => tag)
         : [];
 
-      // Use imageService uploadImage method
-      const uploadedImage = await imageService.uploadImage(file, {
+      // Use attachmentService upload method
+      const result = await attachmentService.upload(file, {
         name: formData.name.trim(),
-        imageType: formData.image_type,
-        caption: formData.caption.trim() || undefined,
+        file_kind: 'image',
+        image_type: formData.image_type,
+        description: formData.caption.trim() || undefined,
         tags: tagsArray,
-        isPublic: false,
-        uploadScope: 'document'
+        scope: 'user',
       });
+
+      // Normalise — upload returns { status, attachment } or the attachment directly
+      const uploadedImage = result?.attachment || result;
       
       console.log('✅ Image uploaded successfully:', uploadedImage);
       

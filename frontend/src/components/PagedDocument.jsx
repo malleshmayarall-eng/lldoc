@@ -945,11 +945,6 @@ const PagedDocument = ({
           }}
         />
       )}
-      <div className="flex items-center gap-3 mt-2 text-xs text-gray-400">
-        <span>Version {document.metadata?.version_label || '1.0'}</span>
-        <span>•</span>
-        <span>{document.stats?.word_count || 0} words</span>
-      </div>
     </div>
   );
 
@@ -1126,7 +1121,7 @@ const PagedDocument = ({
           onPartialSaveForAi={onParagraphAiPartialSave}
           onAiReviewResult={onAiReviewResult}
           onInference={crossRef ? (id, type) => {
-            if (crossRef.runComponentInference) crossRef.runComponentInference(id);
+            if (crossRef.runComponentInference) crossRef.runComponentInference(type, id);
             if (crossRef.openInferencePanel) crossRef.openInferencePanel();
           } : undefined}
           onCrossRef={crossRef ? (id, type) => {

@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
 import { Upload, Image as ImageIcon, Check } from 'lucide-react';
-import { imageService } from '../services/imageService';
+import attachmentService from '../services/attachmentService';
 import { getImageUrl, validateImageFile } from '../utils/imageUtils';
 
 /**
@@ -28,8 +28,9 @@ const ImageSelector = ({
     setLoading(true);
     setError(null);
     try {
-      const response = await imageService.getImagesByType(imageType);
-      setImages(response.images || []);
+      const response = await attachmentService.list({ file_kind: 'image', image_type: imageType });
+      const list = Array.isArray(response) ? response : response?.results || [];
+      setImages(list);
     } catch (err) {
       console.error('Error loading images:', err);
       setError('Failed to load images');
@@ -54,13 +55,14 @@ const ImageSelector = ({
     setError(null);
 
     try {
-      const uploadResponse = await imageService.uploadImage(file, {
+      const uploadResponse = await attachmentService.upload(file, {
         name: file.name,
-        imageType,
-        isPublic: false,
+        file_kind: 'image',
+        image_type: imageType,
+        scope: 'user',
       });
 
-      const newImage = uploadResponse?.image || uploadResponse;
+      const newImage = uploadResponse?.attachment || uploadResponse;
       
       // Add to list and select it
       setImages(prev => [newImage, ...prev]);

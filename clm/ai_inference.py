@@ -1,14 +1,17 @@
 """
 CLM AI Inference Module
 ========================
-Singleton-managed NuExtract model for on-device metadata extraction.
-Loads numind/NuExtract-1.5-tiny on MPS (Apple GPU), CUDA, or CPU.
+AI-powered metadata extraction for CLM workflow documents.
+Supports on-device extraction via NuExtract and Gemini-based AI discovery.
 
 Dual extraction:
   1. GLOBAL_CLM_TEMPLATE — standard legal fields every contract shares
   2. Workflow-specific template — built from rule-node field names
 
 Both are extracted, standardized, and saved so rule-node filters work.
+
+Note: Input nodes no longer trigger extraction automatically.
+Extraction is handled by dedicated AI extract nodes in the workflow DAG.
 
 Usage:
     from clm.ai_inference import get_engine, extract_from_text
@@ -115,6 +118,9 @@ _GLOBAL_TEMPLATE_BATCHES = [
 # GLOBAL_CLM_TEMPLATE, producing much better extraction results.
 # ---------------------------------------------------------------------------
 
+# DEPRECATED — document_type-based template selection is no longer used
+# by input nodes.  Extraction is handled by AI extract nodes.
+# Kept for backwards compatibility with legacy re-extract endpoints.
 DOCUMENT_TYPE_TEMPLATES = {
     'contract': {
         'label': 'Contract',
@@ -403,6 +409,7 @@ DOCUMENT_TYPE_TEMPLATES = {
 
 def get_template_for_type(document_type: str) -> dict:
     """
+    DEPRECATED — document_type selection is no longer used by input nodes.
     Return the extraction template fields for a given document type.
     Falls back to GLOBAL_CLM_TEMPLATE if type is unknown.
     """
@@ -414,6 +421,7 @@ def get_template_for_type(document_type: str) -> dict:
 
 def get_batches_for_type(document_type: str) -> list[dict] | None:
     """
+    DEPRECATED — document_type selection is no longer used by input nodes.
     Return custom batches for a document type, if defined.
     Types like 'resume' have hand-tuned batches that extract better
     than the automatic splitting.  Returns None if no custom batches.
@@ -427,7 +435,7 @@ def get_batches_for_type(document_type: str) -> list[dict] | None:
 def build_template_batches(template: dict, batch_size: int = 7) -> list[dict]:
     """
     Split a template into batches of *batch_size* fields each.
-    Small batches work better with the tiny NuExtract model.
+    Small batches work better with the extraction model.
     """
     keys = list(template.keys())
     batches = []
@@ -1404,7 +1412,7 @@ def discover_fields(text: str, document_type_hint: str = '') -> dict:
     genai.configure(api_key=api_key)
 
     model = genai.GenerativeModel(
-        model_name='gemini-2.0-flash',
+        model_name='gemini-2.5-flash',
         system_instruction=_FIELD_DISCOVERY_PROMPT,
         generation_config=genai.GenerationConfig(
             temperature=0.2,  # Low temp for consistent field selection
@@ -1560,7 +1568,7 @@ def gemini_extract_fields(text: str, fields: dict, document_type: str = '') -> d
     genai.configure(api_key=api_key)
 
     model = genai.GenerativeModel(
-        model_name='gemini-2.0-flash',
+        model_name='gemini-2.5-flash',
         system_instruction=_GEMINI_EXTRACT_PROMPT,
         generation_config=genai.GenerationConfig(
             temperature=0.1,  # Very low for factual extraction
@@ -1649,7 +1657,7 @@ def classify_document_type(text: str) -> str:
     genai.configure(api_key=api_key)
 
     model = genai.GenerativeModel(
-        model_name='gemini-2.0-flash',
+        model_name='gemini-2.5-flash',
         generation_config=genai.GenerationConfig(
             temperature=0.0,
             max_output_tokens=50,
@@ -1692,20 +1700,21 @@ def extract_document(document, workflow_template: dict, document_type: str = '',
     1b. (Optional) AI Field Discovery — if ai_discover=True, call Gemini
         to analyse the document and choose optimal extraction fields.
         This replaces the static template with AI-selected fields.
-    2. Run NuExtract PASS 1: type-specific global template
+    2. Run extraction PASS 1: type-specific global template
        (uses DOCUMENT_TYPE_TEMPLATES when *document_type* is set,
         otherwise falls back to GLOBAL_CLM_TEMPLATE)
        Uses custom batches for types like 'resume' that benefit from
        hand-tuned field grouping.
-    3. Run NuExtract PASS 2: workflow_template (rule-node fields)
+    3. Run extraction PASS 2: workflow_template (rule-node fields)
        — skipped if workflow_template is empty
     4. Post-process: list-aware parsing, value standardization
     5. Inject _text_snippet + _keywords into global_metadata so rule nodes
        can use 'contains' for full-text search / tag filtering.
     6. Save to document JSON fields + ExtractedField rows + ocr_metadata
 
-    Two-pass approach: the tiny model (0.5B) handles smaller templates
-    much better than one giant combined template.
+    Note: document_type parameter is DEPRECATED. Input nodes no longer
+    set document_type — extraction is triggered by AI extract nodes.
+    The parameter is kept for backwards compatibility with legacy endpoints.
 
     Returns dict with both global and workflow extraction results.
     """

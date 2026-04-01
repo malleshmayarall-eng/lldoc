@@ -147,6 +147,36 @@ class ImageHandler(ChangeHandler):
             edit_count=1,
         )
 
+        # Mirror the referenced image to Attachment library (best-effort)
+        if image_reference and image_reference.image:
+            try:
+                from attachments.models import Attachment
+
+                org = None
+                try:
+                    org = user.profile.organization
+                except Exception:
+                    pass
+
+                Attachment.objects.create(
+                    name=image_reference.name or "Unnamed Image",
+                    file_kind="image",
+                    image_type=image_reference.image_type or "picture",
+                    file=image_reference.image,
+                    scope=getattr(image_reference, "scope", "user") or "user",
+                    uploaded_by=user,
+                    organization=getattr(image_reference, "organization", None) or org,
+                    team=getattr(image_reference, "team", None),
+                    document=document,
+                    file_size=image_reference.file_size,
+                    mime_type=image_reference.mime_type,
+                    width=image_reference.width,
+                    height=image_reference.height,
+                    tags=image_reference.tags or [],
+                )
+            except Exception:
+                pass  # Non-critical — attachment mirror is best-effort
+
         self._log_change(
             document=document,
             user=user,

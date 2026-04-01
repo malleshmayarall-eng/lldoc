@@ -35,7 +35,8 @@ class SheetListSerializer(serializers.ModelSerializer):
         model = Sheet
         fields = [
             'id', 'title', 'description', 'row_count', 'col_count',
-            'is_archived', 'workflow', 'created_by', 'created_by_name',
+            'is_archived', 'workflow', 'unique_columns',
+            'created_by', 'created_by_name',
             'created_at', 'updated_at',
         ]
         read_only_fields = ['id', 'created_by', 'created_at', 'updated_at']
@@ -56,7 +57,7 @@ class SheetDetailSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'title', 'description', 'columns', 'rows',
             'custom_metadata', 'settings_json', 'workflow',
-            'is_archived', 'row_count', 'col_count',
+            'is_archived', 'row_count', 'col_count', 'unique_columns',
             'created_by', 'created_by_name',
             'created_at', 'updated_at',
         ]
@@ -65,8 +66,9 @@ class SheetDetailSerializer(serializers.ModelSerializer):
     def get_rows(self, obj):
         """Return all rows, including empty ones (no cells yet).
         Previously empty rows were filtered out, which caused newly added rows
-        to disappear from the grid before any cell was filled in."""
-        rows_qs = obj.rows.order_by('order').prefetch_related('cells')
+        to disappear from the grid before any cell was filled in.
+        Ordered descending by order so latest rows appear first."""
+        rows_qs = obj.rows.order_by('-order').prefetch_related('cells')
         return SheetRowSerializer(rows_qs, many=True).data
 
     def get_created_by_name(self, obj):
@@ -90,6 +92,17 @@ class AIGenerateSheetSerializer(serializers.Serializer):
     prompt = serializers.CharField()
     row_count = serializers.IntegerField(required=False, default=10)
     col_count = serializers.IntegerField(required=False, default=5)
+
+
+class AIEditSheetSerializer(serializers.Serializer):
+    """Payload for AI-assisted sheet editing / filling."""
+    prompt = serializers.CharField(help_text="Describe what to change or fill")
+    conversation_history = serializers.ListField(
+        child=serializers.DictField(),
+        required=False,
+        default=list,
+        help_text="Previous conversation messages for context",
+    )
 
 
 class ImportWorkflowDataSerializer(serializers.Serializer):

@@ -89,9 +89,12 @@ def _get_org(request):
 # Workflow
 # ---------------------------------------------------------------------------
 
-class WorkflowViewSet(viewsets.ModelViewSet):
+from .dashboard_views import WorkflowDashboardMixin
+
+
+class WorkflowViewSet(WorkflowDashboardMixin, viewsets.ModelViewSet):
     """
-    CRUD for workflows + document upload + execute.
+    CRUD for workflows + document upload + execute + live dashboard.
     """
     permission_classes = [permissions.AllowAny]  # DEV: allow unauthenticated
     parser_classes = [MultiPartParser, FormParser, JSONParser]
@@ -103,11 +106,40 @@ class WorkflowViewSet(viewsets.ModelViewSet):
 
     def get_queryset(self):
         org = _get_org(self.request)
-        if org:
-            return Workflow.objects.filter(
-                organization=org,
-            ).prefetch_related('nodes', 'connections', 'documents')
-        return Workflow.objects.none()
+        if not org:
+            return Workflow.objects.none()
+
+        qs = Workflow.objects.filter(
+            organization=org,
+        ).select_related('created_by', 'team').prefetch_related('nodes', 'connections', 'documents')
+
+        # ── Optional filters (query params) ───────────────────────────
+        params = self.request.query_params
+
+        # ?is_live=true  →  only live workflows
+        is_live = params.get('is_live')
+        if is_live is not None:
+            qs = qs.filter(is_live=is_live.lower() in ('true', '1'))
+
+        # ?scope=my|team|org  →  ownership filter
+        scope = params.get('scope', '').lower()
+        user = self.request.user
+        if scope == 'my' and user.is_authenticated:
+            qs = qs.filter(created_by=user)
+        elif scope == 'team' and user.is_authenticated:
+            # Workflows assigned to any team the user belongs to
+            if hasattr(user, 'profile'):
+                user_team_ids = user.profile.teams.values_list('id', flat=True)
+                qs = qs.filter(team_id__in=user_team_ids)
+            else:
+                qs = qs.none()
+
+        # ?team=<uuid>  →  specific team
+        team_id = params.get('team')
+        if team_id:
+            qs = qs.filter(team_id=team_id)
+
+        return qs
 
     def perform_create(self, serializer):
         org = _get_org(self.request)
@@ -118,9 +150,10 @@ class WorkflowViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=['post'], url_path='rebuild-template')
     def rebuild_template(self, request, pk=None):
         """
-        Re-scan all rule nodes in this workflow and rebuild
-        the NuExtract extraction_template from their field names.
+        Re-scan all rule/AI nodes in this workflow and rebuild
+        the extraction_template from their field names.
         Returns the new template + any new fields that were added.
+        Note: This template is used by AI extract nodes, not NuExtract.
         """
         workflow = self.get_object()
         template, changed_fields = workflow.rebuild_extraction_template()
@@ -182,11 +215,10 @@ class WorkflowViewSet(viewsets.ModelViewSet):
         Accepts multipart form: files[], title (optional).
         ZIP files are automatically extracted — each file inside becomes
         a separate WorkflowDocument.
-        After upload, extraction runs automatically using the
-        workflow's extraction_template via local NuExtract model.
+        Documents are marked as 'completed' immediately — metadata
+        extraction is handled by dedicated extract (AI) nodes in the
+        workflow, not at upload time.
         """
-        from .ai_inference import extract_document
-
         workflow = self.get_object()
         org = _get_org(request)
         raw_files = request.FILES.getlist('files') or [request.FILES.get('file')]
@@ -221,22 +253,14 @@ class WorkflowViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        # Ensure template is built
-        if not workflow.extraction_template:
-            workflow.rebuild_extraction_template()
-
-        template = workflow.extraction_template
-        # Determine document type — check for specific input_node_id first
+        # Determine input node for this upload
         input_node_id = request.data.get('input_node_id')
         input_node_obj = None
         if input_node_id:
             try:
                 input_node_obj = workflow.nodes.get(id=input_node_id, node_type='input')
-                doc_type = (input_node_obj.config or {}).get('document_type', '')
             except WorkflowNode.DoesNotExist:
-                doc_type = workflow.document_type
-        else:
-            doc_type = workflow.document_type  # fallback: first input node
+                pass
         created = []
         skipped_dupes = []
 
@@ -262,6 +286,28 @@ class WorkflowViewSet(viewsets.ModelViewSet):
                 })
                 continue
 
+            # ── Input plugin: pre-ingest hook ─────────────────────────
+            global_meta = {'_source': 'upload', '_file_hash': file_hash}
+            if input_node_obj:
+                try:
+                    from .input_plugins.pipeline import run_pre_ingest
+                    pre_result = run_pre_ingest(
+                        node=input_node_obj,
+                        file_name=name,
+                        file_size=getattr(fobj, 'size', 0) or 0,
+                        file_type=file_type,
+                        metadata=global_meta,
+                    )
+                    if pre_result.rejected:
+                        skipped_dupes.append({
+                            'title': name,
+                            'rejected_by_plugin': True,
+                            'reason': pre_result.reject_reason,
+                        })
+                        continue
+                except Exception as e:
+                    logger.debug(f"Input plugin pre-ingest error (non-fatal): {e}")
+
             doc = WorkflowDocument.objects.create(
                 workflow=workflow,
                 organization=org,
@@ -272,26 +318,41 @@ class WorkflowViewSet(viewsets.ModelViewSet):
                 file_hash=file_hash,
                 uploaded_by=request.user,
                 input_node=input_node_obj,
-                global_metadata={'_source': 'upload'},
+                global_metadata=global_meta,
             )
 
-            # Run AI extraction (blocking — inline for now)
-            if template:
+            # Mark as completed — extraction is handled by dedicated
+            # extract (AI) nodes in the workflow, not at upload time.
+            doc.extraction_status = 'completed'
+            doc.save(update_fields=['extraction_status'])
+
+            # ── Input plugin: post-pipeline hooks ─────────────────────
+            if input_node_obj and doc.extraction_status == 'completed':
                 try:
-                    extract_document(doc, template, document_type=doc_type)
-                    doc.last_extracted_template = template
-                    doc.save(update_fields=['last_extracted_template'])
+                    from .input_plugins.pipeline import run_post_pipeline
+                    run_post_pipeline(node=input_node_obj, document=doc)
                 except Exception as e:
-                    logger.error(f"Extraction failed for {doc.id}: {e}")
-                    doc.extraction_status = 'failed'
-                    doc.save(update_fields=['extraction_status'])
-            else:
-                # No extraction template — mark as completed so it passes
-                # through the pipeline without blocking.
-                doc.extraction_status = 'completed'
-                doc.save(update_fields=['extraction_status'])
+                    logger.debug(f"Input plugin post-pipeline error (non-fatal): {e}")
 
             created.append(doc)
+
+        # ── Input plugin: batch-complete hook ─────────────────────────
+        if input_node_obj and created:
+            try:
+                from .input_plugins.pipeline import run_batch_complete
+                run_batch_complete(
+                    node=input_node_obj,
+                    documents=created,
+                    stats={
+                        'total': len(files),
+                        'ready': len(created),
+                        'rejected': len(skipped_dupes),
+                        'failed': sum(1 for d in created if d.extraction_status == 'failed'),
+                        'issues': 0,
+                    },
+                )
+            except Exception as e:
+                logger.debug(f"Input plugin batch-complete error (non-fatal): {e}")
 
         # Auto-execute workflow if enabled
         auto_result = None
@@ -351,6 +412,51 @@ class WorkflowViewSet(viewsets.ModelViewSet):
         # Sync document_state on the input node so executor reads from it
         if input_node_obj:
             input_node_obj.sync_document_state()
+
+        # ── Upload-triggered execution: only when auto_execute_on_upload is
+        # explicitly enabled on this workflow.  Live workflows (is_live=True)
+        # are NOT triggered here — Celery Beat's dispatch_live_workflows task
+        # is the sole authority for periodic live execution.  This prevents
+        # the frontend from causing duplicate/inconsistent executions.
+        if created and workflow.auto_execute_on_upload and workflow.compilation_status == 'compiled':
+            logger.info(
+                '[upload] auto_execute_on_upload trigger: workflow=%s (%s) compiled=%s docs=%d',
+                workflow.name, workflow.id, workflow.compilation_status, len(created),
+            )
+            try:
+                from .event_system import dispatch_event
+                dispatch_result = dispatch_event(
+                    event_type='file_uploaded',
+                    source_type='upload',
+                    source_id='',  # upload subs have empty source_id
+                    payload={
+                        'workflow_id': str(workflow.id),
+                        'document_ids': [str(d.id) for d in created],
+                        'count': len(created),
+                        'uploaded_by': request.user.username if request.user.is_authenticated else None,
+                    },
+                    organization_id=str(org.id) if org else None,
+                )
+                if dispatch_result.get('dispatched'):
+                    logger.info('[upload] dispatch_event returned: dispatched=%d', dispatch_result['dispatched'])
+                    result['auto_execute'] = {
+                        'dispatched': dispatch_result['dispatched'],
+                        'execution_ids': [
+                            e.get('execution_id') for e in dispatch_result.get('events', [])
+                        ],
+                    }
+                else:
+                    logger.debug('[upload] dispatch_event returned no dispatches: %s', dispatch_result)
+            except Exception as e:
+                logger.warning('[upload] auto_execute dispatch after upload failed: %s', e)
+        elif created and workflow.is_live:
+            # Live workflows: new docs are picked up by Celery Beat on the
+            # next tick (dispatch_live_workflows runs every 60s).  Just log.
+            logger.info(
+                '[upload] Live workflow %s (%s) — %d docs uploaded, '
+                'Celery Beat will pick them up on next tick (interval=%ds)',
+                workflow.name, workflow.id, len(created), workflow.live_interval,
+            )
 
         return Response(result, status=status.HTTP_201_CREATED)
 
@@ -666,6 +772,8 @@ class WorkflowViewSet(viewsets.ModelViewSet):
         """
         Re-extract metadata for a single document in this workflow.
         POST { "document_id": "uuid", "template": {...} (optional) }
+        Note: Extraction is now handled by AI extract nodes. This endpoint
+        is kept for backward compatibility but delegates to ai_inference.
         """
         from .ai_inference import extract_document as run_extraction
 
@@ -688,7 +796,7 @@ class WorkflowViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_404_NOT_FOUND,
             )
 
-        result = run_extraction(doc, template, document_type=workflow.document_type)
+        result = run_extraction(doc, template)
         doc.refresh_from_db()
 
         return Response({
@@ -703,6 +811,7 @@ class WorkflowViewSet(viewsets.ModelViewSet):
         """
         Re-extract metadata for multiple (or all pending/failed) documents.
         POST { "document_ids": ["uuid", ...] (optional), "template": {...} (optional) }
+        Note: Extraction is now handled by AI extract nodes.
         """
         from .ai_inference import extract_document as run_extraction
 
@@ -723,11 +832,10 @@ class WorkflowViewSet(viewsets.ModelViewSet):
                 extraction_status__in=['pending', 'failed'],
             )
 
-        doc_type = workflow.document_type
         results = []
         for doc in docs:
             try:
-                result = run_extraction(doc, template, document_type=doc_type)
+                result = run_extraction(doc, template)
                 results.append({
                     'document_id': str(doc.id),
                     'title': doc.title,
@@ -878,7 +986,7 @@ class WorkflowViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=['post'], url_path='reextract/(?P<doc_id>[0-9a-f-]+)')
     def reextract_document(self, request, pk=None, doc_id=None):
         """
-        Re-extract metadata for a single document (re-runs text extraction + NuExtract).
+        Re-extract metadata for a single document (re-runs text extraction + AI).
         POST /api/clm/workflows/{id}/reextract/{doc_id}/
         Optionally accepts { "template": {...} } to override template.
         """
@@ -908,7 +1016,7 @@ class WorkflowViewSet(viewsets.ModelViewSet):
         doc.extraction_status = 'pending'
         doc.save(update_fields=['extraction_status'])
 
-        result = run_extraction(doc, template, document_type=workflow.document_type)
+        result = run_extraction(doc, template)
         doc.refresh_from_db()
 
         # Sync document_state on the owning input node
@@ -945,14 +1053,13 @@ class WorkflowViewSet(viewsets.ModelViewSet):
         elif status_filter:
             docs = docs.filter(extraction_status=status_filter)
 
-        doc_type = workflow.document_type
         results = []
         affected_nodes = set()
         for doc in docs:
             if doc.input_node_id:
                 affected_nodes.add(doc.input_node_id)
             try:
-                result = run_extraction(doc, template, document_type=doc_type)
+                result = run_extraction(doc, template)
                 results.append({
                     'document_id': str(doc.id),
                     'title': doc.title,
@@ -988,7 +1095,7 @@ class WorkflowViewSet(viewsets.ModelViewSet):
     def discover_fields(self, request, pk=None, doc_id=None):
         """
         Use Gemini AI to analyse a document and suggest optimal extraction fields.
-        Does NOT run NuExtract — only returns the recommended fields + batches.
+        Returns the recommended fields + batches for use with extract nodes.
         POST /api/clm/workflows/{id}/discover-fields/{doc_id}/
         """
         from .ai_inference import discover_fields as run_discovery
@@ -1021,8 +1128,7 @@ class WorkflowViewSet(viewsets.ModelViewSet):
         if not text.strip():
             return Response({'error': 'No text could be extracted from this document.'}, status=status.HTTP_400_BAD_REQUEST)
 
-        doc_type = workflow.document_type
-        result = run_discovery(text, document_type_hint=doc_type)
+        result = run_discovery(text)
 
         return Response({
             'document_id': str(doc.id),
@@ -1034,7 +1140,7 @@ class WorkflowViewSet(viewsets.ModelViewSet):
     def smart_extract_document(self, request, pk=None, doc_id=None):
         """
         AI-powered extraction: Gemini analyses the document to choose optimal
-        fields, then NuExtract extracts values using those AI-chosen fields.
+        fields, then AI extracts values using those fields.
         POST /api/clm/workflows/{id}/smart-extract/{doc_id}/
         """
         from .ai_inference import extract_document as run_extraction
@@ -1055,7 +1161,6 @@ class WorkflowViewSet(viewsets.ModelViewSet):
         try:
             result = run_extraction(
                 doc, template,
-                document_type=workflow.document_type,
                 ai_discover=True,
             )
         except Exception as e:
@@ -1075,7 +1180,7 @@ class WorkflowViewSet(viewsets.ModelViewSet):
         """
         AI-powered extraction for all (or selected) documents in the workflow.
         POST { "document_ids": ["uuid",...] (optional) }
-        Each document gets its own AI field discovery → NuExtract pipeline.
+        Each document gets its own AI field discovery → extraction pipeline.
         """
         from .ai_inference import extract_document as run_extraction
 
@@ -1083,7 +1188,6 @@ class WorkflowViewSet(viewsets.ModelViewSet):
         if not workflow.extraction_template:
             workflow.rebuild_extraction_template()
         template = workflow.extraction_template
-        doc_type = workflow.document_type
 
         doc_ids = request.data.get('document_ids')
         docs = workflow.documents.all()
@@ -1095,7 +1199,6 @@ class WorkflowViewSet(viewsets.ModelViewSet):
             try:
                 result = run_extraction(
                     doc, template,
-                    document_type=doc_type,
                     ai_discover=True,
                 )
                 results.append({
@@ -1246,13 +1349,8 @@ class WorkflowViewSet(viewsets.ModelViewSet):
                 field_values[fn] = values
 
         # Also provide the global template field names for reference
-        # Uses document-type-specific fields when a type is set on the input node
-        from .ai_inference import GLOBAL_CLM_TEMPLATE, get_template_for_type
-        doc_type = workflow.document_type
-        if doc_type:
-            global_fields = sorted(get_template_for_type(doc_type).keys())
-        else:
-            global_fields = sorted(GLOBAL_CLM_TEMPLATE.keys())
+        from .ai_inference import GLOBAL_CLM_TEMPLATE
+        global_fields = sorted(GLOBAL_CLM_TEMPLATE.keys())
 
         # Collect AI node output fields — these are available as metadata
         # fields in downstream rule nodes after execution
@@ -1288,7 +1386,6 @@ class WorkflowViewSet(viewsets.ModelViewSet):
             'field_values': field_values,
             'global_fields': global_fields,
             'ai_node_fields': ai_fields_list,
-            'document_type': doc_type or None,
             'total_fields': len(all_field_names),
             'total_documents': workflow.documents.count(),
         })
@@ -1496,7 +1593,7 @@ class WorkflowViewSet(viewsets.ModelViewSet):
         """
         POST /api/clm/workflows/{id}/compute-derived/{doc_id}/
           → Run derived field computation for a single document.
-          Optional body: {"model": "gemini-2.0-flash", "field_ids": [...]}
+          Optional body: {"model": "gemini-2.5-flash", "field_ids": [...]}
         """
         from .derived_field_executor import execute_derived_fields
 
@@ -1517,7 +1614,7 @@ class WorkflowViewSet(viewsets.ModelViewSet):
             )
 
         # Build a temporary AI node-like object for the executor
-        model_id = request.data.get('model', 'gemini-2.0-flash')
+        model_id = request.data.get('model', 'gemini-2.5-flash')
         field_ids = request.data.get('field_ids')
 
         # Create a mock node config
@@ -1546,7 +1643,7 @@ class WorkflowViewSet(viewsets.ModelViewSet):
         """
         POST /api/clm/workflows/{id}/compute-derived-all/
           → Run derived field computation for ALL completed documents.
-          Optional body: {"model": "gemini-2.0-flash", "field_ids": [...]}
+          Optional body: {"model": "gemini-2.5-flash", "field_ids": [...]}
         """
         from .derived_field_executor import execute_derived_fields
 
@@ -1565,7 +1662,7 @@ class WorkflowViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        model_id = request.data.get('model', 'gemini-2.0-flash')
+        model_id = request.data.get('model', 'gemini-2.5-flash')
         field_ids = request.data.get('field_ids')
 
         node = type('MockNode', (), {
@@ -1594,7 +1691,7 @@ class WorkflowViewSet(viewsets.ModelViewSet):
     @action(detail=False, methods=['get'], url_path='model-status')
     def model_status(self, request):
         """
-        Check NuExtract model status: loaded, device, inference count.
+        Check extraction model status: loaded, device, inference count.
         GET /api/clm/workflows/model-status/
         """
         from .ai_inference import get_engine
@@ -1913,6 +2010,534 @@ class WorkflowViewSet(viewsets.ModelViewSet):
 
         return Response(data)
 
+    # -- Live dashboard (polling endpoint) ---------------------------------
+
+    @action(detail=True, methods=['get'], url_path='live-dashboard')
+    def live_dashboard(self, request, pk=None):
+        """
+        GET /api/clm/workflows/{id}/live-dashboard/
+
+        Comprehensive snapshot polled every 2-5 s by the frontend hook.
+        Returns: workflow info, current_execution with node_progress,
+                 node_status (per-node last-run summary), subscription_health,
+                 live_metrics summary, and recent events.
+        """
+        from .models import WorkflowExecution, NodeExecutionLog, EventSubscription, WebhookEvent
+
+        workflow = self.get_object()
+
+        # ── Current / recent execution ─────────────────────────────────────
+        active_exec = WorkflowExecution.objects.filter(
+            workflow=workflow,
+            status__in=['queued', 'running'],
+        ).order_by('-started_at').first()
+
+        if not active_exec:
+            active_exec = WorkflowExecution.objects.filter(
+                workflow=workflow,
+            ).order_by('-started_at').first()
+
+        current_execution = None
+        if active_exec:
+            elapsed = None
+            if active_exec.started_at and active_exec.status in ('queued', 'running'):
+                elapsed = int((timezone.now() - active_exec.started_at).total_seconds())
+
+            # Node-level progress for this execution
+            node_logs = NodeExecutionLog.objects.filter(
+                execution=active_exec,
+            ).select_related('node').order_by('dag_level', 'started_at')
+
+            node_progress = []
+            for log in node_logs:
+                node_progress.append({
+                    'node_id':    str(log.node_id),
+                    'label':      log.node.label if log.node else '',
+                    'node_type':  log.node.node_type if log.node else '',
+                    'status':     log.status,
+                    'dag_level':  log.dag_level,
+                    'input_count':  log.input_count,
+                    'output_count': log.output_count,
+                    'duration_ms':  log.duration_ms,
+                    'error_message': log.error_message,
+                    'progress_pct': getattr(log, 'progress_pct', None),
+                })
+
+            current_execution = {
+                'execution_id': str(active_exec.id),
+                'status':         active_exec.status,
+                'mode':           active_exec.mode,
+                'total_documents': active_exec.total_documents,
+                'duration_ms':    active_exec.duration_ms,
+                'started_at':     active_exec.started_at.isoformat() if active_exec.started_at else None,
+                'completed_at':   active_exec.completed_at.isoformat() if active_exec.completed_at else None,
+                'elapsed_seconds': elapsed,
+                'node_summary':   active_exec.node_summary,
+                'node_progress':  node_progress,
+            }
+
+        # ── Per-node last-run summary ─────────────────────────────────────
+        nodes_qs = workflow.nodes.all()
+        node_status_list = []
+        for node in nodes_qs:
+            last_log = NodeExecutionLog.objects.filter(
+                node=node,
+            ).order_by('-started_at').first()
+            node_status_list.append({
+                'node_id':        str(node.id),
+                'label':          node.label,
+                'node_type':      node.node_type,
+                'last_status':    last_log.status if last_log else 'never_run',
+                'last_duration_ms': last_log.duration_ms if last_log else None,
+                'last_run_at':    last_log.started_at.isoformat() if last_log and last_log.started_at else None,
+                'total_documents': last_log.input_count if last_log else 0,
+                'ready_documents': last_log.output_count if last_log else 0,
+                'pending_documents': 0,
+                'failed_documents': 0,
+            })
+
+        # ── Subscription health ────────────────────────────────────────────
+        subs = EventSubscription.objects.filter(workflow=workflow).select_related('workflow')
+        sub_health = []
+        for sub in subs:
+            node_label = ''
+            try:
+                node_label = workflow.nodes.filter(
+                    id=sub.source_id,
+                ).values_list('label', flat=True).first() or ''
+            except Exception:
+                pass
+            sub_health.append({
+                'subscription_id': str(sub.id),
+                'source_type':     sub.source_type,
+                'source_id':       str(sub.source_id) if sub.source_id else None,
+                'node_label':      node_label,
+                'status':          sub.status,
+                'total_events':    sub.total_events_received,
+                'total_executions': sub.total_executions_triggered,
+                'consecutive_errors': sub.consecutive_errors,
+                'last_error':      sub.last_error,
+                'last_polled_at':  sub.last_polled_at.isoformat() if sub.last_polled_at else None,
+                'poll_interval':   sub.poll_interval,
+            })
+
+        # ── Recent events (last 20) ─────────────────────────────────────────
+        recent_events_qs = WebhookEvent.objects.filter(
+            workflow=workflow,
+        ).order_by('-created_at')[:20]
+        recent_events = [
+            {
+                'event_id':   str(ev.id),
+                'event_type': ev.event_type,
+                'status':     ev.status,
+                'created_at': ev.created_at.isoformat(),
+                'data':       ev.payload if hasattr(ev, 'payload') else {},
+            }
+            for ev in recent_events_qs
+        ]
+
+        # ── Live metrics summary ────────────────────────────────────────────
+        from django.utils import timezone as tz
+        window = tz.now() - timezone.timedelta(hours=24)
+        recent_execs = WorkflowExecution.objects.filter(
+            workflow=workflow,
+            started_at__gte=window,
+        )
+        total = recent_execs.count()
+        completed = recent_execs.filter(status='completed').count()
+        failed    = recent_execs.filter(status='failed').count()
+        partial   = recent_execs.filter(status='partial').count()
+        success_rate = round((completed / total) * 100, 1) if total else 0
+
+        live_metrics = {
+            'total_executions_24h': total,
+            'completed': completed,
+            'failed': failed,
+            'partial': partial,
+            'success_rate': success_rate,
+            'is_live': workflow.is_live,
+            'compilation_status': workflow.compilation_status,
+            'last_executed_at': workflow.last_executed_at.isoformat() if workflow.last_executed_at else None,
+        }
+
+        return Response({
+            'workflow': {
+                'id':                 str(workflow.id),
+                'name':               workflow.name,
+                'is_live':            workflow.is_live,
+                'is_active':          workflow.is_active,
+                'compilation_status': workflow.compilation_status,
+                'execution_state':    workflow.execution_state,
+                'live_interval':      workflow.live_interval,
+                'last_executed_at':   workflow.last_executed_at.isoformat() if workflow.last_executed_at else None,
+            },
+            'current_execution':  current_execution,
+            'node_status':        node_status_list,
+            'subscription_health': sub_health,
+            'recent_events':      recent_events,
+            'live_metrics':       live_metrics,
+        })
+
+    # -- Live metrics (detailed, period-based) ------------------------------
+
+    @action(detail=True, methods=['get'], url_path='live-metrics')
+    def live_metrics(self, request, pk=None):
+        """
+        GET /api/clm/workflows/{id}/live-metrics/?period=24h|7d|30d
+
+        Returns detailed execution metrics for the workflow for dashboard charts.
+        """
+        from .models import WorkflowExecution, NodeExecutionLog
+
+        workflow = self.get_object()
+        period = request.query_params.get('period', '24h')
+
+        period_map = {'24h': 24, '7d': 168, '30d': 720}
+        hours = period_map.get(period, 24)
+        since = timezone.now() - timezone.timedelta(hours=hours)
+
+        execs = WorkflowExecution.objects.filter(
+            workflow=workflow,
+            started_at__gte=since,
+        )
+
+        total     = execs.count()
+        completed = execs.filter(status='completed').count()
+        failed    = execs.filter(status='failed').count()
+        partial   = execs.filter(status='partial').count()
+        success_rate = round((completed / total) * 100, 1) if total else 0
+
+        # Average duration
+        from django.db.models import Avg, Sum
+        avg_ms = execs.filter(
+            duration_ms__isnull=False,
+        ).aggregate(avg=Avg('duration_ms'))['avg'] or 0
+
+        total_docs = execs.aggregate(
+            total=Sum('total_documents'),
+        )['total'] or 0
+
+        summary = {
+            'total_executions': total,
+            'completed': completed,
+            'failed': failed,
+            'partial': partial,
+            'success_rate': success_rate,
+            'avg_duration_ms': int(avg_ms),
+            'total_documents_processed': total_docs,
+        }
+
+        # Node performance table
+        node_perf_map = {}
+        node_logs = NodeExecutionLog.objects.filter(
+            execution__workflow=workflow,
+            execution__started_at__gte=since,
+        ).select_related('node')
+
+        for log in node_logs:
+            nid = str(log.node_id)
+            if nid not in node_perf_map:
+                node_perf_map[nid] = {
+                    'node_id': nid,
+                    'label': log.node.label if log.node else '',
+                    'node_type': log.node.node_type if log.node else '',
+                    'executions': 0,
+                    'total_duration_ms': 0,
+                    'total_input_docs': 0,
+                    'failure_count': 0,
+                }
+            entry = node_perf_map[nid]
+            entry['executions'] += 1
+            entry['total_duration_ms'] += log.duration_ms or 0
+            entry['total_input_docs'] += log.input_count or 0
+            if log.status in ('failed', 'error'):
+                entry['failure_count'] += 1
+
+        node_performance = []
+        for entry in node_perf_map.values():
+            entry['avg_duration_ms'] = (
+                entry['total_duration_ms'] // entry['executions']
+                if entry['executions'] else 0
+            )
+            node_performance.append(entry)
+        node_performance.sort(key=lambda x: -x['executions'])
+
+        # Hourly distribution (only meaningful for 24h)
+        hourly = []
+        if period == '24h':
+            from django.db.models.functions import TruncHour
+            from django.db.models import Count
+            hourly_qs = execs.annotate(
+                hour=TruncHour('started_at'),
+            ).values('hour').annotate(
+                executions=Count('id'),
+            ).order_by('hour')
+            for row in hourly_qs:
+                hourly.append({
+                    'hour': row['hour'].strftime('%H:00') if row['hour'] else '',
+                    'executions': row['executions'],
+                })
+
+        return Response({
+            'period': period,
+            'summary': summary,
+            'node_performance': node_performance,
+            'hourly_distribution': hourly,
+        })
+
+    # -- SSE live-stream endpoint -------------------------------------------
+
+    @action(detail=True, methods=['get'], url_path='live-stream')
+    def live_stream(self, request, pk=None):
+        """
+        GET /api/clm/workflows/{id}/live-stream/
+        ?last_event_id=<uuid>   Resume from a specific event (replays buffered events first)
+
+        Server-Sent Events (SSE) stream of live workflow execution events.
+
+        Architecture:
+          This endpoint uses a HYBRID approach to handle both in-process
+          (sync / no-Celery) and out-of-process (Celery worker) executions:
+
+          1. In-process bus (live_events.event_bus):
+             - Works immediately for sync executions
+             - Celery workers emit to their OWN process's bus (not shared)
+
+          2. DB polling (NodeExecutionLog + WorkflowExecution):
+             - Polls the DB every 2s to pick up Celery-based progress
+             - Converts DB records to synthetic SSE events
+             - Works regardless of whether Celery or sync execution is used
+
+          Both sources are multiplexed into the same SSE stream.
+
+        Client usage:
+          const es = new EventSource('/api/clm/workflows/{id}/live-stream/', {withCredentials: true});
+          es.addEventListener('execution_started', e => { ... });
+          es.addEventListener('node_started', e => { ... });
+          es.addEventListener('node_progress', e => { ... });
+          es.addEventListener('node_completed', e => { ... });
+          es.addEventListener('node_failed', e => { ... });
+          es.addEventListener('execution_completed', e => { ... });
+          es.addEventListener('live_tick', e => { ... });
+          es.addEventListener('compilation_done', e => { ... });
+
+        SSE keepalive is sent every 25s (a comment line: ': keepalive\\n\\n').
+        The stream closes automatically when the client disconnects.
+        """
+        import json
+        import time
+        import threading
+        from django.http import StreamingHttpResponse
+
+        from .live_events import event_bus, LiveEvent
+        from .models import NodeExecutionLog, WorkflowExecution
+
+        workflow = self.get_object()
+        workflow_id = str(workflow.id)
+        last_event_id = request.GET.get('last_event_id', '')
+
+        # Detect client disconnect via threading.Event
+        disconnect_event = threading.Event()
+
+        def _make_sse(event_type: str, data: dict, event_id: str = '') -> str:
+            payload = json.dumps(data, default=str)
+            lines = []
+            if event_id:
+                lines.append(f'id: {event_id}')
+            lines.append(f'event: {event_type}')
+            lines.append(f'data: {payload}')
+            lines.append('')  # blank line = end of message
+            return '\n'.join(lines) + '\n'
+
+        def _db_snapshot(since_exec_id: str, seen_node_ids: set) -> list[str]:
+            """
+            Poll DB for execution progress events not yet pushed via event_bus.
+            Returns SSE-formatted strings.
+            """
+            messages = []
+
+            # Latest active or recent execution
+            exec_qs = WorkflowExecution.objects.filter(
+                workflow_id=workflow_id,
+            ).order_by('-started_at')
+
+            if since_exec_id:
+                exec_qs = exec_qs.filter(id=since_exec_id)
+            else:
+                exec_qs = exec_qs[:1]
+
+            for execution in exec_qs:
+                exec_id = str(execution.id)
+
+                # Execution state change events
+                if execution.status == 'running' and exec_id not in seen_node_ids:
+                    seen_node_ids.add(f'exec_start:{exec_id}')
+                    messages.append(_make_sse('execution_started', {
+                        'workflow_id': workflow_id,
+                        'execution_id': exec_id,
+                        'status': 'running',
+                        'mode': execution.mode,
+                        'total_documents': execution.total_documents or 0,
+                        'source': 'db_poll',
+                    }))
+
+                if execution.status in ('completed', 'partial', 'failed'):
+                    key = f'exec_done:{exec_id}'
+                    if key not in seen_node_ids:
+                        seen_node_ids.add(key)
+                        messages.append(_make_sse('execution_completed', {
+                            'workflow_id': workflow_id,
+                            'execution_id': exec_id,
+                            'status': execution.status,
+                            'duration_ms': execution.duration_ms or 0,
+                            'total_documents': execution.total_documents or 0,
+                            'output_count': (
+                                len(execution.result_data.get('output_documents', []))
+                                if execution.result_data else 0
+                            ),
+                            'source': 'db_poll',
+                        }))
+
+                # Per-node execution logs
+                logs = NodeExecutionLog.objects.filter(
+                    execution=execution,
+                ).select_related('node').order_by('dag_level', 'started_at')
+
+                for log in logs:
+                    node_key = f'node:{exec_id}:{log.node_id}'  # type: ignore[attr-defined]
+                    if log.status == 'running' and f'{node_key}:start' not in seen_node_ids:
+                        seen_node_ids.add(f'{node_key}:start')
+                        messages.append(_make_sse('node_started', {
+                            'workflow_id': workflow_id,
+                            'execution_id': exec_id,
+                            'node_id': str(log.node_id),  # type: ignore[attr-defined]
+                            'node_type': log.node.node_type if log.node else '',
+                            'node_label': log.node.label if log.node else '',
+                            'input_count': log.input_count,
+                            'dag_level': log.dag_level,
+                            'source': 'db_poll',
+                        }))
+
+                    if log.status in ('completed', 'failed', 'skipped'):
+                        done_key = f'{node_key}:{log.status}'
+                        if done_key not in seen_node_ids:
+                            seen_node_ids.add(done_key)
+                            ev_type = 'node_completed' if log.status != 'failed' else 'node_failed'
+                            messages.append(_make_sse(ev_type, {
+                                'workflow_id': workflow_id,
+                                'execution_id': exec_id,
+                                'node_id': str(log.node_id),  # type: ignore[attr-defined]
+                                'node_type': log.node.node_type if log.node else '',
+                                'node_label': log.node.label if log.node else '',
+                                'output_count': log.output_count,
+                                'input_count': log.input_count,
+                                'duration_ms': log.duration_ms or 0,
+                                'dag_level': log.dag_level,
+                                'error': log.error_message or '',
+                                'status': log.status,
+                                'source': 'db_poll',
+                            }))
+
+            return messages
+
+        def _event_generator():
+            """
+            Generator that yields SSE messages.
+
+            1. Replay buffered events from the in-process ring buffer (for
+               reconnection after brief disconnect).
+            2. Subscribe to the in-process event bus for new in-process events.
+            3. Concurrently poll DB every 2s for Celery-worker progress.
+            4. Send keepalive comments every 25s.
+            """
+            import uuid as _uuid
+
+            # Replay buffered events (for reconnection)
+            buffered = event_bus.get_recent(workflow_id, limit=100)
+            replay_start = False
+            for ev in buffered:
+                if last_event_id and not replay_start:
+                    if ev.event_id == last_event_id:
+                        replay_start = True
+                    continue  # skip until we find last_event_id
+                yield ev.to_sse()
+
+            # Track what we've seen from DB polling
+            seen_db_keys: set[str] = set()
+            active_exec_id = ''
+
+            # Check if there's an active execution to focus DB polls on
+            active_exec = WorkflowExecution.objects.filter(
+                workflow_id=workflow_id,
+                status__in=['queued', 'running'],
+            ).order_by('-started_at').first()
+            if active_exec:
+                active_exec_id = str(active_exec.id)
+
+            last_db_poll = 0.0
+            last_keepalive = time.time()
+            DB_POLL_INTERVAL = 2.0      # seconds between DB polls
+            KEEPALIVE_INTERVAL = 25.0   # seconds between keepalive comments
+
+            with event_bus.subscribe(workflow_id) as sub:
+                while not disconnect_event.is_set():
+                    now = time.time()
+
+                    # 1. Drain in-process events (immediate, from sync exec / compile)
+                    for ev in sub.iter_events(timeout=0.5):
+                        if ev is None:
+                            break  # timeout — move on
+                        yield ev.to_sse()
+                        # If this event tells us an execution started, track it
+                        if ev.event_type == 'execution_started' and ev.execution_id:
+                            active_exec_id = ev.execution_id
+
+                    # 2. DB poll for Celery-worker progress
+                    if now - last_db_poll >= DB_POLL_INTERVAL:
+                        last_db_poll = now
+                        try:
+                            db_msgs = _db_snapshot(active_exec_id, seen_db_keys)
+                            for msg in db_msgs:
+                                yield msg
+                        except Exception as e:
+                            logger.warning(f'[live-stream] DB poll error: {e}')
+
+                        # Update active_exec_id if a new execution appeared
+                        fresh = WorkflowExecution.objects.filter(
+                            workflow_id=workflow_id,
+                            status__in=['queued', 'running'],
+                        ).order_by('-started_at').values_list('id', flat=True).first()
+                        if fresh:
+                            active_exec_id = str(fresh)
+
+                    # 3. Keepalive comment
+                    if now - last_keepalive >= KEEPALIVE_INTERVAL:
+                        last_keepalive = now
+                        # Refresh workflow state
+                        try:
+                            wf = Workflow.objects.get(id=workflow_id)
+                            tick_data = {
+                                'workflow_id': workflow_id,
+                                'is_live': wf.is_live,
+                                'execution_state': wf.execution_state,
+                                'timestamp': timezone.now().isoformat(),
+                            }
+                            yield _make_sse('live_tick', tick_data, event_id=str(_uuid.uuid4()))
+                        except Exception:
+                            pass
+                        yield ': keepalive\n\n'
+
+        response = StreamingHttpResponse(
+            _event_generator(),
+            content_type='text/event-stream',
+        )
+        response['Cache-Control'] = 'no-cache'
+        response['X-Accel-Buffering'] = 'no'  # Disable nginx buffering
+        response['Access-Control-Allow-Origin'] = request.headers.get('Origin', '*')
+        response['Access-Control-Allow-Credentials'] = 'true'
+
+        return response
+
     # -- Live mode toggle ----------------------------------------------------
 
     @action(detail=True, methods=['get', 'patch'], url_path='live')
@@ -1923,6 +2548,11 @@ class WorkflowViewSet(viewsets.ModelViewSet):
 
         Body (PATCH):
           { "is_live": true, "live_interval": 60 }
+
+        Server enforces:
+          - Cannot go live unless workflow is compiled.
+          - Celery Beat (dispatch_live_workflows) is the sole authority for
+            periodic execution — this endpoint only persists the config.
         """
         workflow = self.get_object()
 
@@ -1930,22 +2560,56 @@ class WorkflowViewSet(viewsets.ModelViewSet):
             return Response({
                 'is_live': workflow.is_live,
                 'live_interval': workflow.live_interval,
+                'compilation_status': workflow.compilation_status,
                 'last_executed_at': workflow.last_executed_at.isoformat() if workflow.last_executed_at else None,
             })
 
         # PATCH
-        if 'is_live' in request.data:
-            workflow.is_live = bool(request.data['is_live'])
+        from .models import EventSubscription
+
+        turning_live = request.data.get('is_live', None)
+
+        # Server-side guard: cannot go live unless compiled
+        if turning_live and workflow.compilation_status != 'compiled':
+            logger.warning(
+                '[live-toggle] Rejected is_live=True for workflow %s — not compiled (status=%s)',
+                workflow.name, workflow.compilation_status,
+            )
+            return Response({
+                'error': 'Cannot go live — workflow must be compiled first.',
+                'compilation_status': workflow.compilation_status,
+                'hint': 'POST /api/clm/workflows/{id}/compile/ or POST /api/clm/workflows/{id}/go-live/',
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        if turning_live is not None:
+            workflow.is_live = bool(turning_live)
         if 'live_interval' in request.data:
             interval = int(request.data['live_interval'])
             workflow.live_interval = max(interval, 10)  # minimum 10s
 
         workflow.save(update_fields=['is_live', 'live_interval', 'updated_at'])
 
+        logger.info(
+            '[live-toggle] Workflow %s (%s) is now %s (interval=%ds)',
+            workflow.name, workflow.id,
+            'LIVE' if workflow.is_live else 'OFFLINE',
+            workflow.live_interval,
+        )
+
+        # When going live: reactivate any paused subscriptions
+        # (subscriptions are paused by pause() but should come back on re-enable)
+        reactivated = 0
+        if workflow.is_live:
+            reactivated = EventSubscription.objects.filter(
+                workflow=workflow, status='paused',
+            ).update(status='active')
+
         return Response({
             'is_live': workflow.is_live,
             'live_interval': workflow.live_interval,
-            'message': f'Workflow is now {"LIVE" if workflow.is_live else "offline"}.',
+            'compilation_status': workflow.compilation_status,
+            'subscriptions_reactivated': reactivated,
+            'message': f'Workflow is now {"LIVE — Celery Beat will manage execution" if workflow.is_live else "offline"}.',
         })
 
     # -- Compile workflow (validate DAG + create event subscriptions) --------
@@ -1963,10 +2627,16 @@ class WorkflowViewSet(viewsets.ModelViewSet):
         subscription details.
         """
         from .event_system import compile_workflow as _compile
+        from .live_events import emit_compilation_event
         from .models import WorkflowCompilation
 
         workflow = self.get_object()
+        emit_compilation_event(workflow, status='compiling')
         compilation = _compile(workflow, user=request.user if request.user.is_authenticated else None)
+        emit_compilation_event(
+            workflow, status=compilation.status,
+            errors=compilation.errors, warnings=compilation.warnings,
+        )
 
         return Response({
             'id': str(compilation.id),
@@ -2619,8 +3289,10 @@ class WorkflowViewSet(viewsets.ModelViewSet):
                 doc_meta = doc.extracted_metadata or {}
                 created_fields = {}
                 if ai_output_format == 'json_extract' and ai_json_fields:
-                    for fname in ai_json_fields:
-                        if fname in doc_meta:
+                    for jf in ai_json_fields:
+                        # json_fields items can be dicts {"name": "...", ...} or plain strings
+                        fname = jf.get('name', '').strip() if isinstance(jf, dict) else str(jf).strip()
+                        if fname and fname in doc_meta:
                             created_fields[fname] = str(doc_meta[fname])[:120]
                 elif ai_output_format == 'yes_no':
                     if ai_output_key in doc_meta:
@@ -2726,16 +3398,63 @@ class WorkflowViewSet(viewsets.ModelViewSet):
                 elif passed:
                     doc_entry['reason'] = 'Event received — listener gate passed'
 
-            # ── Input node: show extraction status + metadata snippet ──
+            # ── Input node: show extraction status + ALL metadata fields ──
             if node.node_type == 'input':
                 meta = doc.extracted_metadata or {}
                 global_meta = doc.global_metadata or {}
+
+                # Build a rich field list with type detection
+                all_fields = []
+                for k, v in meta.items():
+                    val_str = str(v) if v is not None else ''
+                    val_type = 'text'
+                    if isinstance(v, bool):
+                        val_type = 'boolean'
+                    elif isinstance(v, (int, float)):
+                        val_type = 'number'
+                    elif isinstance(v, list):
+                        val_type = 'list'
+                        val_str = ', '.join(str(i) for i in v) if v else ''
+                    elif isinstance(v, dict):
+                        val_type = 'object'
+                        import json as _json
+                        val_str = _json.dumps(v, default=str)[:500]
+                    all_fields.append({
+                        'key': k,
+                        'value': val_str[:500],
+                        'type': val_type,
+                        'source': 'extracted',
+                        'empty': v is None or val_str.strip() == '',
+                    })
+
+                # Include global_metadata (prefixed for clarity)
+                for k, v in global_meta.items():
+                    if k.startswith('_'):
+                        continue  # skip internal keys
+                    val_str = str(v) if v is not None else ''
+                    all_fields.append({
+                        'key': k,
+                        'value': val_str[:500],
+                        'type': 'text',
+                        'source': 'global',
+                        'empty': v is None or val_str.strip() == '',
+                    })
+
                 doc_entry['details']['input'] = {
                     'extraction_status': doc.extraction_status,
                     'document_type': global_meta.get('_document_type', ''),
                     'source': global_meta.get('_source', 'upload'),
                     'field_count': len(meta),
+                    'global_field_count': len([k for k in global_meta if not k.startswith('_')]),
                     'top_fields': {k: str(v)[:80] for k, v in list(meta.items())[:8]},
+                    'all_fields': all_fields,
+                    'file_info': {
+                        'file_type': doc.file_type or '',
+                        'file_size': doc.file_size if hasattr(doc, 'file_size') else None,
+                        'page_count': doc.page_count if hasattr(doc, 'page_count') else None,
+                        'created_at': doc.created_at.isoformat() if doc.created_at else None,
+                        'updated_at': doc.updated_at.isoformat() if doc.updated_at else None,
+                    },
                 }
                 if passed:
                     field_count = len(meta)
@@ -3077,6 +3796,253 @@ class WorkflowViewSet(viewsets.ModelViewSet):
             'auto_execute_on_upload': workflow.auto_execute_on_upload,
         })
 
+    # -- Workflow Settings (validation, execution, general) -----------------
+
+    @action(detail=True, methods=['get', 'patch'], url_path='workflow-settings')
+    def workflow_settings(self, request, pk=None):
+        """
+        GET:   Return full workflow settings (workflow_settings JSON + trigger_mode).
+        PATCH: Deep-merge incoming settings into workflow_settings, update trigger_mode.
+
+        PATCH body:
+        {
+          "trigger_mode": "event",
+          "settings": {
+            "validation": { "approval_rule": "all", "require_note": true },
+            "execution": { "retry_on_failure": true, "max_retries": 5 },
+            "general": { "tags": ["contracts", "hr"], "color": "#10b981" }
+          }
+        }
+        """
+        workflow = self.get_object()
+
+        if request.method == 'GET':
+            return Response({
+                'workflow_settings': workflow.workflow_settings or {},
+                'trigger_mode': workflow.trigger_mode,
+                'auto_execute_on_upload': workflow.auto_execute_on_upload,
+                'is_live': workflow.is_live,
+                'live_interval': workflow.live_interval,
+            })
+
+        update_fields = ['updated_at']
+
+        # Merge settings (deep merge)
+        incoming = request.data.get('settings')
+        if incoming and isinstance(incoming, dict):
+            current = dict(workflow.workflow_settings or {})
+            for section_key, section_val in incoming.items():
+                if isinstance(section_val, dict):
+                    current.setdefault(section_key, {})
+                    current[section_key].update(section_val)
+                else:
+                    current[section_key] = section_val
+            workflow.workflow_settings = current
+            update_fields.append('workflow_settings')
+
+        # Trigger mode
+        trigger_mode = request.data.get('trigger_mode')
+        if trigger_mode and trigger_mode in dict(Workflow.TriggerMode.choices):
+            workflow.trigger_mode = trigger_mode
+            update_fields.append('trigger_mode')
+
+        # Convenience: also allow toggling common fields here
+        if 'auto_execute_on_upload' in request.data:
+            workflow.auto_execute_on_upload = bool(request.data['auto_execute_on_upload'])
+            update_fields.append('auto_execute_on_upload')
+        if 'live_interval' in request.data:
+            workflow.live_interval = max(int(request.data['live_interval']), 10)
+            update_fields.append('live_interval')
+
+        workflow.save(update_fields=update_fields)
+
+        return Response({
+            'workflow_settings': workflow.workflow_settings,
+            'trigger_mode': workflow.trigger_mode,
+            'auto_execute_on_upload': workflow.auto_execute_on_upload,
+            'is_live': workflow.is_live,
+            'live_interval': workflow.live_interval,
+        })
+
+    # -- Event Triggers (CRUD) ----------------------------------------------
+
+    @action(detail=True, methods=['get', 'post'], url_path='event-triggers')
+    def event_triggers(self, request, pk=None):
+        """
+        GET:  List all event triggers for this workflow.
+        POST: Create a new event trigger.
+
+        POST body:
+        {
+          "name": "Daily contract scan",
+          "trigger_type": "schedule",
+          "config": { "cron": "0 9 * * *", "timezone": "UTC" },
+          "is_active": true
+        }
+        """
+        from .models import WorkflowEventTrigger
+        from .serializers import WorkflowEventTriggerSerializer
+
+        workflow = self.get_object()
+
+        if request.method == 'GET':
+            triggers = workflow.event_triggers.all()
+            serializer = WorkflowEventTriggerSerializer(triggers, many=True)
+            return Response({
+                'triggers': serializer.data,
+                'trigger_mode': workflow.trigger_mode,
+                'count': triggers.count(),
+            })
+
+        # POST — create
+        data = request.data.copy()
+        data['workflow'] = str(workflow.id)
+        serializer = WorkflowEventTriggerSerializer(data=data)
+        serializer.is_valid(raise_exception=True)
+        trigger = serializer.save(
+            workflow=workflow,
+            created_by=request.user if request.user.is_authenticated else None,
+        )
+
+        # If first event trigger and still manual mode, suggest switching
+        active_count = workflow.event_triggers.filter(is_active=True).count()
+
+        return Response({
+            'trigger': WorkflowEventTriggerSerializer(trigger).data,
+            'active_trigger_count': active_count,
+            'message': f'Trigger "{trigger.name or trigger.get_trigger_type_display()}" created.',
+        }, status=status.HTTP_201_CREATED)
+
+    @action(detail=True, methods=['patch', 'delete'], url_path=r'event-triggers/(?P<trigger_id>[0-9a-f-]+)')
+    def event_trigger_detail(self, request, pk=None, trigger_id=None):
+        """
+        PATCH:  Update an event trigger.
+        DELETE: Delete an event trigger.
+        """
+        from .models import WorkflowEventTrigger
+        from .serializers import WorkflowEventTriggerSerializer
+
+        workflow = self.get_object()
+
+        try:
+            trigger = WorkflowEventTrigger.objects.get(
+                id=trigger_id, workflow=workflow,
+            )
+        except WorkflowEventTrigger.DoesNotExist:
+            return Response(
+                {'error': 'Trigger not found.'},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        if request.method == 'DELETE':
+            trigger.delete()
+            return Response({
+                'success': True,
+                'message': 'Trigger deleted.',
+            })
+
+        # PATCH
+        serializer = WorkflowEventTriggerSerializer(
+            trigger, data=request.data, partial=True,
+        )
+        serializer.is_valid(raise_exception=True)
+        serializer.save()
+
+        return Response({
+            'trigger': serializer.data,
+            'message': 'Trigger updated.',
+        })
+
+    # -- Available trigger types (for frontend dropdown) --------------------
+
+    @action(detail=False, methods=['get'], url_path='trigger-types')
+    def trigger_types(self, request):
+        """
+        GET /api/clm/workflows/trigger-types/
+        Returns available trigger types with their config schemas.
+        """
+        from .models import WorkflowEventTrigger
+
+        types = []
+        config_schemas = {
+            'webhook': {
+                'description': 'Receive HTTP POST from external systems',
+                'fields': [
+                    {'key': 'secret', 'label': 'Webhook Secret', 'type': 'password', 'required': False},
+                    {'key': 'headers_filter', 'label': 'Required Headers (JSON)', 'type': 'json', 'required': False},
+                ],
+            },
+            'schedule': {
+                'description': 'Run on a time-based schedule',
+                'fields': [
+                    {'key': 'cron', 'label': 'Cron Expression', 'type': 'text', 'required': True, 'placeholder': '0 9 * * *'},
+                    {'key': 'timezone', 'label': 'Timezone', 'type': 'text', 'required': False, 'default': 'UTC'},
+                    {'key': 'enabled_days', 'label': 'Enabled Days (1=Mon)', 'type': 'multiselect', 'options': [1,2,3,4,5,6,7], 'required': False},
+                ],
+            },
+            'file_upload': {
+                'description': 'Trigger when a file is uploaded',
+                'fields': [
+                    {'key': 'file_types', 'label': 'Accepted File Types', 'type': 'tags', 'required': False, 'placeholder': 'pdf, docx, txt'},
+                    {'key': 'min_files', 'label': 'Minimum Files', 'type': 'number', 'required': False, 'default': 1},
+                ],
+            },
+            'email': {
+                'description': 'Trigger when an email arrives',
+                'fields': [
+                    {'key': 'inbox', 'label': 'Inbox Address', 'type': 'email', 'required': True},
+                    {'key': 'subject_filter', 'label': 'Subject Filter (glob)', 'type': 'text', 'required': False, 'placeholder': 'Invoice*'},
+                    {'key': 'from_filter', 'label': 'From Filter', 'type': 'text', 'required': False},
+                ],
+            },
+            'sheet_update': {
+                'description': 'Trigger when a linked Sheet is updated',
+                'fields': [
+                    {'key': 'sheet_id', 'label': 'Sheet ID', 'type': 'text', 'required': True},
+                    {'key': 'trigger_on', 'label': 'Trigger On', 'type': 'select', 'options': ['row_created', 'row_updated', 'any'], 'default': 'any'},
+                ],
+            },
+            'field_change': {
+                'description': 'Trigger when a specific field value changes',
+                'fields': [
+                    {'key': 'field_name', 'label': 'Field Name', 'type': 'text', 'required': True},
+                    {'key': 'condition', 'label': 'Condition', 'type': 'select', 'options': ['changed', 'gt', 'lt', 'eq', 'contains'], 'default': 'changed'},
+                    {'key': 'threshold', 'label': 'Threshold Value', 'type': 'text', 'required': False},
+                ],
+            },
+            'document_status': {
+                'description': 'Trigger when document extraction completes or fails',
+                'fields': [
+                    {'key': 'status', 'label': 'Status', 'type': 'select', 'options': ['completed', 'failed', 'any'], 'default': 'completed'},
+                ],
+            },
+            'api_call': {
+                'description': 'Trigger via API call with custom payload',
+                'fields': [
+                    {'key': 'expected_payload_keys', 'label': 'Expected Payload Keys', 'type': 'tags', 'required': False},
+                ],
+            },
+            'manual': {
+                'description': 'Manual button-click only',
+                'fields': [],
+            },
+        }
+
+        for choice_val, choice_label in WorkflowEventTrigger.TriggerType.choices:
+            types.append({
+                'value': choice_val,
+                'label': choice_label,
+                'config_schema': config_schemas.get(choice_val, {'description': '', 'fields': []}),
+            })
+
+        return Response({
+            'trigger_types': types,
+            'trigger_modes': [
+                {'value': v, 'label': l}
+                for v, l in Workflow.TriggerMode.choices
+            ],
+        })
+
     # -- Webhook: Ingest document and auto-execute --------------------------
 
     @action(detail=True, methods=['post'], url_path='webhook-ingest')
@@ -3094,7 +4060,6 @@ class WorkflowViewSet(viewsets.ModelViewSet):
           - metadata: optional JSON string of extra metadata
           - execute: "true" (default) or "false" to skip execution
         """
-        from .ai_inference import extract_document
         from .node_executor import execute_workflow
 
         workflow = self.get_object()
@@ -3123,12 +4088,6 @@ class WorkflowViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        # Ensure template is built
-        if not workflow.extraction_template:
-            workflow.rebuild_extraction_template()
-
-        template = workflow.extraction_template
-        doc_type = workflow.document_type
         created = []
 
         # Handle file uploads
@@ -3147,16 +4106,9 @@ class WorkflowViewSet(viewsets.ModelViewSet):
                 global_metadata={**extra_metadata, '_source': 'webhook'},
             )
 
-            if template:
-                try:
-                    extract_document(doc, template, document_type=doc_type)
-                except Exception as e:
-                    logger.error(f"Webhook extraction failed for {doc.id}: {e}")
-                    doc.extraction_status = 'failed'
-                    doc.save(update_fields=['extraction_status'])
-            else:
-                doc.extraction_status = 'completed'
-                doc.save(update_fields=['extraction_status'])
+            # Mark as completed — extraction handled by AI extract nodes
+            doc.extraction_status = 'completed'
+            doc.save(update_fields=['extraction_status'])
 
             created.append(doc)
 
@@ -3174,16 +4126,9 @@ class WorkflowViewSet(viewsets.ModelViewSet):
                 global_metadata={**extra_metadata, '_source': 'webhook'},
             )
 
-            if template:
-                try:
-                    extract_document(doc, template, document_type=doc_type)
-                except Exception as e:
-                    logger.error(f"Webhook extraction failed for {doc.id}: {e}")
-                    doc.extraction_status = 'failed'
-                    doc.save(update_fields=['extraction_status'])
-            else:
-                doc.extraction_status = 'completed'
-                doc.save(update_fields=['extraction_status'])
+            # Mark as completed — extraction handled by AI extract nodes
+            doc.extraction_status = 'completed'
+            doc.save(update_fields=['extraction_status'])
 
             created.append(doc)
 
@@ -3232,6 +4177,300 @@ class WorkflowViewSet(viewsets.ModelViewSet):
             'count': len(plugins),
         })
 
+    # -- Input Plugins: List / Configure ------------------------------------
+
+    @action(detail=False, methods=['get'], url_path='input-plugins')
+    def input_plugins_list(self, request):
+        """
+        List available input node plugins with metadata.
+        Query params:
+          ?type=processing  — only pipeline plugins (normalize, validate, …)
+          ?type=integration — only integration plugins (webhook, gmail, slack, teams)
+          (omit for all)
+        GET /api/clm/workflows/input-plugins/
+        """
+        plugin_type = request.query_params.get('type')
+        if plugin_type == 'processing':
+            from .input_plugins import list_processing_plugins
+            plugins = list_processing_plugins()
+        elif plugin_type == 'integration':
+            from .input_plugins import list_integration_plugins
+            plugins = list_integration_plugins()
+        else:
+            from .input_plugins import list_plugins as list_input_plugins
+            plugins = list_input_plugins()
+        return Response({
+            'plugins': plugins,
+            'count': len(plugins),
+        })
+
+    @action(detail=False, methods=['get'], url_path='input-plugins/integrations')
+    def input_plugins_integrations(self, request):
+        """
+        List integration plugins that can serve as input_type on nodes.
+        Includes org-level enabled/disabled status from OrganizationDocumentSettings.
+        GET /api/clm/workflows/input-plugins/integrations/
+        """
+        from .input_plugins import list_integration_plugins
+        plugins = list_integration_plugins()
+
+        # Read org-level enabled state
+        org = request.user.profile.organization if hasattr(request.user, 'profile') else None
+        org_enabled = {}
+        if org:
+            try:
+                from user_management.models import OrganizationDocumentSettings
+                settings_obj, _ = OrganizationDocumentSettings.objects.get_or_create(
+                    organization=org,
+                )
+                org_enabled = (settings_obj.preferences or {}).get('clm_integration_plugins', {})
+            except Exception:
+                pass
+
+        enriched = []
+        for p in plugins:
+            enriched.append({
+                **p,
+                'org_enabled': org_enabled.get(p['name'], p.get('default_enabled', False)),
+            })
+
+        return Response({
+            'plugins': enriched,
+            'count': len(enriched),
+        })
+
+    @action(detail=False, methods=['get', 'patch'], url_path='input-plugins/integration-settings')
+    def input_plugins_integration_settings(self, request):
+        """
+        GET:   Read org-level integration plugin enable/disable settings.
+        PATCH: Update org-level integration plugin enable/disable settings.
+
+        Body (PATCH): { "plugins": { "webhook": true, "gmail": false, "slack": true, "teams": false } }
+
+        GET  /api/clm/workflows/input-plugins/integration-settings/
+        PATCH /api/clm/workflows/input-plugins/integration-settings/
+        """
+        org = request.user.profile.organization if hasattr(request.user, 'profile') else None
+        if not org:
+            return Response({'error': 'Organization not found.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        from user_management.models import OrganizationDocumentSettings
+        settings_obj, _ = OrganizationDocumentSettings.objects.get_or_create(organization=org)
+        prefs = dict(settings_obj.preferences or {})
+
+        if request.method == 'GET':
+            from .input_plugins import list_integration_plugins
+            all_integrations = list_integration_plugins()
+            current = prefs.get('clm_integration_plugins', {})
+            result = {}
+            for p in all_integrations:
+                result[p['name']] = {
+                    'enabled': current.get(p['name'], p.get('default_enabled', False)),
+                    'display_name': p['display_name'],
+                    'description': p['description'],
+                    'icon': p['icon'],
+                }
+            return Response({'plugins': result})
+
+        # PATCH
+        new_settings = request.data.get('plugins')
+        if new_settings is None:
+            return Response(
+                {'error': 'Body must include "plugins" object.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        from .input_plugins import list_integration_plugins
+        valid_names = {p['name'] for p in list_integration_plugins()}
+        current = prefs.get('clm_integration_plugins', {})
+        for name, enabled in new_settings.items():
+            if name in valid_names:
+                current[name] = bool(enabled)
+
+        prefs['clm_integration_plugins'] = current
+        settings_obj.preferences = prefs
+        settings_obj.save(update_fields=['preferences'])
+
+        return Response({
+            'plugins': current,
+            'message': 'Integration plugin settings updated.',
+        })
+
+    @action(detail=True, methods=['get', 'patch'], url_path='input-plugins/config')
+    def input_plugins_config(self, request, pk=None):
+        """
+        GET:   Read the processing plugin configuration for a specific input node.
+               Only returns processing plugins (not integration plugins).
+        PATCH: Update the processing plugin configuration for a specific input node.
+
+        Query params (GET/PATCH): ?node_id=<uuid>
+        Body (PATCH): { "plugins": [ {"name": "...", "enabled": true, "priority": 10, "settings": {...}} ] }
+
+        GET  /api/clm/workflows/<id>/input-plugins/config/?node_id=<uuid>
+        PATCH /api/clm/workflows/<id>/input-plugins/config/?node_id=<uuid>
+        """
+        workflow = self.get_object()
+        node_id = request.query_params.get('node_id') or request.data.get('node_id')
+
+        if not node_id:
+            return Response(
+                {'error': 'node_id query parameter is required.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        try:
+            node = workflow.nodes.get(id=node_id, node_type='input')
+        except WorkflowNode.DoesNotExist:
+            return Response(
+                {'error': f'Input node {node_id} not found in this workflow.'},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        if request.method == 'GET':
+            # Return current plugin config (or defaults) — only processing plugins
+            from .input_plugins.pipeline import _get_node_plugin_config
+            from .input_plugins import get_plugin_info
+            current_config = _get_node_plugin_config(node)
+
+            enriched = []
+            for pc in current_config:
+                info = get_plugin_info(pc['name']) or {}
+                # Skip integration plugins — they are configured as input_type, not here
+                if info.get('plugin_type') == 'integration':
+                    continue
+                enriched.append({
+                    **info,
+                    **pc,
+                    'display_name': info.get('display_name', pc['name']),
+                    'description': info.get('description', ''),
+                    'icon': info.get('icon', '🔌'),
+                    'category': info.get('category', 'custom'),
+                    'hooks': info.get('hooks', []),
+                    'settings_schema': info.get('settings_schema', {}),
+                })
+
+            return Response({
+                'node_id': str(node.id),
+                'node_label': node.label,
+                'plugins': enriched,
+            })
+
+        # PATCH — update config (only accept processing plugins)
+        new_plugins = request.data.get('plugins')
+        if new_plugins is None:
+            return Response(
+                {'error': 'Body must include "plugins" array.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        # Validate plugin names — only processing plugins allowed here
+        from .input_plugins import PLUGIN_REGISTRY
+        valid_names = {
+            name for name, info in PLUGIN_REGISTRY.items()
+            if info.get('plugin_type', 'processing') == 'processing'
+        }
+        for pc in new_plugins:
+            pname = pc.get('name', '')
+            if pname not in valid_names:
+                return Response(
+                    {'error': f'Unknown or non-processing plugin: "{pname}". Valid: {sorted(valid_names)}'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+        # Store in node.config.input_plugins
+        config = dict(node.config or {})
+        config['input_plugins'] = new_plugins
+        node.config = config
+        node.save(update_fields=['config'])
+
+        return Response({
+            'node_id': str(node.id),
+            'plugins': new_plugins,
+            'message': 'Input plugin configuration updated.',
+        })
+
+    @action(detail=True, methods=['post'], url_path='input-plugins/run')
+    def input_plugins_run(self, request, pk=None):
+        """
+        Manually run the input plugin pipeline on all completed documents
+        for a specific input node.  Useful for re-processing after config change.
+        POST /api/clm/workflows/<id>/input-plugins/run/?node_id=<uuid>
+        """
+        workflow = self.get_object()
+        node_id = request.query_params.get('node_id') or request.data.get('node_id')
+        force = request.data.get('force', False)
+
+        if not node_id:
+            return Response(
+                {'error': 'node_id is required.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        try:
+            node = workflow.nodes.get(id=node_id, node_type='input')
+        except WorkflowNode.DoesNotExist:
+            return Response(
+                {'error': f'Input node {node_id} not found.'},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        from .input_plugins.pipeline import run_post_pipeline, run_batch_complete
+
+        docs = WorkflowDocument.objects.filter(
+            workflow=workflow,
+            input_node=node,
+            extraction_status='completed',
+        )
+        if not force:
+            docs = docs.exclude(global_metadata___plugin_processed=True)
+
+        results = []
+        for doc in docs:
+            try:
+                pr = run_post_pipeline(node=node, document=doc)
+                gm = dict(doc.global_metadata or {})
+                gm['_plugin_processed'] = True
+                if pr.plugin_log:
+                    gm['_plugin_log'] = pr.plugin_log
+                doc.global_metadata = gm
+                doc.save(update_fields=['global_metadata'])
+                results.append({
+                    'document_id': str(doc.id),
+                    'title': doc.title,
+                    'status': 'processed',
+                    'issues': len(pr.issues),
+                    'stage_reached': pr.stage_reached,
+                })
+            except Exception as e:
+                results.append({
+                    'document_id': str(doc.id),
+                    'title': doc.title,
+                    'status': 'error',
+                    'error': str(e),
+                })
+
+        processed = [r for r in results if r['status'] == 'processed']
+        if processed:
+            docs_list = list(docs)
+            run_batch_complete(
+                node=node,
+                documents=docs_list,
+                stats={
+                    'total': len(results),
+                    'ready': len(processed),
+                    'rejected': 0,
+                    'failed': len(results) - len(processed),
+                    'issues': sum(r.get('issues', 0) for r in processed),
+                },
+            )
+
+        return Response({
+            'node_id': str(node.id),
+            'results': results,
+            'processed': len(processed),
+            'errors': len(results) - len(processed),
+        })
+
     # -- AI: List available AI models ----------------------------------------
 
     @action(detail=False, methods=['get'], url_path='ai-models')
@@ -3247,29 +4486,22 @@ class WorkflowViewSet(viewsets.ModelViewSet):
             'count': len(models),
         })
 
-    # -- Document types: List available document types -----------------------
+    # -- Document types: DEPRECATED — extraction is now handled by AI extract nodes
+    # This endpoint is kept for backward compatibility but returns an empty list.
 
     @action(detail=False, methods=['get'], url_path='document-types')
     def document_types(self, request):
         """
-        List all available document types with their default extraction fields.
+        DEPRECATED: Document types are no longer used for input node
+        metadata extraction. Extraction is handled by dedicated AI extract
+        nodes in the workflow.
         GET /api/clm/workflows/document-types/
-        Returns list of { key, label, description, icon, fields: [...] }
         """
-        from .ai_inference import DOCUMENT_TYPE_TEMPLATES
-        types = []
-        for key, info in DOCUMENT_TYPE_TEMPLATES.items():
-            types.append({
-                'key': key,
-                'label': info['label'],
-                'description': info['description'],
-                'icon': info['icon'],
-                'fields': sorted(info['fields'].keys()),
-                'field_count': len(info['fields']),
-            })
         return Response({
-            'document_types': types,
-            'count': len(types),
+            'document_types': [],
+            'count': 0,
+            'deprecated': True,
+            'message': 'Document type-based extraction has been removed. Use AI extract nodes instead.',
         })
 
     # -- Action: Execute action node manually --------------------------------
@@ -4612,7 +5844,7 @@ class WorkflowViewSet(viewsets.ModelViewSet):
 
         POST /api/clm/workflows/{id}/chat/
           body: {"message": "Add a rule node that filters invoices over $5k",
-                 "model": "gemini-2.0-flash",  // optional
+                 "model": "gemini-2.5-flash",  // optional
                  "auto_apply": true}            // optional, default true
           → Sends message to AI, applies proposed changes, returns reply.
         """
@@ -4637,7 +5869,7 @@ class WorkflowViewSet(viewsets.ModelViewSet):
         result = chat_with_workflow(
             workflow=workflow,
             user_message=serializer.validated_data['message'],
-            model_id=serializer.validated_data.get('model', 'gemini-2.0-flash'),
+            model_id=serializer.validated_data.get('model', 'gemini-2.5-flash'),
             auto_apply=serializer.validated_data.get('auto_apply', True),
             user=request.user if request.user.is_authenticated else None,
         )
@@ -5384,14 +6616,13 @@ class WorkflowViewSet(viewsets.ModelViewSet):
         if not workflow.extraction_template:
             workflow.rebuild_extraction_template()
         template = workflow.extraction_template
-        doc_type = workflow.document_type
 
         results = []
         created_ids = []
         failed_count = 0
         for doc in docs:
             try:
-                run_extraction(doc, template, document_type=doc_type)
+                run_extraction(doc, template)
                 results.append({'id': str(doc.id), 'status': 'completed'})
                 created_ids.append(str(doc.id))
             except Exception as e:
@@ -5481,18 +6712,9 @@ class WorkflowViewSet(viewsets.ModelViewSet):
                             input_node=node,
                             global_metadata={'_source': 'folder_upload', '_folder_id': str(folder_id)},
                         )
-                        if workflow.extraction_template:
-                            try:
-                                from .ai_inference import extract_document
-                                extract_document(doc, workflow.extraction_template,
-                                                 document_type=workflow.document_type)
-                            except Exception as e:
-                                doc.extraction_status = 'failed'
-                                doc.save(update_fields=['extraction_status'])
-                                errors.append(str(e))
-                        else:
-                            doc.extraction_status = 'completed'
-                            doc.save(update_fields=['extraction_status'])
+                        # Mark as completed — extraction handled by AI extract nodes
+                        doc.extraction_status = 'completed'
+                        doc.save(update_fields=['extraction_status'])
 
             elif source_type == 'dms_import':
                 dms_doc_ids = config.get('dms_document_ids', [])
@@ -5525,18 +6747,9 @@ class WorkflowViewSet(viewsets.ModelViewSet):
                             text_source='direct' if dms_doc.extracted_text else 'none',
                             global_metadata={'_source': 'dms_import', '_dms_document_id': str(dms_doc.id)},
                         )
-                        if workflow.extraction_template:
-                            try:
-                                from .ai_inference import extract_document
-                                extract_document(doc, workflow.extraction_template,
-                                                 document_type=workflow.document_type)
-                            except Exception as e:
-                                doc.extraction_status = 'failed'
-                                doc.save(update_fields=['extraction_status'])
-                                errors.append(str(e))
-                        else:
-                            doc.extraction_status = 'completed'
-                            doc.save(update_fields=['extraction_status'])
+                        # Mark as completed — extraction handled by AI extract nodes
+                        doc.extraction_status = 'completed'
+                        doc.save(update_fields=['extraction_status'])
 
             elif source_type == 'sheets':
                 sheet_id = config.get('sheet_id', '')
@@ -5680,18 +6893,9 @@ class WorkflowViewSet(viewsets.ModelViewSet):
                 input_node=node,
                 global_metadata={'_source': 'folder_upload', '_folder_id': str(folder_id)},
             )
-            if workflow.extraction_template:
-                try:
-                    from .ai_inference import extract_document
-                    extract_document(doc, workflow.extraction_template,
-                                     document_type=workflow.document_type)
-                except Exception as e:
-                    logger.error(f"Extraction failed for folder doc {doc.id}: {e}")
-                    doc.extraction_status = 'failed'
-                    doc.save(update_fields=['extraction_status'])
-            else:
-                doc.extraction_status = 'completed'
-                doc.save(update_fields=['extraction_status'])
+            # Mark as completed — extraction handled by AI extract nodes
+            doc.extraction_status = 'completed'
+            doc.save(update_fields=['extraction_status'])
             created.append(doc)
 
         # Record history
@@ -5791,18 +6995,9 @@ class WorkflowViewSet(viewsets.ModelViewSet):
                 text_source='direct' if dms_doc.extracted_text else 'none',
                 global_metadata={'_source': 'dms_import', '_dms_document_id': str(dms_doc.id)},
             )
-            if workflow.extraction_template:
-                try:
-                    from .ai_inference import extract_document
-                    extract_document(doc, workflow.extraction_template,
-                                     document_type=workflow.document_type)
-                except Exception as e:
-                    logger.error(f"Extraction failed for DMS doc {doc.id}: {e}")
-                    doc.extraction_status = 'failed'
-                    doc.save(update_fields=['extraction_status'])
-            else:
-                doc.extraction_status = 'completed'
-                doc.save(update_fields=['extraction_status'])
+            # Mark as completed — extraction handled by AI extract nodes
+            doc.extraction_status = 'completed'
+            doc.save(update_fields=['extraction_status'])
             created.append(doc)
 
         InputNodeHistory.objects.create(
@@ -5959,23 +7154,30 @@ class WorkflowNodeViewSet(viewsets.ModelViewSet):
         return qs
 
     def perform_create(self, serializer):
-        """Auto-rebuild extraction template when a rule node is created."""
+        """
+        After creating any node, rebuild the extraction template from
+        the canvas and recompute the config hash.  This ensures the
+        workflow always reflects what's on the canvas, not stale DB state.
+        """
         node = serializer.save()
-        if node.node_type == 'rule':
-            node.workflow.rebuild_extraction_template()
+        node.workflow.on_canvas_changed()
 
     def perform_update(self, serializer):
-        """Auto-rebuild extraction template when a rule node is updated."""
+        """
+        After updating any node (config, position, label), rebuild
+        extraction template and recompute config hash from the canvas.
+        """
         node = serializer.save()
-        if node.node_type == 'rule':
-            node.workflow.rebuild_extraction_template()
+        node.workflow.on_canvas_changed()
 
     def perform_destroy(self, instance):
+        """
+        After deleting a node, rebuild from canvas so removed fields
+        disappear and the config hash reflects the new DAG shape.
+        """
         workflow = instance.workflow
-        node_type = instance.node_type
         instance.delete()
-        if node_type == 'rule':
-            workflow.rebuild_extraction_template()
+        workflow.on_canvas_changed()
 
     # ── Sheet node actions ──────────────────────────────────────────
 
@@ -6096,6 +7298,19 @@ class NodeConnectionViewSet(viewsets.ModelViewSet):
             qs = qs.filter(workflow_id=workflow_id)
 
         return qs
+
+    def perform_create(self, serializer):
+        """Recompute config hash when a new connection is added."""
+        conn = serializer.save()
+        # Connections change the DAG shape — rebuild template not needed
+        # (only nodes contribute fields) but hash must be recomputed.
+        conn.workflow.on_canvas_changed(rebuild_template=False)
+
+    def perform_destroy(self, instance):
+        """Recompute config hash when a connection is removed."""
+        workflow = instance.workflow
+        instance.delete()
+        workflow.on_canvas_changed(rebuild_template=False)
 
 
 # ---------------------------------------------------------------------------
@@ -6238,18 +7453,8 @@ class PublicUploadView(APIView):
             return Response({'error': 'No valid files found.'},
                             status=status.HTTP_400_BAD_REQUEST)
 
-        # Ensure extraction template
-        if not workflow.extraction_template:
-            workflow.rebuild_extraction_template()
-
-        template = workflow.extraction_template
-
-        # Determine input node + doc type
+        # Determine input node
         input_node_obj = link.input_node
-        if input_node_obj:
-            doc_type = (input_node_obj.config or {}).get('document_type', '')
-        else:
-            doc_type = workflow.document_type
 
         known_types = WorkflowViewSet.KNOWN_TYPES
         created = []
@@ -6298,19 +7503,9 @@ class PublicUploadView(APIView):
                 },
             )
 
-            # AI extraction
-            if template:
-                try:
-                    extract_document(doc, template, document_type=doc_type)
-                    doc.last_extracted_template = template
-                    doc.save(update_fields=['last_extracted_template'])
-                except Exception as e:
-                    logger.error(f"Public upload extraction failed for {doc.id}: {e}")
-                    doc.extraction_status = 'failed'
-                    doc.save(update_fields=['extraction_status'])
-            else:
-                doc.extraction_status = 'completed'
-                doc.save(update_fields=['extraction_status'])
+            # Mark as completed — extraction handled by AI extract nodes
+            doc.extraction_status = 'completed'
+            doc.save(update_fields=['extraction_status'])
 
             created.append(doc)
 

@@ -26,6 +26,7 @@ import MasterDocumentsPage from './pages/MasterDocumentsPage';
 import QuickLatexPage from './pages/QuickLatexPage';
 import ProcurementDashboardFull from './pages/ProcurementDashboardFull';
 import SheetsApp from './pages/SheetsApp';
+import AttachmentsPage from './pages/AttachmentsPage';
 import PublicSheetForm from './components/sheets/PublicSheetForm';
 import { documentService } from './services/documentService';
 import { getDocumentEditorRoute } from './utils/documentRouting';
@@ -169,6 +170,7 @@ function App() {
                   <ApprovalPanel />
                 </FeatureRoute>
               } />
+              <Route path="attachments" element={<AttachmentsPage />} />
               <Route path="sheets/*" element={<SheetsApp />} />
               <Route path="admin" element={<OrgAdmin />} />
             </Route>

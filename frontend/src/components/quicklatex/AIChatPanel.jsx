@@ -25,6 +25,8 @@ import {
   Plus,
   Minus,
   ChevronRight,
+  AlertCircle,
+  MessageSquare,
 } from 'lucide-react';
 
 const QUICK_ACTIONS = [
@@ -213,12 +215,21 @@ const DiffView = ({ previousCode, code, maxLines = 30 }) => {
   );
 };
 
+/* ── Action suggestions for compilation / error follow-ups ───────────── */
+
+const ACTION_SUGGESTIONS = [
+  { label: 'Ask AI to fix it', prompt: 'Fix the compilation errors in the current code. Ensure the document compiles without errors.' },
+  { label: 'Simplify code', prompt: 'Simplify the LaTeX code to remove any advanced packages or constructs that might cause compilation issues.' },
+  { label: 'Undo change', prompt: null },  // handled via onUndo
+];
+
 /* ── Single chat message bubble ──────────────────────────────────────── */
 
-const ChatMessage = ({ message, onUndo }) => {
+const ChatMessage = ({ message, onUndo, onFollowUp }) => {
   const isUser = message.role === 'user';
   const [copied, setCopied] = useState(false);
   const [showDiff, setShowDiff] = useState(true);
+  const [showErrors, setShowErrors] = useState(false);
 
   const handleCopy = () => {
     if (message.code) {
@@ -235,12 +246,21 @@ const ChatMessage = ({ message, onUndo }) => {
   // Show undo button for AI messages that have previousCode
   const canUndo = !isUser && !message.error && message.previousCode != null && message.mode !== 'undo';
 
+  // Action-required state (compilation failure or error)
+  const needsAction = !isUser && message.actionRequired;
+  const compErrors = message.compilationErrors;
+
   return (
     <div className={`flex gap-2 ${isUser ? 'justify-end' : 'justify-start'}`}>
       {/* AI avatar */}
       {!isUser && (
-        <div className="w-6 h-6 rounded-full bg-violet-100 flex items-center justify-center flex-shrink-0 mt-0.5">
-          <Bot size={13} className="text-violet-600" />
+        <div className={`w-6 h-6 rounded-full flex items-center justify-center flex-shrink-0 mt-0.5 ${
+          needsAction ? 'bg-amber-100' : 'bg-violet-100'
+        }`}>
+          {needsAction
+            ? <AlertCircle size={13} className="text-amber-600" />
+            : <Bot size={13} className="text-violet-600" />
+          }
         </div>
       )}
 
@@ -251,6 +271,10 @@ const ChatMessage = ({ message, onUndo }) => {
               ? 'bg-gray-900 text-gray-100 rounded-br-sm'
               : message.error
               ? 'bg-red-50 text-red-700 border border-red-200 rounded-bl-sm'
+              : needsAction
+              ? 'bg-amber-50 text-amber-800 border border-amber-200 rounded-bl-sm'
+              : message.autoFixed
+              ? 'bg-emerald-50 text-emerald-700 border border-emerald-200 rounded-bl-sm'
               : message.mode === 'undo'
               ? 'bg-amber-50 text-amber-700 border border-amber-200 rounded-bl-sm'
               : 'bg-gray-100 text-gray-800 rounded-bl-sm'
@@ -260,8 +284,80 @@ const ChatMessage = ({ message, onUndo }) => {
           {message.text}
         </div>
 
+        {/* Compilation error details (collapsible) */}
+        {needsAction && compErrors && (
+          <div className="mt-1 px-1">
+            {compErrors.errorSummary && (
+              <p className="text-[10px] text-amber-700 font-medium mb-1">{compErrors.errorSummary}</p>
+            )}
+            {compErrors.missingPackages?.length > 0 && (
+              <div className="flex flex-wrap gap-1 mb-1">
+                {compErrors.missingPackages.map((pkg) => (
+                  <span key={pkg} className="px-1.5 py-0.5 text-[9px] bg-red-100 text-red-600 rounded font-mono">
+                    {pkg}
+                  </span>
+                ))}
+              </div>
+            )}
+            {compErrors.errorLines?.length > 0 && (
+              <>
+                <button
+                  onClick={() => setShowErrors(!showErrors)}
+                  className="text-[10px] text-amber-500 hover:text-amber-700 flex items-center gap-0.5 mb-1"
+                >
+                  <ChevronRight size={9} className={`transition-transform ${showErrors ? 'rotate-90' : ''}`} />
+                  {showErrors ? 'Hide errors' : `Show ${compErrors.errorLines.length} error(s)`}
+                </button>
+                {showErrors && (
+                  <div className="space-y-1 mb-1.5">
+                    {compErrors.errorLines.map((e, i) => (
+                      <div key={i} className="text-[10px] bg-red-50 border border-red-100 rounded px-2 py-1">
+                        {e.line && <span className="font-mono text-red-400 mr-1">L{e.line}</span>}
+                        <span className="text-red-700">{e.message}</span>
+                        {e.context && <span className="text-red-400 ml-1 italic">{e.context}</span>}
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </>
+            )}
+          </div>
+        )}
+
+        {/* Action-required — prompt user for follow-up */}
+        {needsAction && onFollowUp && (
+          <div className="mt-1.5 px-1">
+            <div className="flex items-center gap-1 mb-1.5">
+              <MessageSquare size={10} className="text-amber-500" />
+              <span className="text-[10px] font-medium text-amber-600">
+                {message.error ? 'Something went wrong — what would you like to do?' : 'Your input is needed to resolve this'}
+              </span>
+            </div>
+            <div className="flex flex-wrap gap-1">
+              {ACTION_SUGGESTIONS.map((s) => (
+                <button
+                  key={s.label}
+                  onClick={() => {
+                    if (s.prompt === null) {
+                      // Undo — use the previousCode from this message or the preceding code message
+                      if (message.previousCode != null && onUndo) {
+                        onUndo(message.id, message.previousCode);
+                      }
+                    } else {
+                      onFollowUp(s.prompt);
+                    }
+                  }}
+                  className="px-2 py-0.5 text-[10px] rounded-full border border-amber-200 bg-amber-50 text-amber-700 hover:bg-amber-100 hover:border-amber-300 transition-colors"
+                >
+                  {s.label}
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+
         {/* Show metadata for AI responses */}
-        {!isUser && !message.error && (
+        {!isUser && !message.error && !message.actionRequired && !message.autoFixed && (
           <div className="flex items-center gap-2 mt-1 px-1 flex-wrap">
             {message.mode && message.mode !== 'undo' && (
               <span className={`text-[10px] px-1.5 py-0.5 rounded-full font-medium ${
@@ -399,6 +495,16 @@ const AIChatPanel = ({
     }
   };
 
+  // Follow-up handler for action-required messages (sends prompt as edit)
+  const handleFollowUp = useCallback((prompt) => {
+    if (!prompt || generating) return;
+    onGenerate({
+      prompt,
+      replace: true,
+      mode: 'edit',
+    });
+  }, [generating, onGenerate]);
+
   const hasMessages = chatMessages.length > 0;
 
   return (
@@ -471,6 +577,7 @@ const AIChatPanel = ({
             key={msg.id || i}
             message={msg}
             onUndo={onUndo}
+            onFollowUp={handleFollowUp}
           />
         ))}
 

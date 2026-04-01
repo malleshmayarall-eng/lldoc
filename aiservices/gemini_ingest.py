@@ -21,7 +21,7 @@ from django.utils.dateparse import parse_date
 from documents.models import Document, Section, Paragraph, Table
 
 
-DEFAULT_GEMINI_MODEL = os.environ.get('GEN_MODEL', 'gemini-2.0-flash')
+DEFAULT_GEMINI_MODEL = os.environ.get('GEN_MODEL', 'gemini-2.5-flash')
 DEFAULT_GEMINI_URL = os.environ.get(
     'GEN_API_URL',
     'https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent'

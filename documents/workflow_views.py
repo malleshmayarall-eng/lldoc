@@ -453,7 +453,7 @@ class DocumentWorkflowViewSet(viewsets.ModelViewSet):
         # Sync document status when workflow transitions to key states
         WORKFLOW_TO_DOC_STATUS = {
             'review': 'under_review',
-            'approved': 'approved',
+            'approved': 'done',
             'executed': 'done',
         }
         if new_status in WORKFLOW_TO_DOC_STATUS:

@@ -16,6 +16,7 @@ import {
   ExternalLink
 } from 'lucide-react';
 import { documentFileService } from '../services/documentFileService';
+import attachmentService from '../services/attachmentService';
 import DocumentUploadModal from './DocumentUploadModal';
 import './DocumentLibraryBrowser.css';
 
@@ -62,8 +63,9 @@ const DocumentLibraryBrowser = ({
       setLoading(true);
       setError(null);
       
-      const data = await documentFileService.getMyLibrary({
-        ordering: sortBy
+      const data = await attachmentService.list({
+        file_kind: 'document',
+        sort: sortBy,
       });
       
       // Handle different response formats
@@ -78,6 +80,15 @@ const DocumentLibraryBrowser = ({
         fileArray = data.data.files;
       }
       
+      // Normalise attachment fields to file fields expected by the grid
+      fileArray = fileArray.map((a) => ({
+        ...a,
+        file: a.file || a.url,
+        file_url: a.file || a.url,
+        file_type: a.file_kind_display || a.mime_type?.split('/').pop() || 'document',
+        file_size_display: a.file_size ? `${(a.file_size / 1024).toFixed(1)} KB` : '',
+      }));
+
       setFiles(fileArray);
     } catch (error) {
       console.error('❌ Failed to load files:', error);

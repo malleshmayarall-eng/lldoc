@@ -56,7 +56,7 @@ def infer_document(request, pk):
     Incremental: unchanged components are skipped.
 
     POST body (optional):
-        {"model": "gemini-2.0-flash", "force": false}
+        {"model": "gemini-2.5-flash", "force": false}
     """
     document = get_object_or_404(Document, pk=pk)
 
@@ -84,7 +84,7 @@ def infer_section(request, pk):
     Run bottom-up inference for a single section subtree.
 
     POST body (optional):
-        {"model": "gemini-2.0-flash", "force": false}
+        {"model": "gemini-2.5-flash", "force": false}
     """
     section = get_object_or_404(Section, pk=pk)
     if not section.document:

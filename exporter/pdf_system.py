@@ -501,6 +501,22 @@ def _resolve_image_placeholders_in_text(text: str, document) -> str:
                 else:
                     url_map[str(img.id)] = url
 
+        # Fallback to Attachment table for UUIDs not found in DocumentImage
+        missing = [u for u in uuid_ids if u not in url_map]
+        if missing:
+            try:
+                from attachments.models import Attachment
+                for att in Attachment.objects.filter(id__in=missing, file_kind='image'):
+                    url = att.get_url()
+                    if url:
+                        full_path = os.path.join(settings.BASE_DIR, url.lstrip('/'))
+                        if os.path.isfile(full_path):
+                            url_map[str(att.id)] = full_path
+                        else:
+                            url_map[str(att.id)] = url
+            except Exception:
+                pass
+
     def _replace(match):
         identifier = match.group(1).strip()
         if _UUID_RE.match(identifier):

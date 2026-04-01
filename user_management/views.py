@@ -1,4 +1,10 @@
 from django.shortcuts import render
+from django.conf import settings
+from django.core.mail import send_mail
+from django.utils import timezone
+from datetime import timedelta
+import secrets
+import logging
 from rest_framework import viewsets, status, permissions
 from rest_framework.decorators import action
 from rest_framework.response import Response
@@ -11,6 +17,7 @@ from .models import (
     InvitationToken,
     OrganizationDocumentSettings,
     UserDocumentSettings,
+    InputNodeCredential,
     DOMAIN_CHOICES,
     ALL_FEATURES,
     get_domain_feature_defaults,
@@ -24,10 +31,14 @@ from .serializers import (
     UserSerializer,
     OrganizationDocumentSettingsSerializer,
     UserDocumentSettingsSerializer,
+    InputNodeCredentialSerializer,
+    InputNodeCredentialWriteSerializer,
     DomainChoiceSerializer,
     DomainSettingsSerializer,
     FeatureFlagsSerializer,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class OrganizationViewSet(viewsets.ModelViewSet):
@@ -415,6 +426,67 @@ class UserProfileViewSet(viewsets.ModelViewSet):
         serializer = UserDocumentSettingsSerializer(settings_obj)
         return Response(serializer.data)
 
+    # ── Input-Node Credentials (saved in profile) ─────────────────────
+
+    @action(detail=False, methods=['get', 'post'], url_path='me/input-credentials')
+    def my_input_credentials(self, request):
+        """
+        GET  → list all saved credentials (secrets redacted).
+        POST → create a new credential.
+        Optionally filter by ?type=email_inbox|google_drive|…
+        """
+        try:
+            profile = request.user.profile
+        except Exception:
+            return Response({'error': 'Profile not found'}, status=status.HTTP_404_NOT_FOUND)
+
+        if request.method == 'POST':
+            serializer = InputNodeCredentialWriteSerializer(data=request.data)
+            if not serializer.is_valid():
+                return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+            serializer.save(profile=profile)
+            # Return redacted version
+            obj = InputNodeCredential.objects.get(pk=serializer.instance.pk)
+            return Response(InputNodeCredentialSerializer(obj).data, status=status.HTTP_201_CREATED)
+
+        qs = profile.input_credentials.all()
+        cred_type = request.query_params.get('type')
+        if cred_type:
+            qs = qs.filter(credential_type=cred_type)
+        return Response(InputNodeCredentialSerializer(qs, many=True).data)
+
+    @action(detail=False, methods=['get', 'patch', 'delete'],
+            url_path=r'me/input-credentials/(?P<cred_id>[0-9a-f-]+)')
+    def my_input_credential_detail(self, request, cred_id=None):
+        """
+        GET    → single credential (redacted).
+        PATCH  → update label / credentials.
+        DELETE → remove.
+        """
+        try:
+            profile = request.user.profile
+        except Exception:
+            return Response({'error': 'Profile not found'}, status=status.HTTP_404_NOT_FOUND)
+
+        try:
+            obj = profile.input_credentials.get(pk=cred_id)
+        except InputNodeCredential.DoesNotExist:
+            return Response({'error': 'Credential not found'}, status=status.HTTP_404_NOT_FOUND)
+
+        if request.method == 'DELETE':
+            obj.delete()
+            return Response(status=status.HTTP_204_NO_CONTENT)
+
+        if request.method == 'PATCH':
+            serializer = InputNodeCredentialWriteSerializer(obj, data=request.data, partial=True)
+            if not serializer.is_valid():
+                return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+            serializer.save()
+            obj.refresh_from_db()
+            return Response(InputNodeCredentialSerializer(obj).data)
+
+        return Response(InputNodeCredentialSerializer(obj).data)
+
     @action(detail=False, methods=['post'], url_path='me/change-password')
     def change_password(self, request):
         """Change the current user's password."""
@@ -649,6 +721,63 @@ class InvitationTokenViewSet(viewsets.ModelViewSet):
             queryset = queryset.filter(is_expired=is_expired.lower() == 'true')
         
         return queryset
+
+    def _send_invitation_email(self, invitation):
+        if not invitation.email:
+            return
+
+        frontend_base = getattr(settings, 'FRONTEND_URL', None) or 'http://localhost:3000'
+        invitation_link = f"{frontend_base}/accept-invitation/{invitation.token}"
+        subject = f"You are invited to join {invitation.organization.name}"
+        message = (
+            f"Hello,\n\n"
+            f"You have been invited to join {invitation.organization.name} as {invitation.role.display_name or invitation.role.name}.\n"
+            f"Please accept the invite by visiting: {invitation_link}\n\n"
+            f"Personal message: {invitation.message or 'No message provided.'}\n\n"
+            "If you did not request this invitation, please ignore this email.\n"
+        )
+        html_message = f"""
+        <div style='font-family: Arial, sans-serif; max-width: 600px; margin: auto;'>
+            <h2>Invitation to join {invitation.organization.name}</h2>
+            <p>You were invited as <strong>{invitation.role.display_name or invitation.role.name}</strong>.</p>
+            <p>{invitation.message or 'No personal message provided.'}</p>
+            <p><a href='{invitation_link}' style='padding: 12px 20px; background: #2563eb; color: white; text-decoration: none; border-radius: 6px;'>Accept Invitation</a></p>
+            <p style='font-size:12px;color:#666;'>Link expires on {invitation.expires_at.strftime('%Y-%m-%d %H:%M %Z') if invitation.expires_at else 'never'}.</p>
+        </div>
+        """
+        try:
+            send_mail(
+                subject=subject,
+                message=message,
+                from_email=getattr(settings, 'DEFAULT_FROM_EMAIL', settings.EMAIL_HOST_USER),
+                recipient_list=[invitation.email],
+                html_message=html_message,
+                fail_silently=False,
+            )
+            logger.info(f"Invitation email sent to {invitation.email} (token={invitation.token[:12]}...)")
+        except Exception as exc:
+            logger.error(f"Failed to send invitation email to {invitation.email}: {exc}")
+
+    def create(self, request, *args, **kwargs):
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+
+        expires_at = data.get('expires_at') or (timezone.now() + timedelta(days=7))
+        token = secrets.token_urlsafe(32)
+        invitation = InvitationToken.objects.create(
+            email=data['email'],
+            organization=data['organization'],
+            role=data['role'],
+            message=data.get('message', ''),
+            token=token,
+            expires_at=expires_at,
+            invited_by=getattr(request.user, 'profile', None),
+        )
+
+        self._send_invitation_email(invitation)
+
+        return Response(InvitationTokenSerializer(invitation, context={'request': request}).data, status=status.HTTP_201_CREATED)
     
     @action(detail=False, methods=['post'])
     def validate_token(self, request):
@@ -680,6 +809,6 @@ class InvitationTokenViewSet(viewsets.ModelViewSet):
     def resend(self, request, pk=None):
         """Resend an invitation email."""
         invitation = self.get_object()
-        # TODO: Implement email sending logic
+        self._send_invitation_email(invitation)
         return Response({'status': 'invitation resent'})
 

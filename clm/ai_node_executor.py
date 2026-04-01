@@ -30,7 +30,7 @@ Four output modes — the AI node is both an **extractor** and a **gate**:
 
 Config schema (stored in node.config):
   {
-    "model": "gemini-2.0-flash",
+    "model": "gemini-2.5-flash",
     "system_prompt": "...",
     "output_format": "json_extract" | "yes_no" | "text" | "derived",
     "output_key": "ai_analysis",           // base key in extracted_metadata
@@ -112,23 +112,17 @@ def _store_cached_response(
 # ---------------------------------------------------------------------------
 
 AI_MODELS = {
-    'gemini-2.0-flash': {
+    'gemini-2.5-flash': {
         'provider': 'gemini',
-        'display_name': 'Gemini 2.0 Flash',
+        'display_name': 'Gemini 2.5 Flash',
         'description': 'Fast, cost-effective for most tasks',
         'icon': '✨',
     },
-    'gemini-1.5-pro': {
+    'gemini-2.5-pro-preview-05-06': {
         'provider': 'gemini',
-        'display_name': 'Gemini 1.5 Pro',
+        'display_name': 'Gemini 2.5 Pro',
         'description': 'Best quality, longer context window',
         'icon': '🧠',
-    },
-    'gemini-1.5-flash': {
-        'provider': 'gemini',
-        'display_name': 'Gemini 1.5 Flash',
-        'description': 'Balance of speed and quality',
-        'icon': '⚡',
     },
     'gpt-4o': {
         'provider': 'openai',
@@ -140,12 +134,6 @@ AI_MODELS = {
         'provider': 'openai',
         'display_name': 'GPT-4o Mini',
         'description': 'Fast, affordable OpenAI model',
-        'icon': '🤖',
-    },
-    'gpt-3.5-turbo': {
-        'provider': 'openai',
-        'display_name': 'GPT-3.5 Turbo',
-        'description': 'Legacy fast model',
         'icon': '🤖',
     },
 }
@@ -521,7 +509,7 @@ def execute_ai_node(
     Documents always pass through (not filtered) — AI enriches metadata.
     """
     config = node.config or {}
-    model_id = config.get('model', 'gemini-2.0-flash')
+    model_id = config.get('model', 'gemini-2.5-flash')
     system_prompt = config.get('system_prompt', '')
     output_format = config.get('output_format', 'text')  # json_extract | yes_no | text | derived
     output_key = config.get('output_key', 'ai_analysis')

@@ -428,6 +428,11 @@ def check_email_inbox(node: WorkflowNode, user=None, auto_execute_override=None)
     from django.utils import timezone as _tz
 
     config = node.config or {}
+
+    # Resolve saved credentials (if credential_id is present)
+    from clm.credential_resolver import resolve_credentials
+    config = resolve_credentials(config, user=user)
+
     host = config.get('email_host', '')
     email_user = config.get('email_user', '')
     email_pass = config.get('email_password', '')
